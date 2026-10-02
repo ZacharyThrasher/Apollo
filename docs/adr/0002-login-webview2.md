@@ -1,6 +1,6 @@
 # ADR 0002 — In-app sign-in via WebView2 cookie capture
 
-Status: **accepted for the first usable version, with caveats below** (M0 step 5 evidence). Departs from BUILD_SPEC AUTH-03,
+Status: **owner-requested deviation from AUTH-03; evidence positive on one run (below); adoption to be confirmed by the owner.** Departs from BUILD_SPEC AUTH-03,
 which defers an embedded login helper to its own ADR; this is that ADR.
 
 ## Context
