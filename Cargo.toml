@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["spikes/m0-gpui", "spikes/m0-media"]
+members = ["spikes/m0-gpui", "spikes/m0-media", "spikes/m0-login"]
 
 # gpui is consumed as a git dependency of the Zed workspace and does NOT inherit
 # Zed's [patch.crates-io]. Mirrored here from zed @ f37989fbdf84 (only what the
