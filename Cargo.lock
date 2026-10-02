@@ -190,6 +190,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "apollo-m0-resolve"
+version = "0.0.0"
+dependencies = [
+ "libmpv2",
+ "libmpv2-sys",
+ "serde_json",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
