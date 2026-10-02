@@ -45,6 +45,9 @@ Duplicate-dependency audit: `cargo tree -d` lists duplicated crates (e.g. `windo
 `thiserror` 1/2, `png`, `bitflags` 1/2, `getrandom` 0.3/0.4). All come from third-party
 version skew; none is a second GPUI. Re-run `cargo tree -d` after any dependency change.
 
+`Cargo.lock` sha256 at this commit: `78632c9c115479ddaa6e45dc27482f4255007bdaba8a0a87ae2077a8e226997b` (re-hash after any dependency change).
+yt-dlp exe bundles Python 3.10.11 and `yt_dlp_ejs` 0.8.0 (see `yt-dlp -v`); no EJS was downloaded at runtime.
+
 Build time: first clean `cargo build -p apollo-m0-gpui` ≈ 1m52s on this PC (debug).
 
 ## Results
@@ -63,14 +66,35 @@ Build time: first clean `cargo build -p apollo-m0-gpui` ≈ 1m52s on this PC (de
 | 3d | End-of-file event | **done** | `EndFile(reason=EOF)` on all 3 files |
 | 3e | Audible output | **partial** | WASAPI opened and clock advanced in real time; not machine-verifiable that sound was heard |
 | 4 | OS media command reaches app | **done** | injected `VK_MEDIA_PLAY_PAUSE` → `Pause`, `VK_MEDIA_NEXT_TRACK` → `Next` via SMTC |
-| 5a | WebView2 sign-in completes | **not_run** | needs the owner at the keyboard |
-| 5b | Captured cookies validate | **not_run** | |
-| 5c | `yt-dlp --cookies-from-browser firefox` | **not_run** | |
-| 6 | Authenticated resolution (10+ tracks, no PO-token service) | **not_run** | owner present required |
+| 5a | WebView2 sign-in completes | **done** | Google accepted sign-in in WebView2 (identifier page, passkey prompt, then `music.youtube.com`); no "rejected" page |
+| 5b | Captured cookies validate | **done** | 23 cookies read automatically (incl. HttpOnly `SAPISID`, `__Secure-1/3PAPISID`, `SID`, `__Secure-1/3PSID`, `LOGIN_INFO`); authenticated `account/account_menu` → HTTP 200, `logged_in`=1, account header and name present |
+| 5c | `yt-dlp --cookies-from-browser firefox` | **done** | Liked Music listing 131 entries (same as WebView2 cookies); 3/3 tracks resolved and played (seeks + EOF) |
+| 6a | Authenticated resolution, no PO-token service, 10 tracks | **done** | 10/10: plain HTTPS googlevideo audio, id matched, no DRM, seeks start/mid/end exact, EOF on all |
+| 6b | Full-duration real-time playback | **partial** | 2 tracks (75 s, 186 s) played start to EOF in 78.9 s / 189.7 s wall. The other 8 reached EOF via seek-end only; longest (462 s) not played through |
+| 6c | Anonymous control | **done** | Same 10 tracks resolve anonymously too (~130k Opus). Only the authenticated session got itag 774 (261-283k Opus) on 8/10 and 141 (258k AAC). A successful URL lookup is NOT account evidence |
+| 6d | Invalid-credentials negative case | **done** | Well-formed cookie file with fake values: Liked Music listing = 0 entries, probe fails; no credentials at all: probe refuses to run (exit 2) |
+| 6e | Brand/channel identity (TEST-03) | **not_run** | single identity only |
+| 6f | Stale/expired lease, forced resolver timeout kill (TEST-13/28) | **not_run** | timeout + `taskkill /T` path written, never triggered |
 
 Acceptance tests touched: TEST-21 (codec/seek sample: **local fixtures only**, no
 authenticated media), TEST-29 (**partial**: media key reaches the sole app; metadata/progress
 display not checked against the OS overlay).
+
+## Resolver policy observed (step 6)
+
+- yt-dlp 2026.08.19 standalone exe; bundled `yt_dlp_ejs` 0.8.0; Deno 2.9.7 passed via `--js-runtimes deno:<path>`.
+- Flags: `--ignore-config --no-plugin-dirs --no-cache-dir --no-remote-components --no-update --skip-download --no-playlist -f bestaudio -J`; argument array only; cookies via `--cookies <private file>` (path only in argv).
+- No `--extractor-args`, no PO-token service. Default client set with cookies: `tv_downgraded`, `web_creator`, `web_music`.
+- yt-dlp stderr mentions PO tokens/SABR on most tracks yet the selected format was always plain `https`; not treated as failure, but SABR-only tracks were not encountered in this sample.
+- Resolve latency (new process each time): 4.6-9.5 s, median about 5 s. First audio after URL given: 0.04-0.20 s. The spec's 3 s startup target is NOT met by the cold per-track resolver call; prefetch/lookahead (M4) matters.
+- Premium evidence: itag 774/141 appear only with the signed-in session. That is "consistent with Premium", not verification (spec AUTH-01). The probe's `premium_format_flag` heuristic never fired; ignore it.
+- Anonymous resolution succeeds, so the app must gate on its own account validation, not on resolver success.
+
+## Secret hygiene (step 5/6)
+
+- Cookie values were never printed or put in argv; the probe prints redacted outcomes only (no URLs, titles, or video IDs).
+- Temporary plaintext cookie file lived in a user-only ACL directory and was deleted afterward, as was the WebView2 profile.
+- Canary scan of repo, docs, probe logs and all git history for the 27 captured values (raw and URL-encoded): 0 hits. One locked task-output file could not be read, and could not be rescanned after the cookie file was deleted.
 
 ## Known limits / caveats
 

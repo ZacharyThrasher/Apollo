@@ -494,6 +494,18 @@ fn main() {
         std::process::exit(2);
     };
 
+    if args.iter().any(|a| a == "--compare-only") {
+        // Same tracks, with and without credentials. Resolution only, no playback.
+        println!("compare-only: authenticated vs anonymous resolution for {} tracks", ids.len());
+        for (i, id) in ids.iter().enumerate() {
+            println!("  #{:02} [auth]", i + 1);
+            let a = resolve(&root, &auth, id).map(|_| ()).map_err(|e| println!("    {e}"));
+            println!("  #{:02} [anon]", i + 1);
+            let b = resolve(&root, &Auth::None, id).map(|_| ()).map_err(|e| println!("    {e}"));
+            println!("    => auth_ok={} anon_ok={}", a.is_ok(), b.is_ok());
+        }
+        return;
+    }
     println!("tracks to probe: {}", ids.len());
     let mut pass = 0;
     for (i, id) in ids.iter().enumerate() {
