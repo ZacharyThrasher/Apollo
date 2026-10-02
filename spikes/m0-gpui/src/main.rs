@@ -5,6 +5,8 @@
 //!
 //! Intentionally unstyled. No credentials, no network.
 
+use std::ffi::c_void;
+use std::io::Write as _;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +22,8 @@ use gpui::{
     white,
 };
 use gpui_platform::application;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
 use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
@@ -675,6 +679,8 @@ struct Root {
     ticks: u64,
     ui_thread: ThreadId,
     last_tick_thread: Option<ThreadId>,
+    media_cmd_count: usize,
+    last_media_cmd: Option<String>,
 }
 
 impl Focusable for Root {
@@ -716,6 +722,11 @@ impl Render for Root {
             .child(self.text_input.clone())
             .child(format!(
                 "input chars: {chars} | IME composition updates: {ime} | commits: {commits} | composing now: {marked}"
+            ))
+            .child(format!(
+                "OS media commands received: {} (last: {})",
+                self.media_cmd_count,
+                self.last_media_cmd.as_deref().unwrap_or("none")
             ))
             .child(format!("keyboard layout: {}", cx.keyboard_layout().name()))
     }
@@ -771,6 +782,8 @@ fn main() {
                         ticks: 0,
                         ui_thread: thread::current().id(),
                         last_tick_thread: None,
+                        media_cmd_count: 0,
+                        last_media_cmd: None,
                     })
                 },
             )
@@ -797,6 +810,67 @@ fn main() {
             }
         })
         .detach();
+
+        // OS media controls (SMTC via Souvlaki), bound to GPUI's own HWND: no second event loop.
+        let hwnd: Option<*mut c_void> = window
+            .update(cx, |_, w, _| match w.window_handle().ok()?.as_raw() {
+                RawWindowHandle::Win32(h) => Some(h.hwnd.get() as *mut c_void),
+                _ => None,
+            })
+            .ok()
+            .flatten();
+        let (media_tx, mut media_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut controls = hwnd.and_then(|hwnd| {
+            MediaControls::new(PlatformConfig {
+                dbus_name: "apollo_m0",
+                display_name: "Apollo M0 spike",
+                hwnd: Some(hwnd),
+            })
+            .map_err(|e| println!("souvlaki: create failed: {e}"))
+            .ok()
+        });
+        if let Some(c) = controls.as_mut() {
+            let tx = media_tx.clone();
+            let attached = c.attach(move |ev: MediaControlEvent| {
+                // Called on a WinRT thread; only forward, never touch UI state here.
+                let _ = tx.send(format!("{ev:?}"));
+            });
+            println!("souvlaki: attach -> {:?}", attached.as_ref().map(|_| "ok"));
+            let _ = c.set_metadata(MediaMetadata {
+                title: Some("M0 test tone"),
+                artist: Some("Apollo"),
+                album: Some("M0"),
+                ..Default::default()
+            });
+            let _ = c.set_playback(MediaPlayback::Playing {
+                progress: Some(MediaPosition(Duration::from_secs(0))),
+            });
+        }
+        let event_log = std::env::var("APOLLO_M0_EVENT_LOG").ok();
+        let weak_root2 = root.downgrade();
+        cx.spawn(async move |cx| {
+            while let Some(cmd) = media_rx.recv().await {
+                println!("os media command reached app: {cmd}");
+                if let Some(path) = &event_log
+                    && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+                {
+                    let _ = writeln!(f, "{cmd}");
+                }
+                let ok = weak_root2
+                    .update(cx, |root, cx| {
+                        root.media_cmd_count += 1;
+                        root.last_media_cmd = Some(cmd);
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !ok {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // Keep the controls alive for the app's lifetime.
+        std::mem::forget(controls);
 
         // Shut the service runtime down (bounded) when the app quits.
         let mut runtime_slot = Some(runtime);
