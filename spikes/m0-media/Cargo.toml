@@ -1,0 +1,11 @@
+[package]
+name = "apollo-m0-media"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Milestone 0 spike: libmpv playback of owned AAC/Opus fixtures, seek, EOF"
+build = "build.rs"
+
+[dependencies]
+libmpv2 = "=6.0.0"
+libmpv2-sys = "=4.0.1"
