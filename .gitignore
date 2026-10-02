@@ -1,0 +1,5 @@
+/target
+*.log
+# never commit credentials, cookies or raw authenticated responses
+*.cookies
+cookies.txt
