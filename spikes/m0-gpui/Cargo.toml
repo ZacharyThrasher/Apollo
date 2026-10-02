@@ -1,0 +1,12 @@
+[package]
+name = "apollo-m0-gpui"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Milestone 0 spike: GPUI window, text/IME input, Tokio->UI bridge"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f37989fbdf840b308892af66516c2b9c3ef3853a" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f37989fbdf840b308892af66516c2b9c3ef3853a" }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+unicode-segmentation = "1"
