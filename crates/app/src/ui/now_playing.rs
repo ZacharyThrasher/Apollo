@@ -26,9 +26,27 @@ const TAB_TRANSPORT: isize = 7;
 /// The glow sits in the middle of the direction's 12-18% range.
 pub const AMBIENT_OPACITY: f32 = (ambient::OPACITY_MIN + ambient::OPACITY_MAX) / 2.0;
 
-/// Art is `min(50vh, 480px)`, and never wider than the room it has.
+/// Line heights of the title and artist lines. Both are single lines, so a tight height costs
+/// nothing visually and saves what the default (1.6x) leading would take at the smallest window.
+const TITLE_LINE_HEIGHT: f32 = 1.25;
+const ARTIST_LINE_HEIGHT: f32 = 1.4;
+/// The text and controls column is at least this wide, even over a small cover.
+const MIN_COLUMN: f32 = 320.0;
+/// Everything on the page except the art: the page's top and bottom padding (2 x 8), the gap
+/// under the art (16), the title (50), the 8px gap and the artist line (25.2), the 8px gap
+/// above the controls and the progress row with the transport (80). The layout test keeps the
+/// transport inside the page at the smallest window.
+const BELOW_ART: f32 = 204.0;
+
+/// Art is `min(50vh, 480px)`, or the height left under the title bar and above the player bar
+/// once the title, artist and controls have theirs if that is less, and never below 160px: the
+/// transport and progress row stay on screen without scrolling.
 pub fn art_side(viewport_height: f32) -> f32 {
-    (viewport_height * 0.5).min(layout::NOW_PLAYING_ART_MAX)
+    let page = viewport_height - layout::TITLE_BAR_HEIGHT - layout::PLAYER_BAR_HEIGHT;
+    (viewport_height * 0.5)
+        .min(layout::NOW_PLAYING_ART_MAX)
+        .min(page - BELOW_ART)
+        .max(layout::NOW_PLAYING_ART_MIN)
 }
 
 pub struct NowPlaying {
@@ -103,26 +121,37 @@ impl Render for NowPlaying {
             .flex_none();
 
         let text = div()
+            .debug_selector(|| "np-text".into())
             .flex()
             .flex_col()
             .w_full()
             .min_w_0()
-            .child(text_line(
-                "np-title",
-                v.title.clone(),
-                typography::NOW_PLAYING_TITLE,
-                color::text_primary(),
-                cx,
-            ))
-            .child(div().mt(px(spacing::S2)).child(text_line(
-                "np-artist",
-                v.subtitle.clone(),
-                typography::NOW_PLAYING_ARTIST,
-                color::text_secondary(),
-                cx,
-            )));
+            .child(
+                div()
+                    .line_height(gpui::relative(TITLE_LINE_HEIGHT))
+                    .child(text_line(
+                        "np-title",
+                        v.title.clone(),
+                        typography::NOW_PLAYING_TITLE,
+                        color::text_primary(),
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .mt(px(spacing::S2))
+                    .line_height(gpui::relative(ARTIST_LINE_HEIGHT))
+                    .child(text_line(
+                        "np-artist",
+                        v.subtitle.clone(),
+                        typography::NOW_PLAYING_ARTIST,
+                        color::text_secondary(),
+                        cx,
+                    )),
+            );
 
         let controls = div()
+            .debug_selector(|| "np-controls".into())
             .flex()
             .flex_col()
             .items_center()
@@ -170,7 +199,7 @@ impl Render for NowPlaying {
                             .justify_center()
                             .gap(px(spacing::S4))
                             .px(px(spacing::S8))
-                            .py(px(spacing::S4))
+                            .py(px(spacing::S2))
                             .child(art)
                             .child(
                                 div()
@@ -178,7 +207,7 @@ impl Render for NowPlaying {
                                     .flex_col()
                                     .gap(px(spacing::S2))
                                     .w_full()
-                                    .max_w(px(side))
+                                    .max_w(px(side.max(MIN_COLUMN)))
                                     .child(text)
                                     .child(controls),
                             ),
@@ -199,11 +228,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn art_is_half_the_window_height_capped_at_480() {
-        assert_eq!(art_side(480.0), 240.0);
+    fn art_is_half_the_window_height_capped_at_480_and_at_160_or_more() {
         assert_eq!(art_side(720.0), 360.0);
         assert_eq!(art_side(960.0), 480.0);
         assert_eq!(art_side(1400.0), 480.0);
+        // A short window gives the art what is left under the text and controls, down to 160.
+        assert_eq!(art_side(480.0), 164.0);
+        assert!(art_side(560.0) > 160.0 && art_side(560.0) < 280.0);
     }
 
     #[test]

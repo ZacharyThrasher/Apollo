@@ -75,7 +75,10 @@ fn open_window(
         )
         .expect("open window");
     window
-        .update(cx, |shell, window, cx| shell.focus_root(window, cx))
+        .update(cx, |shell, window, cx| {
+            shell.focus_root(window, cx);
+            shell.install_window_hooks(window, cx);
+        })
         .expect("focus root");
     window
 }

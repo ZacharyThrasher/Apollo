@@ -173,6 +173,8 @@ pub mod layout {
     pub const QUEUE_PANEL_WIDTH: f32 = 320.0;
     /// Now Playing art is `min(50vh, NOW_PLAYING_ART_MAX)`.
     pub const NOW_PLAYING_ART_MAX: f32 = 480.0;
+    /// ... but never below this, so a short window still shows a cover.
+    pub const NOW_PLAYING_ART_MIN: f32 = 160.0;
     pub const ICON_SIZE: f32 = 20.0;
     pub const MIN_HIT_TARGET: f32 = 32.0;
     pub const FOCUS_RING_WIDTH: f32 = 2.0;

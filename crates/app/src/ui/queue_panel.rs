@@ -24,6 +24,7 @@ use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::player_bar::text_line;
+use crate::ui::playing_row;
 use crate::ui::transport::on_off;
 
 actions!(
@@ -444,11 +445,7 @@ impl QueuePanel {
         let group: SharedString = format!("queue-row-{ix}").into();
         let thumb = self.player.read(cx).thumb(&row.video_id);
 
-        let title_style = if is_current {
-            typography::BODY_STRONG
-        } else {
-            typography::BODY
-        };
+        let title_style = playing_row::title_style(typography::BODY, is_current);
         // Played rows sit back: their title drops a tier.
         let title_color = if is_history {
             color::text_secondary()
@@ -510,10 +507,10 @@ impl QueuePanel {
             .px(px(spacing::S2))
             .rounded(px(radius::SMALL))
             .cursor_pointer()
-            .when(selected, |d| d.bg(color::state_selected()))
+            .when(selected, |d| d.bg(playing_row::tint()))
             .hover(move |s| {
                 s.bg(if selected {
-                    color::state_selected()
+                    playing_row::tint()
                 } else {
                     color::state_hover()
                 })
@@ -537,16 +534,7 @@ impl QueuePanel {
             }))
             .when(is_current, |d| {
                 // The selected-row marker, as on the nav rail.
-                d.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(px(spacing::S2))
-                        .bottom(px(spacing::S2))
-                        .w(px(3.0))
-                        .rounded_full()
-                        .bg(accent),
-                )
+                d.child(playing_row::marker(accent))
             })
             .child(art_tile(ART, thumb))
             .child(

@@ -36,7 +36,7 @@ use apollo_services_common::{EventSink, LeaseStore};
 use super::real_search::AccountSearch;
 use super::{LibraryTrack, Ports, Prepared};
 use crate::account::{AccountPorts, AvatarSource, SessionSource, SignInError};
-use crate::art::{ArtSource, DecodedArt};
+use crate::art::{sized_thumbnail, ArtSource, DecodedArt};
 use crate::library::live::InnerTubeLibrary;
 use crate::player::DEFAULT_VOLUME;
 use crate::url_thumbs::ThumbSource;
@@ -45,6 +45,8 @@ use crate::url_thumbs::ThumbSource;
 const VAULT_SERVICE: &str = "Apollo";
 const ART_TIMEOUT: Duration = Duration::from_secs(10);
 const ART_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Side asked for the playing track's picture: twice the 360px Now Playing shows at 720px.
+const PLAYER_ART_PX: u32 = 720;
 const REVALIDATE_POLL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -361,8 +363,13 @@ impl AvatarSource for HttpAvatars {
 impl ArtSource for HttpArt {
     fn fetch(&self, video_id: &str) -> Option<DecodedArt> {
         let listed = self.thumbs.lock().unwrap().get(video_id).cloned();
+        // Now Playing shows this large: ask for a bigger picture than the list thumbnail, and
+        // fall back to the one the listing gave if that fails.
         listed
-            .and_then(|url| self.get(&url))
+            .and_then(|url| {
+                self.get(&sized_thumbnail(&url, PLAYER_ART_PX))
+                    .or_else(|| self.get(&url))
+            })
             .or_else(|| self.get(&format!("https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")))
     }
 

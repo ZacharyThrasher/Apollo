@@ -212,3 +212,53 @@ fn a_recorded_response_maps_without_loss() {
     // The top card leads its group.
     assert_eq!(r.artists[0].title, "Daft Punk");
 }
+
+/// Rows as the service writes them for episodes, videos and songs whose subtitle has no artist
+/// or no duration (shapes seen in a real anonymous search for an artist, 2026-10-03).
+const ODDITIES: &str = include_str!("../../tests/fixtures/search_row_oddities.json");
+
+fn oddity(title: &str) -> ListedTrack {
+    let parsed = parse_search_all(&serde_json::from_str(ODDITIES).unwrap());
+    search_results(&parsed)
+        .songs
+        .into_iter()
+        .find(|s| s.track.title == title)
+        .unwrap_or_else(|| panic!("{title} is listed"))
+}
+
+fn artist_of(t: &ListedTrack) -> Option<&str> {
+    t.track.artists.first().map(|a| a.name.as_str())
+}
+
+#[test]
+fn a_date_is_never_shown_as_the_artist() {
+    // The row's date and type label go; what is left (the show) stands in for the artist.
+    for (title, show) in [
+        ("Episode with a full date", "Versus Wolves Podcast"),
+        ("Episode with a relative date", "Inside the Industry w/ J Nolan"),
+        ("Episode with a short date", "More Than A Coincidence Series"),
+    ] {
+        assert_eq!(artist_of(&oddity(title)), Some(show), "{title}");
+    }
+}
+
+#[test]
+fn a_view_count_is_never_shown_as_the_artist() {
+    assert_eq!(artist_of(&oddity("Video with views only")), None);
+    assert_eq!(artist_of(&oddity("Video with a channel")), Some("Kenneth Music"));
+}
+
+#[test]
+fn a_name_that_starts_with_a_number_is_still_an_artist() {
+    assert_eq!(artist_of(&oddity("Song by a numeric name")), Some("21 Savage"));
+}
+
+#[test]
+fn a_missing_duration_stays_empty() {
+    assert_eq!(oddity("Song with no duration").track.duration, None);
+    assert_eq!(artist_of(&oddity("Song with no duration")), Some("Kendrick Lamar"));
+    assert_eq!(
+        oddity("Song with a duration").track.duration,
+        Some(Duration::from_secs(4 * 60 + 35))
+    );
+}

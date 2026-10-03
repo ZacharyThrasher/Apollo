@@ -115,6 +115,40 @@ pub fn square(img: RgbaImage) -> RgbaImage {
     }
 }
 
+/// The same Google-hosted picture at a different size. The service's picture URLs end in size
+/// parameters (`=w120-h120-l90-rj`, `=s88-c-k-c0x00ffffff-no-rj`); they are rewritten to `side`
+/// pixels so art shown large is not an enlarged list thumbnail. Any other URL, or a Google one
+/// with no size parameter, comes back unchanged.
+pub fn sized_thumbnail(url: &str, side: u32) -> String {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return url.to_owned();
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let google = [".googleusercontent.com", ".ggpht.com"]
+        .iter()
+        .any(|h| host.ends_with(h) && host.len() > h.len());
+    if !google {
+        return url.to_owned();
+    }
+    let Some(eq) = url.rfind('=') else {
+        return url.to_owned();
+    };
+    if url[eq..].contains(['/', '?']) {
+        return url.to_owned();
+    }
+    let params: Vec<String> = url[eq + 1..]
+        .split('-')
+        .map(|p| {
+            let numeric = |rest: &str| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+            match p.as_bytes().first() {
+                Some(b'w' | b'h' | b's') if numeric(&p[1..]) => format!("{}{side}", &p[..1]),
+                _ => p.to_owned(),
+            }
+        })
+        .collect();
+    format!("{}={}", &url[..eq], params.join("-"))
+}
+
 /// Source of artwork for a track. Blocking; callers run it off the UI thread.
 pub trait ArtSource: Send + Sync {
     fn fetch(&self, video_id: &str) -> Option<DecodedArt>;
@@ -158,6 +192,30 @@ impl SyntheticArt {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn google_picture_sizes_are_rewritten_and_nothing_else() {
+        use super::sized_thumbnail as sized;
+        assert_eq!(
+            sized("https://lh3.googleusercontent.com/abc=w120-h120-l90-rj", 720),
+            "https://lh3.googleusercontent.com/abc=w720-h720-l90-rj"
+        );
+        assert_eq!(
+            sized("https://yt3.ggpht.com/x_y-z=s88-c-k-c0x00ffffff-no-rj", 512),
+            "https://yt3.ggpht.com/x_y-z=s512-c-k-c0x00ffffff-no-rj"
+        );
+        // Not a Google image host, not https, no size parameter, an `=` that is not the tail.
+        for url in [
+            "https://i.ytimg.com/vi/abc/hqdefault.jpg",
+            "http://lh3.googleusercontent.com/abc=w120-h120",
+            "https://lh3.googleusercontent.com/abc",
+            "https://lh3.googleusercontent.com/a=b/c",
+            "https://googleusercontent.com/abc=w120-h120",
+            "https://evil.com/?u=https://lh3.googleusercontent.com/a=w1-h1",
+        ] {
+            assert_eq!(sized(url, 720), url);
+        }
+    }
+
     use super::*;
 
     #[test]

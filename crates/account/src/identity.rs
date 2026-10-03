@@ -358,13 +358,24 @@ fn avatar_url(v: &Value) -> Option<String> {
         .map(|(_, url)| url.to_owned())
 }
 
+/// The channel's `@handle`, or nothing. An account item's `accountByline` is a subscriber count
+/// for a channel ("2 subscribers"), which must never show as the handle, so only a text that
+/// is an `@handle` counts, from `channelHandle` first and `accountByline` as a fallback.
+fn handle_of(v: &Value) -> Option<String> {
+    ["channelHandle", "accountByline"]
+        .into_iter()
+        .filter_map(|key| v.get(key).and_then(text_of))
+        .map(|t| t.trim().to_owned())
+        .find(|t| t.len() > 1 && t.starts_with('@') && !t.contains(' '))
+}
+
 fn parse_active_account(j: &Value) -> Option<Identity> {
     let mut hdr = Vec::new();
     find_all(j, "activeAccountHeaderRenderer", &mut hdr);
     let h = hdr.first()?;
     Some(Identity {
         name: h.get("accountName").and_then(text_of)?,
-        handle: h.get("channelHandle").and_then(text_of),
+        handle: handle_of(h),
         avatar_url: avatar_url(h),
         page_id: None,
         selected_by_service: true,
@@ -379,7 +390,7 @@ fn parse_account_items(j: &Value) -> Vec<Identity> {
         .filter_map(|it| {
             Some(Identity {
                 name: it.get("accountName").and_then(text_of)?,
-                handle: it.get("accountByline").and_then(text_of),
+                handle: handle_of(it),
                 avatar_url: avatar_url(it),
                 page_id: first_string(it, "pageId"),
                 selected_by_service: it["isSelected"].as_bool().unwrap_or(false),
@@ -619,6 +630,24 @@ mod tests {
         assert!(authorization_header(&jar_with(&["SID"]), 1000).is_none());
         // No cookie value appears in the header.
         assert!(!a.contains("VALUECANARY"));
+    }
+
+    #[test]
+    fn the_handle_is_the_at_handle_and_never_a_subscriber_count() {
+        let item = serde_json::json!({
+            "accountName": {"simpleText": "N"},
+            "accountByline": {"simpleText": "2 subscribers"},
+            "channelHandle": {"simpleText": "@zach"},
+        });
+        assert_eq!(parse_account_items(&serde_json::json!({"accountItem": item}))[0].handle.as_deref(), Some("@zach"));
+        let no_handle = serde_json::json!({
+            "accountName": {"simpleText": "N"},
+            "accountByline": {"simpleText": "2 subscribers"},
+        });
+        assert_eq!(parse_account_items(&serde_json::json!({"accountItem": no_handle}))[0].handle, None);
+        let header = serde_json::json!({"activeAccountHeaderRenderer": {
+            "accountName": {"simpleText": "N"}, "channelHandle": {"simpleText": "1 subscriber"}}});
+        assert_eq!(parse_active_account(&header).unwrap().handle, None);
     }
 
     #[test]

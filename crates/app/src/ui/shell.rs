@@ -77,6 +77,8 @@ pub struct Shell {
     library_epoch: u64,
     /// The first time the account turns out to be signed out, the window opens on Settings.
     routed_to_sign_in: bool,
+    /// Keeps the window-activation hook that dismisses tooltips alive.
+    _activation: Option<gpui::Subscription>,
     route: Route,
     nav_expanded: bool,
     nav_toggled: bool,
@@ -176,6 +178,12 @@ impl Shell {
                         let _ = weak.update(cx, |s, cx| s.pages_closed(window, cx));
                     }
                 },
+                {
+                    let weak = weak.clone();
+                    move |_, cx| {
+                        let _ = weak.update(cx, |s, cx| s.show_route(Route::Settings, cx));
+                    }
+                },
                 cx,
             )
         });
@@ -209,6 +217,7 @@ impl Shell {
             detail_origin: None,
             library_epoch: 0,
             routed_to_sign_in: false,
+            _activation: None,
             route: Route::Home,
             nav_expanded: false,
             nav_toggled: false,
@@ -239,7 +248,11 @@ impl Shell {
             self.detail_origin = None;
             self.library.update(cx, |l, cx| l.reset(cx));
         }
-        if !self.routed_to_sign_in && self.account.read(cx).is_signed_out() {
+        let model = self.account.read(cx);
+        let (signed_out, by_choice) = (model.is_signed_out(), model.is_signed_out_by_choice());
+        self.library
+            .update(cx, |l, cx| l.set_signed_out(by_choice, cx));
+        if !self.routed_to_sign_in && signed_out {
             self.routed_to_sign_in = true;
             self.route = Route::Settings;
             self.now_playing_open = false;
@@ -386,10 +399,50 @@ impl Shell {
         cx.notify();
     }
 
+    /// Hooks that need the window: tooltips go away when it loses focus.
+    pub fn install_window_hooks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self._activation = Some(cx.observe_window_activation(window, |_, window, cx| {
+            if !window.is_window_active() {
+                crate::ui::tooltip::dismiss_all(cx);
+            }
+        }));
+    }
+
     /// Put keyboard focus on the root so shortcuts work before anything is clicked.
     pub fn focus_root(&self, window: &mut Window, cx: &mut App) {
         window.focus(&self.root_focus, cx);
     }
+}
+
+/// A zero-size element whose paint registers window-wide listeners (capture phase, so no
+/// child can swallow the event): scrolling, and a press or release (a drag starts and ends
+/// with those), send every tooltip away. See `tooltip::dismiss_all`.
+fn dismiss_tooltips_on_input() -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        |_, _, window, _| {
+            window.on_mouse_event(|_: &gpui::ScrollWheelEvent, phase, window, cx| {
+                if phase.capture() {
+                    crate::ui::tooltip::dismiss_all(cx);
+                    window.refresh();
+                }
+            });
+            window.on_mouse_event(|_: &gpui::MouseDownEvent, phase, window, cx| {
+                if phase.capture() {
+                    crate::ui::tooltip::dismiss_all(cx);
+                    window.refresh();
+                }
+            });
+            window.on_mouse_event(|_: &gpui::MouseUpEvent, phase, window, cx| {
+                if phase.capture() {
+                    crate::ui::tooltip::dismiss_all(cx);
+                    window.refresh();
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
 }
 
 impl Focusable for Shell {
@@ -537,6 +590,7 @@ impl Render for Shell {
             .text_size(px(typography::BODY.size_px))
             .text_color(color::text_primary())
             .bg(color::bg_base())
+            .child(dismiss_tooltips_on_input())
             .child(TitleBar)
             .child(
                 div()

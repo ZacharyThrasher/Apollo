@@ -16,7 +16,7 @@ use gpui::{Context, Entity, RenderImage};
 use image::imageops;
 
 use super::source::{ArtistContent, LibrarySource, TrackRow};
-use crate::art::DecodedArt;
+use crate::art::{sized_thumbnail, DecodedArt};
 use crate::player::{PlayerModel, Status};
 use crate::url_thumbs::Thumb as ThumbView;
 
@@ -656,7 +656,12 @@ impl LibraryModel {
             };
             self.thumbs.inflight += 1;
             let source = source.clone();
-            let fetch_url = url.clone();
+            // Covers shown large ask for a larger picture than the list thumbnail they came as.
+            let fetch_url = match size {
+                ArtSize::List => url.clone(),
+                ArtSize::Header => sized_thumbnail(&url, HEADER_ART_PX),
+                ArtSize::Card => sized_thumbnail(&url, CARD_ART_PX),
+            };
             cx.spawn(async move |this, cx| {
                 let image = cx
                     .background_executor()
