@@ -5,15 +5,15 @@
 //! songs, Up and Down move between them, Enter plays, Ctrl+Enter queues, Escape goes back to the
 //! field (and out of it when the field is empty).
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use apollo_provider::{Hit, ListedTrack, SearchResults};
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
-    actions, div, img, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Entity,
-    FocusHandle, Focusable, ImageSource, IntoElement, ObjectFit, ParentElement, Render,
-    ScrollHandle, SharedString, Styled, Window,
+    actions, div, img, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, Focusable,
+    ImageSource, IntoElement, ObjectFit, ParentElement, Render, ScrollHandle, SharedString, Styled,
+    Window,
 };
 
 use crate::assets::Icon;
@@ -22,6 +22,7 @@ use crate::player::{format_time, PlayerModel};
 use crate::search::{failure_text, SearchModel, SearchState};
 use crate::style::{self, color};
 use crate::ui::button::{focus_ring, keyboard_focused, IconButton};
+use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{self, TextField, TextFieldEvent};
 use crate::ui::tooltip::Tooltip;
@@ -58,7 +59,6 @@ const ROW_HEIGHT: f32 = 56.0;
 const ROW_ART: f32 = 40.0;
 const CARD_WIDTH: f32 = 144.0;
 const SKELETON_ROWS: usize = 6;
-const SKELETON_PERIOD: Duration = Duration::from_millis(1600);
 const SELECTED_MARKER_WIDTH: f32 = 3.0;
 /// Scrim over a row's artwork while it is the play target.
 const ART_SCRIM: f32 = 0.6;
@@ -464,7 +464,6 @@ fn heading(title: &'static str, spaced: bool, cx: &App) -> AnyElement {
 
 /// Skeleton blocks at the final size of a song row, so nothing shifts when results arrive.
 fn skeletons(cx: &App) -> AnyElement {
-    let animate = !cx.reduce_motion();
     let block = |w: gpui::Length, h: f32| {
         div()
             .w(w)
@@ -472,11 +471,11 @@ fn skeletons(cx: &App) -> AnyElement {
             .rounded(px(radius::SMALL))
             .bg(color::skeleton())
     };
-    div()
+    let column = div()
         .flex()
         .flex_col()
-        .children((0..SKELETON_ROWS).map(|i| {
-            let row = div()
+        .children((0..SKELETON_ROWS).map(|_| {
+            div()
                 .flex()
                 .flex_row()
                 .items_center()
@@ -498,21 +497,9 @@ fn skeletons(cx: &App) -> AnyElement {
                         .flex_1()
                         .child(block(gpui::relative(0.4).into(), 12.0))
                         .child(block(gpui::relative(0.25).into(), 10.0)),
-                );
-            if animate {
-                row.with_animation(
-                    ("skeleton", i),
-                    Animation::new(SKELETON_PERIOD)
-                        .repeat()
-                        .with_easing(gpui::pulsating_between(0.6, 1.0)),
-                    |el, t| el.opacity(t),
                 )
-                .into_any_element()
-            } else {
-                row.into_any_element()
-            }
-        }))
-        .into_any_element()
+        }));
+    skeleton::pulse(column, "search-skeleton", !cx.reduce_motion())
 }
 
 type RowAction = Box<dyn Fn(&mut Window, &mut App) + 'static>;

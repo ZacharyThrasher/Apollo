@@ -3,6 +3,7 @@
 
 pub mod account;
 pub mod lease;
+pub mod library;
 pub mod links;
 pub mod listing;
 pub mod model;

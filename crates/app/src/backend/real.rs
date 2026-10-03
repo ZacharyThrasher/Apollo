@@ -37,6 +37,7 @@ use super::real_search::AccountSearch;
 use super::{LibraryTrack, Ports, Prepared};
 use crate::account::{AccountPorts, AvatarSource, SessionSource, SignInError};
 use crate::art::{ArtSource, DecodedArt};
+use crate::library::live::InnerTubeLibrary;
 use crate::player::DEFAULT_VOLUME;
 use crate::url_thumbs::ThumbSource;
 
@@ -174,6 +175,18 @@ pub fn prepare(
 
     let search = AccountSearch::new(account.clone())?;
     let art = Arc::new(HttpArt::new(thumbs));
+    // The library screen reads the account's playlists and albums through InnerTube. It asks the
+    // account for the session (and, for a login that can act as several channels, the selected
+    // one) on every request, so it follows sign-in, sign-out and channel changes.
+    let channel_of = account.clone();
+    let library = InnerTubeLibrary::new(
+        Arc::new(account.clone()),
+        Arc::new(move || match channel_of.view().identity {
+            IdentityState::Selected(identity) => identity.page_id,
+            _ => None,
+        }),
+    )
+    .map_err(|e| format!("library source: {e}"))?;
 
     Ok(Prepared {
         label: "real services",
@@ -185,6 +198,7 @@ pub fn prepare(
         art: art.clone(),
         search: Arc::new(search),
         thumbs: art,
+        library: Arc::new(library),
     })
 }
 

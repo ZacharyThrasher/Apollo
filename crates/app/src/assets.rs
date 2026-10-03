@@ -58,6 +58,8 @@ icons! {
     ChevronDown => "chevron-down-regular",
     Spinner => "spinner",
     Add => "add-regular",
+    ArrowLeft => "arrow-left-regular",
+    HeartFilled => "heart-filled",
 }
 
 pub struct Assets;

@@ -19,14 +19,23 @@ default = []
 # Runs against the real M2 services (account, yt-dlp resolver, libmpv) instead of the
 # simulated backend. Windows only; needs the pinned tools under `tools/`.
 real-services = [
+    "provider",
     "dep:ureq",
     "dep:apollo-media",
     "dep:apollo-resolver",
 ]
 
+# The InnerTube-backed library source (cross-platform; `real-services` turns it on).
+provider = [
+    "dep:apollo-innertube",
+    "dep:ureq",
+    "tokio/rt-multi-thread",
+]
+
 [dependencies]
 apollo-account = { path = "../account" }
 apollo-domain = { path = "../domain" }
+apollo-innertube = { path = "../innertube", optional = true }
 apollo-provider = { path = "../provider" }
 apollo-runtime = { path = "../runtime" }
 apollo-services-common = { path = "../services-common" }

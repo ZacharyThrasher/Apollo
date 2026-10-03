@@ -63,8 +63,8 @@ They do not cover pixels; screenshots on Windows do.
 
 ## Not in this slice
 
-Sign-in/account UI, library pages, album/artist/playlist pages (their search cards are inert), queue panel (the queue button only toggles its own
-state), Now Playing, tray, SMTC wiring beyond what exists. The account is re-validated by a
+Album, artist and playlist pages (their search cards are inert), tray, SMTC wiring beyond what
+exists. The account is re-validated by a
 background thread (about every 30 minutes) in real mode; re-validating immediately after a
 `SessionExpired` playback failure is not wired yet.
 
@@ -74,3 +74,28 @@ Search runs through the signed-in account: anonymous InnerTube search is not usa
 service records signed-in searches in the account's history, hence the debounce and minimum
 length. Songs play now (inserted next, then advance, so the queue is kept) or are added to the
 queue; albums, artists and playlists are shown but do nothing until their pages exist.
+
+## Library page (M3, slice 2)
+
+`crates/app/src/ui/library.rs` (view) over `crates/app/src/library/` (model, `LibrarySource`
+port, simulated source, InnerTube-backed `live` source behind the `provider` feature, which
+`real-services` turns on).
+
+- **Lists:** Playlists (Liked Music always first) and Albums as tabs; opening one shows its
+  tracks. Both lists are `uniform_list`s, so only the rows in view exist (tested with a
+  3,000-track simulated playlist). Covers load lazily for visible rows only (4 at a time, 400
+  cached).
+- **Playing:** Play (shuffle off), Shuffle (shuffle on, random first track), or a row (keeps the
+  player's shuffle setting) replace the queue through `Event::PlayContext`. A play request made
+  while pages are still loading waits for the last page, so the queue is never a truncated first
+  page; the button shows a spinner meanwhile. A page failure part-way shows "Couldn't load all
+  tracks" with Retry and drops the pending request.
+- **Keyboard:** Up/Down/PageUp/PageDown/Home/End move one selection per list, Enter opens or
+  plays, Escape or Alt+Left goes back. Choosing Library in the nav while on it returns to the
+  lists.
+- **Real data:** `InnerTubeLibrary` builds a signed-in InnerTube session from the account
+  service's cookie snapshot and returns rotated cookies through `offer_rotation`. Not yet verified
+  against a live account: the selected channel's `page_id` is used as the data-sync id, and
+  `FEmusic_liked_playlists` / `FEmusic_liked_albums` card shapes come from the vendored parser.
+- **Not here:** library caching in the store, write actions (like, add to playlist), artist pages,
+  a scrollbar, the queue panel.

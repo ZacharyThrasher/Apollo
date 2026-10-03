@@ -71,6 +71,7 @@ fn prepared() -> Prepared {
         art: Arc::new(TestArt),
         search: Arc::new(TestSearch),
         thumbs: Arc::new(TestThumbs),
+        library: Arc::new(apollo_app::library::sim::SimLibrary::instant()),
     }
 }
 

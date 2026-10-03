@@ -105,7 +105,15 @@ pub struct SimArt;
 
 impl ArtSource for SimArt {
     fn fetch(&self, video_id: &str) -> Option<DecodedArt> {
-        let kind = FIXTURES.iter().find(|f| f.id == video_id)?.art?;
+        // Library tracks beyond the fixtures get a hue from their position.
+        let generated = video_id
+            .strip_prefix(crate::library::sim::GENERATED_PREFIX)
+            .and_then(|n| n.parse::<usize>().ok())
+            .map(|n| SyntheticArt::Hue((n % 12) as f32 * 30.0));
+        let kind = match FIXTURES.iter().find(|f| f.id == video_id) {
+            Some(f) => f.art?,
+            None => generated?,
+        };
         Some(DecodedArt::from_rgba(kind.render(256)))
     }
 }
@@ -125,6 +133,7 @@ pub fn prepare(sink: EventSink) -> Prepared {
         art: Arc::new(SimArt),
         search: Arc::new(super::sim_search::SimSearch),
         thumbs: Arc::new(super::sim_search::SimThumbs),
+        library: Arc::new(crate::library::sim::SimLibrary::new()),
     }
 }
 

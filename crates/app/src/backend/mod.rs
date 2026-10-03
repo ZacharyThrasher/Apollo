@@ -17,6 +17,7 @@ use apollo_services_common::EventSink;
 
 use crate::account::AccountPorts;
 use crate::art::ArtSource;
+use crate::library::LibrarySource;
 use crate::search::SearchSource;
 use crate::url_thumbs::ThumbSource;
 
@@ -48,6 +49,8 @@ pub struct Prepared {
     pub search: Arc<dyn SearchSource>,
     /// Artwork for list rows (search results, later the library), by thumbnail URL.
     pub thumbs: Arc<dyn ThumbSource>,
+    /// What the library screen lists and opens.
+    pub library: Arc<dyn LibrarySource>,
 }
 
 /// Which backend to run, from the command line / build features.

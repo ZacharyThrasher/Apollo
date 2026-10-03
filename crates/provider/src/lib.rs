@@ -8,8 +8,8 @@ mod search;
 mod source;
 
 pub use map::{
-    account_validation, classify, page_from_album, page_from_continuation, page_from_playlist,
-    track_from_song, ListedTrack,
+    account_validation, classify, collection_from_card, collections_from_grid, page_from_album,
+    page_from_continuation, page_from_playlist, track_from_song, ListedTrack,
 };
 pub use search::{search_results, track_from_item, Hit, SearchResults};
 pub use source::InnerTubeSource;

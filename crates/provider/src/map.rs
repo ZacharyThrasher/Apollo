@@ -1,10 +1,12 @@
 use std::time::Duration;
 
 use apollo_domain::account::{IdentityId, Validation, ValidationError};
+use apollo_domain::library::{Collection, CollectionKind};
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track, VideoId};
 use innertube::{
-    AccountIdentity, AccountInfo, AlbumPage, PlaylistContinuation, PlaylistPage, SongItem,
+    AccountIdentity, AccountInfo, AlbumPage, BrowseItem, PlaylistContinuation, PlaylistPage,
+    SongItem,
 };
 
 /// A track as it appears in a listing: the playable identity plus the row's own occurrence token,
@@ -107,6 +109,35 @@ fn page(
         continuation,
         skipped,
     }
+}
+
+/// A library grid card as a [`Collection`]. Only cards of `kind` that carry an id and a title
+/// are kept: songs and artists have no track list to open here, and an untitled card cannot be
+/// told apart from its neighbours.
+pub fn collection_from_card(card: &BrowseItem, kind: CollectionKind) -> Option<Collection> {
+    let wanted = match kind {
+        CollectionKind::Playlist => "playlist",
+        CollectionKind::Album => "album",
+    };
+    if card.kind != wanted || card.id.trim().is_empty() || card.title.trim().is_empty() {
+        return None;
+    }
+    let non_empty = |s: &Option<String>| s.as_ref().filter(|t| !t.trim().is_empty()).cloned();
+    Some(Collection {
+        kind,
+        id: BrowseId::new(card.id.clone()),
+        title: card.title.clone(),
+        subtitle: non_empty(&card.subtitle),
+        thumbnail: non_empty(&card.thumbnail),
+    })
+}
+
+/// Maps a library grid, dropping cards that cannot be opened.
+pub fn collections_from_grid(cards: &[BrowseItem], kind: CollectionKind) -> Vec<Collection> {
+    cards
+        .iter()
+        .filter_map(|c| collection_from_card(c, kind))
+        .collect()
 }
 
 pub fn page_from_playlist(p: &PlaylistPage) -> Page<ListedTrack> {

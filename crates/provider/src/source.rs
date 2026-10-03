@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use apollo_domain::account::{Validation, ValidationError};
+use apollo_domain::library::{Collection, CollectionKind};
 use apollo_domain::listing::{LoadFailure, Page};
 use innertube::{Clients, InnerTube, Session, YouTubeClient, METADATA_CLIENT};
 use tokio::sync::Notify;
 
 use crate::map::{
-    account_validation, classify, page_from_album, page_from_continuation, page_from_playlist,
-    ListedTrack,
+    account_validation, classify, collections_from_grid, page_from_album, page_from_continuation,
+    page_from_playlist, ListedTrack,
 };
 use crate::search::{search_results, SearchResults};
 
@@ -47,6 +48,16 @@ impl InnerTubeSource {
         })
     }
 
+    /// Bootstraps the anonymous `visitorData` the service expects on requests, once. A failure
+    /// is not an error: signed-in requests are identified by the session either way.
+    pub async fn ensure_visitor_data(&self) {
+        if self.tube.visitor_data().is_none() {
+            if let Ok(visitor) = self.tube.fetch_visitor_data().await {
+                self.tube.set_visitor_data(Some(visitor));
+            }
+        }
+    }
+
     /// Raised when a signed-in request is refused (401/403 or a logged-out payload). Feed it to
     /// the account model as `AuthorizationRejected` for the current epoch.
     pub fn session_rejected(&self) -> Arc<Notify> {
@@ -68,6 +79,26 @@ impl InnerTubeSource {
     pub fn set_session(&self, cookie_header: String, data_sync_id: Option<String>) {
         self.tube.set_cookie(Some(cookie_header));
         self.tube.set_data_sync_id(data_sync_id);
+    }
+
+    /// The account's library playlists (every page of the grid, deduplicated by the client).
+    pub async fn library_playlists(&self) -> Result<Vec<Collection>, LoadFailure> {
+        let cards = self
+            .tube
+            .library_playlists(&self.client)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(collections_from_grid(&cards, CollectionKind::Playlist))
+    }
+
+    /// The albums saved to the account's library.
+    pub async fn library_albums(&self) -> Result<Vec<Collection>, LoadFailure> {
+        let cards = self
+            .tube
+            .library_albums(&self.client)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(collections_from_grid(&cards, CollectionKind::Album))
     }
 
     /// First page of a playlist (`VL…`) or any page that lists tracks.
