@@ -1,4 +1,5 @@
 pub mod identity;
+pub mod import;
 pub mod jar;
 #[cfg(windows)]
 pub mod login;
