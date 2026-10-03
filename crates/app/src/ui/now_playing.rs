@@ -17,12 +17,15 @@ use crate::style::color;
 use crate::ui::art_tile::art_tile_fluid;
 use crate::ui::button::{Handler, IconButton};
 use crate::ui::player_bar::text_line;
+use crate::ui::anchor;
 use crate::ui::playlist_picker::PlaylistPicker;
 use crate::ui::row_actions::{heart_icon, heart_label};
 use crate::ui::slider::SliderState;
 use crate::ui::transport::{self, on_off, TransportFocus};
 
 /// Tab order: after the nav rail, before the queue panel and the player bar.
+/// Where the add-to-playlist popover of Now Playing is anchored.
+const PLAYLIST_ANCHOR: &str = "np-playlist-anchor";
 const TAB_CLOSE: isize = 6;
 const TAB_TRANSPORT: isize = 7;
 
@@ -165,9 +168,12 @@ impl Render for NowPlaying {
             .on_click({
                 let (picker, title) = (self.picker.clone(), v.title.clone());
                 move |window, cx| {
-                    picker.update(cx, |p, cx| p.open(&video, title.clone(), window, cx))
+                    picker.update(cx, |p, cx| {
+                        p.open_at(&video, title.clone(), PLAYLIST_ANCHOR, window, cx)
+                    })
                 }
             });
+            let add = anchor::anchored(PLAYLIST_ANCHOR, add);
             div()
                 .flex()
                 .flex_row()

@@ -31,6 +31,7 @@ use crate::library::writes::LibraryWrites;
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::style::{self, color};
+use crate::ui::anchor;
 use crate::ui::art_tile::art_tile_shaped;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::card::{grid, heading, Card};
@@ -40,6 +41,11 @@ use crate::ui::row_actions::{heart_action, playlist_action, ACTION_SIZE};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::tooltip::Tooltip;
+
+/// Where the add-to-playlist popover of track row `ix` is anchored.
+fn playlist_anchor(ix: usize) -> String {
+    format!("track-playlist-{ix}")
+}
 
 actions!(
     library,
@@ -869,8 +875,9 @@ impl LibraryView {
         }))
         .on_action(cx.listener(|this, _: &AddRowToPlaylist, window, cx| {
             if let Some((video, title)) = this.selected_track(cx) {
+                let at = playlist_anchor(this.selected);
                 this.picker
-                    .update(cx, |p, cx| p.open(&video, title, window, cx));
+                    .update(cx, |p, cx| p.open_at(&video, title, &at, window, cx));
             }
         }))
     }
@@ -1659,7 +1666,7 @@ impl LibraryView {
         liked: bool,
         active: bool,
     ) -> gpui::Div {
-        let slot = || div().size(px(ACTION_SIZE)).flex_none();
+        let slot = || div().relative().size(px(ACTION_SIZE)).flex_none();
         let heart = slot()
             .debug_selector(move || format!("track-like-{ix}"))
             .when(active || liked, |d| {
@@ -1670,12 +1677,16 @@ impl LibraryView {
             });
         let add = slot()
             .debug_selector(move || format!("track-playlist-{ix}"))
+            // The popover opens here, also for the `p` key of the selected row.
+            .child(anchor::probe(playlist_anchor(ix)))
             .when(active, |d| {
                 let (picker, video) = (self.picker.clone(), video.to_owned());
                 d.child(playlist_action(
                     ("track-playlist", ix),
                     move |window, cx| {
-                        picker.update(cx, |p, cx| p.open(&video, title.clone(), window, cx))
+                        picker.update(cx, |p, cx| {
+                            p.open_at(&video, title.clone(), &playlist_anchor(ix), window, cx)
+                        })
                     },
                 ))
             });

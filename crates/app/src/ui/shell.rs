@@ -11,7 +11,7 @@ use gpui::{
 };
 
 use crate::account::AccountModel;
-use crate::library::{LibraryWrites, Target};
+use crate::library::{LibraryWrites, Notice, Target};
 use crate::motion::PanelSlide;
 use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
@@ -26,7 +26,7 @@ use crate::ui::queue_panel::QueuePanel;
 use crate::ui::search_page::{self, SearchPage};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
 use crate::ui::titlebar::TitleBar;
-use crate::ui::toast::toast;
+use crate::ui::toast::{self, toast, Fade};
 use crate::url_thumbs::{ThumbSource, ThumbStore};
 
 actions!(
@@ -68,6 +68,13 @@ pub fn bind_keys(cx: &mut App) {
     playlist_picker::bind_keys(cx);
 }
 
+/// A toast on screen, possibly on its way out.
+#[derive(Clone)]
+struct ToastShown {
+    notice: Notice,
+    leaving: bool,
+}
+
 pub struct Shell {
     player: Entity<PlayerModel>,
     account: Entity<AccountModel>,
@@ -76,6 +83,8 @@ pub struct Shell {
     /// Likes and playlist adds, and the short error a failed one leaves.
     writes: Entity<LibraryWrites>,
     picker: Entity<PlaylistPicker>,
+    /// The error on screen: it outlives the notice by the length of its fade-out.
+    toast: Option<ToastShown>,
     /// Where a page opened from another route (a Search card) returns to when Back closes the
     /// last of them. `None` while the pages were opened from the Library itself.
     detail_origin: Option<Route>,
@@ -151,6 +160,7 @@ impl Shell {
         let queue_panel = cx.new(|cx| {
             QueuePanel::new(
                 player.clone(),
+                writes.clone(),
                 {
                     let weak = weak.clone();
                     move |window, cx| {
@@ -233,6 +243,7 @@ impl Shell {
             library,
             writes,
             picker,
+            toast: None,
             detail_origin: None,
             library_epoch: 0,
             routed_to_sign_in: false,
@@ -438,6 +449,45 @@ impl Shell {
         }));
     }
 
+    /// Follow the writes' notice: a new one shows at once, a cleared one stays for the length of
+    /// its fade-out (not at all under reduced motion).
+    fn sync_toast(&mut self, animate: bool, cx: &mut Context<Self>) {
+        match self.writes.read(cx).notice().cloned() {
+            Some(notice) => {
+                self.toast = Some(ToastShown {
+                    notice,
+                    leaving: false,
+                });
+            }
+            None => {
+                let Some(shown) = self.toast.as_mut().filter(|t| !t.leaving) else {
+                    return;
+                };
+                if !animate {
+                    self.toast = None;
+                    return;
+                }
+                shown.leaving = true;
+                let id = shown.notice.id;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(toast::FADE).await;
+                    this.update(cx, |this, cx| {
+                        let gone = this
+                            .toast
+                            .as_ref()
+                            .is_some_and(|t| t.leaving && t.notice.id == id);
+                        if gone {
+                            this.toast = None;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+    }
+
     /// Put keyboard focus on the root so shortcuts work before anything is clicked.
     pub fn focus_root(&self, window: &mut Window, cx: &mut App) {
         window.focus(&self.root_focus, cx);
@@ -605,10 +655,14 @@ impl Render for Shell {
         };
 
         // A failed library write leaves a short error above the player bar.
-        let toast = self.writes.read(cx).notice().cloned().map(|notice| {
+        let animate = !cx.reduce_motion();
+        self.sync_toast(animate, cx);
+        let toast = self.toast.clone().map(|shown| {
             let writes = self.writes.clone();
             toast(
-                &notice,
+                &shown.notice,
+                if shown.leaving { Fade::Out } else { Fade::In },
+                animate,
                 move |cx| writes.update(cx, |w, cx| w.dismiss_notice(cx)),
                 cx,
             )

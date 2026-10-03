@@ -18,7 +18,8 @@ use apollo_app::search::SearchSource;
 use apollo_app::style::Fonts;
 use apollo_app::ui::library::LibraryView;
 use apollo_app::ui::nav::Route;
-use apollo_app::ui::playlist_picker::PlaylistPicker;
+use apollo_app::ui::playlist_picker::{self, PlaylistPicker};
+use apollo_app::ui::toast;
 use apollo_app::ui::shell::{self, Shell};
 use apollo_app::url_thumbs::NoThumbs;
 use apollo_domain::library::{Collection, WriteFailure, LIKED_MUSIC_BROWSE_ID};
@@ -304,7 +305,43 @@ fn an_error_goes_away_when_it_is_clicked(cx: &mut TestAppContext) {
     assert_eq!(notice(&page, vcx).as_deref(), Some("Sign-in expired"));
     click(vcx, "toast");
     assert_eq!(notice(&page, vcx), None);
+    // It fades out for 150ms and is gone after.
+    assert!(on_screen(vcx, "toast"), "still fading");
+    vcx.executor().advance_clock(toast::FADE + std::time::Duration::from_millis(1));
+    vcx.run_until_parked();
     assert!(!on_screen(vcx, "toast"));
+}
+
+#[gpui::test]
+fn under_reduced_motion_the_error_appears_and_goes_at_once(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (page, vcx) = setup(cx);
+    page.sim
+        .set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Rejected));
+    page.writes
+        .update(vcx, |w, cx| w.toggle_like(PLAIN, cx));
+    vcx.run_until_parked();
+    assert!(on_screen(vcx, "toast"));
+    click(vcx, "toast");
+    assert!(!on_screen(vcx, "toast"), "no fade-out");
+}
+
+#[gpui::test]
+fn a_new_error_replaces_one_that_is_fading_out(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.sim
+        .set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Rejected));
+    page.writes
+        .update(vcx, |w, cx| w.toggle_like(PLAIN, cx));
+    vcx.run_until_parked();
+    click(vcx, "toast");
+    page.writes
+        .update(vcx, |w, cx| w.toggle_like(LIKED, cx));
+    vcx.run_until_parked();
+    vcx.executor().advance_clock(toast::FADE + std::time::Duration::from_millis(1));
+    vcx.run_until_parked();
+    assert!(notice(&page, vcx).is_some());
+    assert!(on_screen(vcx, "toast"), "the new error is not cleared by the old fade");
 }
 
 #[gpui::test]
@@ -656,8 +693,8 @@ fn escape_and_a_click_outside_close_the_picker_without_writing(cx: &mut TestAppC
     assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
 
     open_picker(&page, vcx, PLAIN);
-    let scrim = bounds(vcx, "playlist-picker-scrim");
-    vcx.simulate_click(scrim.origin + gpui::point(gpui::px(4.0), gpui::px(4.0)), Modifiers::none());
+    let layer = bounds(vcx, "playlist-picker-layer");
+    vcx.simulate_click(layer.origin + gpui::point(gpui::px(4.0), gpui::px(4.0)), Modifiers::none());
     assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
     assert!(log(&page).is_empty());
 }
@@ -727,4 +764,116 @@ fn a_change_of_account_closes_the_picker(cx: &mut TestAppContext) {
     page.picker.update(vcx, |p, cx| p.reset(cx));
     assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
     assert!(!on_screen(vcx, "playlist-picker"));
+}
+
+// ---- the popover ---------------------------------------------------------------------------------
+
+fn hover_row_actions(vcx: &mut VisualTestContext, selector: &str) {
+    let at = bounds(vcx, selector).center();
+    vcx.simulate_mouse_move(at, None, Modifiers::none());
+    vcx.executor().advance_clock(std::time::Duration::from_millis(400));
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_picker_opens_as_a_popover_under_the_button_that_opened_it(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_liked_music(&page, vcx);
+    hover_row_actions(vcx, "track-playlist-2");
+    let button = bounds(vcx, "track-playlist-2");
+    click(vcx, "track-playlist-2");
+    let panel = bounds(vcx, "playlist-picker");
+    assert_eq!(panel.size.width, gpui::px(playlist_picker::PANEL_WIDTH));
+    assert_eq!(playlist_picker::PANEL_WIDTH, 280.0);
+    assert!(panel.size.height <= gpui::px(playlist_picker::PANEL_MAX_HEIGHT));
+    assert!(panel.origin.y >= button.bottom(), "below the button");
+    assert!(
+        (panel.right() - button.right()).abs() < gpui::px(1.0),
+        "right edges line up"
+    );
+}
+
+#[gpui::test]
+fn the_p_key_anchors_the_popover_to_the_selected_row(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_liked_music(&page, vcx);
+    vcx.simulate_keystrokes("down p");
+    let slot = bounds(vcx, "track-playlist-1");
+    let panel = bounds(vcx, "playlist-picker");
+    assert!(panel.origin.y >= slot.bottom());
+    assert!((panel.right() - slot.right()).abs() < gpui::px(1.0));
+}
+
+#[gpui::test]
+fn without_an_anchor_the_popover_is_centred(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_picker(&page, vcx, PLAIN);
+    let layer = bounds(vcx, "playlist-picker-layer");
+    let panel = bounds(vcx, "playlist-picker");
+    assert!((panel.center().x - layer.center().x).abs() < gpui::px(1.0));
+    assert!((panel.center().y - layer.center().y).abs() < gpui::px(1.0));
+}
+
+#[gpui::test]
+fn a_click_on_the_page_behind_the_popover_closes_it_and_a_scrim_is_not_drawn(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    open_liked_music(&page, vcx);
+    vcx.simulate_keystrokes("p");
+    assert!(page.picker.read_with(vcx, |p, _| p.is_open()));
+    let layer = bounds(vcx, "playlist-picker-layer");
+    vcx.simulate_click(layer.center(), Modifiers::none());
+    assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
+    assert!(log(&page).is_empty());
+}
+
+// ---- the queue -----------------------------------------------------------------------------------
+
+fn open_queue(page: &Page, vcx: &mut VisualTestContext) {
+    page.shell.update(vcx, |s, cx| s.toggle_queue(cx));
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_queue_rows_heart_likes_the_track_and_does_not_play_it(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (page, vcx) = setup(cx);
+    open_queue(&page, vcx);
+    // Row 0 is playing, row 1 the "Up next" header, row 2 the first up-next track.
+    click(vcx, "queue-like-2");
+    assert_eq!(liked(&page, vcx, PLAIN), Some(true));
+    assert_eq!(log(&page), [entry("like", PLAIN)]);
+    let title = page.player.read_with(vcx, |m, _| m.view().title.to_string());
+    assert_eq!(title, "Midnight Drive", "the click did not start the row");
+    click(vcx, "queue-like-2");
+    assert_eq!(liked(&page, vcx, PLAIN), Some(false));
+}
+
+#[gpui::test]
+fn the_l_key_likes_the_queue_row_under_the_cursor(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (page, vcx) = setup(cx);
+    open_queue(&page, vcx);
+    let panel = page.shell.read_with(vcx, |s, _| s.queue_panel().clone());
+    vcx.update(|window, cx| {
+        let focus = gpui::Focusable::focus_handle(panel.read(cx), cx);
+        window.focus(&focus, cx);
+    });
+    vcx.simulate_keystrokes("down down l");
+    assert_eq!(liked(&page, vcx, PLAIN), Some(true));
+    assert_eq!(log(&page), [entry("like", PLAIN)]);
+}
+
+#[gpui::test]
+fn a_queue_rows_heart_follows_a_like_made_elsewhere(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (page, vcx) = setup(cx);
+    open_queue(&page, vcx);
+    page.writes
+        .update(vcx, |w, cx| w.set_liked(PLAIN, true, cx));
+    vcx.run_until_parked();
+    // The row now reads "Unlike": clicking it removes the like.
+    click(vcx, "queue-like-2");
+    assert_eq!(liked(&page, vcx, PLAIN), Some(false));
 }

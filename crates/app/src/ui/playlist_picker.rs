@@ -1,5 +1,7 @@
-//! The add-to-playlist picker: a small panel listing the account's playlists, opened over the
-//! window from the add-to-playlist action of a row, the player bar's track or Now Playing.
+//! The add-to-playlist picker: a small popover listing the account's playlists, anchored to the
+//! add-to-playlist action (or the selected row) that opened it. With no anchor it sits in the
+//! middle of the window. There is no scrim: the page behind stays as it is, and a click on it
+//! closes the popover.
 //!
 //! Choosing a playlist closes the panel at once; the add itself is optimistic and rolls back
 //! with an error if the service refuses (see `library::writes`). A playlist that already holds
@@ -11,9 +13,9 @@ use apollo_domain::listing::LoadFailure;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
-    actions, div, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, Focusable,
-    IntoElement, KeyBinding, MouseButton, ParentElement, Render, ScrollHandle, SharedString,
-    Styled, Window,
+    actions, div, prelude::*, px, AnyElement, App, Bounds, Context, Entity, FocusHandle,
+    Focusable, IntoElement, KeyBinding, MouseButton, ParentElement, Pixels, Render, ScrollHandle,
+    SharedString, Styled, Window,
 };
 
 use crate::assets::Icon;
@@ -47,12 +49,13 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-const PANEL_WIDTH: f32 = 360.0;
-const PANEL_MAX_HEIGHT: f32 = 440.0;
+pub const PANEL_WIDTH: f32 = 280.0;
+pub const PANEL_MAX_HEIGHT: f32 = 320.0;
 const ROW_HEIGHT: f32 = 40.0;
 const SKELETON_ROWS: usize = 5;
-/// The scrim over the page behind the panel: the base surface, mostly opaque.
-const SCRIM: f32 = 0.6;
+/// Gap between the anchor and the popover, and the least it keeps from the window's edge.
+const ANCHOR_GAP: f32 = spacing::S1;
+const EDGE_MARGIN: f32 = spacing::S2;
 
 struct Open {
     video_id: String,
@@ -64,6 +67,8 @@ struct Open {
     request: u64,
     /// Where keyboard focus returns to when the panel closes.
     return_focus: Option<FocusHandle>,
+    /// Window-space bounds of what opened it; none centres the popover.
+    anchor: Option<Bounds<Pixels>>,
 }
 
 pub struct PlaylistPicker {
@@ -108,15 +113,46 @@ impl PlaylistPicker {
         self.open.as_ref().map(|o| &o.playlists)
     }
 
+    /// The bounds the popover is anchored to.
+    pub fn anchor(&self) -> Option<Bounds<Pixels>> {
+        self.open.as_ref().and_then(|o| o.anchor)
+    }
+
     pub fn cursor(&self) -> Option<usize> {
         self.open.as_ref().map(|o| o.cursor)
     }
 
-    /// Open the panel for a track. Focus moves into it and comes back on close.
+    /// Open the panel for a track in the middle of the window. Focus moves into it and comes
+    /// back on close.
     pub fn open(
         &mut self,
         video_id: &str,
         title: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_with(video_id, title, None, window, cx);
+    }
+
+    /// Open the panel next to the element that recorded `anchor` (see `ui::anchor`); centred
+    /// when nothing is recorded.
+    pub fn open_at(
+        &mut self,
+        video_id: &str,
+        title: impl Into<SharedString>,
+        anchor: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let bounds = crate::ui::anchor::bounds_of(anchor, cx);
+        self.open_with(video_id, title, bounds, window, cx);
+    }
+
+    fn open_with(
+        &mut self,
+        video_id: &str,
+        title: impl Into<SharedString>,
+        anchor: Option<Bounds<Pixels>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -132,6 +168,7 @@ impl PlaylistPicker {
             cursor: 0,
             request: 0,
             return_focus,
+            anchor,
         });
         window.focus(&self.focus, cx);
         self.load(cx);
@@ -313,11 +350,11 @@ impl Render for PlaylistPicker {
             .max_w_full()
             .max_h(px(PANEL_MAX_HEIGHT))
             .p(px(spacing::S2))
-            .rounded(px(radius::LARGE))
+            .rounded(px(radius::MEDIUM))
             .bg(color::bg_overlay())
             .border_1()
             .border_color(color::border_subtle())
-            // Clicks inside the panel are not clicks on the scrim.
+            // Clicks inside the panel are not clicks on the page behind it.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_action(cx.listener(|m, _: &PickerUp, _, cx| m.move_cursor(-1, cx)))
             .on_action(cx.listener(|m, _: &PickerDown, _, cx| m.move_cursor(1, cx)))
@@ -356,26 +393,71 @@ impl Render for PlaylistPicker {
             )
             .child(body);
 
-        div()
-            .id("playlist-picker-scrim")
-            .debug_selector(|| "playlist-picker-scrim".into())
+        // A transparent layer under the popover catches the click that closes it (no scrim);
+        // the title bar stays out of reach so the window controls keep working.
+        let layer = div()
+            .id("playlist-picker-layer")
+            .debug_selector(|| "playlist-picker-layer".into())
             .absolute()
             .top(px(layout::TITLE_BAR_HEIGHT))
             .left_0()
             .right_0()
             .bottom_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p(px(spacing::S4))
-            .bg(color::bg_base().opacity(SCRIM))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|m, _, window, cx| m.close(window, cx)),
-            )
-            .child(panel)
+            );
+        match open.anchor {
+            Some(anchor) => {
+                let at = popover_position(anchor, window.viewport_size());
+                let mut placed = div().absolute().left(px(at.left));
+                placed = match at.vertical {
+                    Vertical::Top(y) => placed.top(px(y - layout::TITLE_BAR_HEIGHT)),
+                    Vertical::Bottom(y) => placed.bottom(px(y)),
+                };
+                layer.child(placed.child(panel))
+            }
+            None => layer
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(spacing::S4))
+                .child(panel),
+        }
             .into_any_element()
     }
+}
+
+/// Where the popover goes, in window coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Position {
+    pub left: f32,
+    pub vertical: Vertical,
+}
+
+/// Either the popover's top edge, or its bottom edge measured up from the window's bottom.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Vertical {
+    Top(f32),
+    Bottom(f32),
+}
+
+/// Below the anchor with the right edges aligned (the actions sit at a row's right), above it
+/// when the room below is too short for the tallest popover, and always inside the window.
+pub fn popover_position(anchor: Bounds<Pixels>, window: gpui::Size<Pixels>) -> Position {
+    let (window_w, window_h) = (f32::from(window.width), f32::from(window.height));
+    let right = f32::from(anchor.origin.x + anchor.size.width);
+    let top = f32::from(anchor.origin.y);
+    let bottom = f32::from(anchor.origin.y + anchor.size.height);
+    let max_left = (window_w - PANEL_WIDTH - EDGE_MARGIN).max(EDGE_MARGIN);
+    let left = (right - PANEL_WIDTH).clamp(EDGE_MARGIN, max_left);
+    let room_below = window_h - bottom - ANCHOR_GAP - EDGE_MARGIN;
+    let vertical = if room_below >= PANEL_MAX_HEIGHT || top < PANEL_MAX_HEIGHT {
+        Vertical::Top(bottom + ANCHOR_GAP)
+    } else {
+        Vertical::Bottom(window_h - top + ANCHOR_GAP)
+    };
+    Position { left, vertical }
 }
 
 fn playlist_row(
@@ -493,4 +575,41 @@ fn message(text: &'static str, action: Option<TextButton>, cx: &App) -> AnyEleme
         )
         .children(action)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{point, size};
+
+    fn anchor(x: f32, y: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(32.0), px(32.0)))
+    }
+
+    #[test]
+    fn it_opens_below_the_anchor_with_right_edges_aligned() {
+        let at = popover_position(anchor(900.0, 200.0), size(px(1200.0), px(800.0)));
+        assert_eq!(at.left, 932.0 - PANEL_WIDTH);
+        assert_eq!(at.vertical, Vertical::Top(200.0 + 32.0 + ANCHOR_GAP));
+    }
+
+    #[test]
+    fn it_opens_above_when_the_room_below_is_short() {
+        let at = popover_position(anchor(900.0, 700.0), size(px(1200.0), px(800.0)));
+        assert_eq!(at.vertical, Vertical::Bottom(800.0 - 700.0 + ANCHOR_GAP));
+    }
+
+    #[test]
+    fn it_stays_inside_the_window_sideways() {
+        let at = popover_position(anchor(10.0, 100.0), size(px(1200.0), px(800.0)));
+        assert_eq!(at.left, EDGE_MARGIN);
+        let at = popover_position(anchor(1190.0, 100.0), size(px(1200.0), px(800.0)));
+        assert_eq!(at.left, 1200.0 - PANEL_WIDTH - EDGE_MARGIN);
+    }
+
+    #[test]
+    fn a_short_window_opens_below_rather_than_off_the_top() {
+        let at = popover_position(anchor(500.0, 200.0), size(px(1000.0), px(400.0)));
+        assert!(matches!(at.vertical, Vertical::Top(_)));
+    }
 }
