@@ -21,7 +21,7 @@ use crate::latency::Latency;
 use crate::library::LibrarySource;
 use crate::os_media::{MediaState, MediaTrack, OsCommand};
 use crate::persist::QueueSaver;
-use crate::settings::{AutoplayStore, NormalizeStore, QueueStore, VolumeStore};
+use crate::settings::{AutoplayStore, GaplessStore, NormalizeStore, QueueStore, VolumeStore};
 use crate::thumbs::Thumbs;
 
 type AppDriver =
@@ -145,6 +145,9 @@ pub struct PlayerModel {
     /// Volume normalization (Settings > Playback): on by default.
     normalize: bool,
     normalize_store: Option<Arc<dyn NormalizeStore>>,
+    /// Gapless playback (Settings > Playback): on by default.
+    gapless: bool,
+    gapless_store: Option<Arc<dyn GaplessStore>>,
     /// Writes the queue and position down; present while someone is signed in.
     saver: Option<QueueSaver>,
     /// What the saved queue was made from, to tell a changed queue from a moved position.
@@ -180,6 +183,8 @@ impl PlayerModel {
             autoplay_store: None,
             normalize: true,
             normalize_store: None,
+            gapless: true,
+            gapless_store: None,
             saver: None,
             saved_fp: None,
             saved_row: false,
@@ -231,6 +236,7 @@ impl PlayerModel {
         };
         driver.engine.set_volume(self.effective_volume());
         driver.engine.set_normalization(self.normalize);
+        driver.set_gapless(self.gapless);
         // The queue starts paused on its current track: have it ready so the first Play is instant.
         let first = driver.coordinator().queue().current().map(|e| e.track.clone());
         self.saved_fp = Some(queue_fingerprint(driver.coordinator().queue()));
@@ -296,6 +302,37 @@ impl PlayerModel {
             d.engine.set_normalization(on);
         }
         if let Some(store) = self.normalize_store.clone() {
+            std::thread::spawn(move || store.save(on));
+        }
+        cx.notify();
+    }
+
+    /// Where the gapless switch is saved between runs (none in tests and the headless harness).
+    pub fn set_gapless_store(&mut self, store: Option<Arc<dyn GaplessStore>>) {
+        self.gapless_store = store;
+    }
+
+    /// Apply the gapless setting saved by a previous run (on when none was saved), before the
+    /// backend installs.
+    pub fn restore_gapless(&mut self, saved: Option<bool>) {
+        if let Some(on) = saved {
+            self.gapless = on;
+        }
+    }
+
+    pub fn gapless(&self) -> bool {
+        self.gapless
+    }
+
+    /// Turn gapless playback on or off and remember the choice. Off means the next track opens
+    /// when the current one ends, as before; on takes effect for the track that follows the one
+    /// playing.
+    pub fn set_gapless(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.gapless = on;
+        if let Some(d) = self.driver.as_mut() {
+            d.set_gapless(on);
+        }
+        if let Some(store) = self.gapless_store.clone() {
             std::thread::spawn(move || store.save(on));
         }
         cx.notify();

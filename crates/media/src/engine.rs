@@ -67,6 +67,11 @@ enum Cmd {
     Stop,
     SetVolume(u8),
     SetNormalization(bool),
+    Preload {
+        load: LoadId,
+        lease: LeaseId,
+    },
+    SetGapless(bool),
     /// Test/diagnostic hook: current value of mpv options (names are fixed by the caller).
     Query(Vec<String>, Sender<Vec<(String, String)>>),
     /// Test/diagnostic hook: current value of mpv properties (live state, not options).
@@ -167,6 +172,12 @@ impl MediaEngine for MpvEngine {
     fn set_normalization(&mut self, on: bool) {
         self.send(Cmd::SetNormalization(on));
     }
+    fn preload(&mut self, load: LoadId, lease: LeaseId) {
+        self.send(Cmd::Preload { load, lease });
+    }
+    fn set_gapless(&mut self, on: bool) {
+        self.send(Cmd::SetGapless(on));
+    }
 }
 
 impl Drop for MpvEngine {
@@ -175,6 +186,27 @@ impl Drop for MpvEngine {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+}
+
+impl From<&[(String, String)]> for HeaderPlan {
+    fn from(headers: &[(String, String)]) -> Self {
+        let mut plan = HeaderPlan::default();
+        for (name, value) in headers {
+            let lname = name.to_ascii_lowercase();
+            if !ALLOWED_HEADERS.contains(&lname.as_str())
+                || value.contains(['\r', '\n'])
+                || name.contains(['\r', '\n', ':'])
+            {
+                continue;
+            }
+            if lname == "user-agent" {
+                plan.user_agent = Some(value.clone());
+            } else {
+                plan.fields.push(format!("{name}: {value}"));
+            }
+        }
+        plan
     }
 }
 
@@ -235,6 +267,13 @@ struct Active {
     video_id: String,
     /// What YouTube measured for it, once known. Looked up again while it is `None`.
     loudness_db: Option<f32>,
+    /// The request headers its stream was opened with (a lined-up track must use the same ones).
+    headers: HeaderPlan,
+    /// Set when mpv itself moved on to this load from the one before it (gapless): that load,
+    /// which the coordinator still believes is playing until it hears `Transitioned`. If this
+    /// load is dropped or fails before then, the old one is reported ended so the coordinator
+    /// carries on. Cleared once the track has been playing for a moment.
+    promoted_from: Option<LoadId>,
     /// mpv announced the file for this load. Events before this belong to a replaced file.
     started: bool,
     /// FileLoaded seen and `Opened` sent.
@@ -246,6 +285,20 @@ struct Active {
     logs: VecDeque<String>,
     device_reported: bool,
     ao_checked: bool,
+}
+
+/// The track lined up in mpv's playlist behind the one playing (gapless).
+struct Queued {
+    load: LoadId,
+    video_id: String,
+    headers: HeaderPlan,
+}
+
+/// The request headers a stream is opened with, already reduced to the allow-list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct HeaderPlan {
+    user_agent: Option<String>,
+    fields: Vec<String>,
 }
 
 struct PendingSeek {
@@ -265,6 +318,9 @@ struct Pump {
     normalize: bool,
     loudness: LoudnessTable,
     gain: GainRamp,
+    /// Gapless playback: the switch, and the track lined up behind the one playing.
+    gapless: bool,
+    queued: Option<Queued>,
 }
 
 impl Pump {
@@ -281,7 +337,26 @@ impl Pump {
             normalize: true,
             loudness,
             gain: GainRamp::new(Instant::now()),
+            gapless: true,
+            queued: None,
         }
+        .with_gapless_options()
+    }
+
+    /// mpv's own side of gapless: keep the audio output running across a file change, and open
+    /// the next playlist entry in the background before the current one ends. Set at run time
+    /// and never fatal: an mpv without `prefetch-playlist` still changes file without a decoder
+    /// restart, it just opens the next stream when the current one ends.
+    fn with_gapless_options(self) -> Self {
+        let _ = self.mpv.set_property("gapless-audio", "yes");
+        self.apply_prefetch();
+        self
+    }
+
+    fn apply_prefetch(&self) {
+        let _ = self
+            .mpv
+            .set_property("prefetch-playlist", if self.gapless { "yes" } else { "no" });
     }
 
     fn emit(&self, load: LoadId, event: EngineEvent) {
@@ -330,9 +405,14 @@ impl Pump {
                 generation,
                 position_ms,
             } => self.seek(load, generation, position_ms),
-            Cmd::Close(load) => {
-                if self.active.as_ref().is_some_and(|a| a.load == load) {
-                    self.stop_playback();
+            Cmd::Close(load) => self.close(load),
+            Cmd::Preload { load, lease } => self.preload(load, lease),
+            Cmd::SetGapless(on) => {
+                self.gapless = on;
+                self.apply_prefetch();
+                if !on {
+                    // What was lined up is taken back: the next track opens at the end of this one.
+                    self.dequeue();
                 }
             }
             Cmd::Stop => self.stop_playback(),
@@ -377,6 +457,8 @@ impl Pump {
     /// Silence everything and forget the active load; events still in flight are ignored.
     fn stop_playback(&mut self) {
         self.active = None;
+        // `stop` empties the playlist, a lined-up track included.
+        self.queued = None;
         let _ = self.mpv.command("stop", &[]);
         self.clear_request_headers();
     }
@@ -397,12 +479,17 @@ impl Pump {
             }
         };
         // Replace whatever is playing. Old-file events are ignored until StartFile of this load.
+        // (`loadfile replace` also empties the playlist, so nothing stays lined up.)
         self.position.reset();
+        self.queued = None;
         let video_id = lease.video_id().as_str().to_owned();
+        let headers = HeaderPlan::from(lease.headers_for(lease.url()));
         self.active = Some(Active {
             load,
             loudness_db: self.loudness.get(&video_id),
             video_id,
+            headers: headers.clone(),
+            promoted_from: None,
             started: false,
             loaded: false,
             paused: start_paused,
@@ -414,7 +501,7 @@ impl Pump {
         });
         // This track's gain, in place before its first sample (the old track is being replaced).
         self.track_changed();
-        if let Err(e) = self.set_request_headers(lease.headers_for(lease.url())) {
+        if let Err(e) = self.set_request_headers(&headers) {
             self.active = None;
             let _ = e;
             self.emit(load, EngineEvent::Error(Failure::Media));
@@ -434,6 +521,101 @@ impl Pump {
             self.active = None;
             self.emit(load, EngineEvent::Error(Failure::Media));
         }
+    }
+
+    fn close(&mut self, load: LoadId) {
+        if self.active.as_ref().is_some_and(|a| a.load == load) {
+            let from = self.active.as_ref().and_then(|a| a.promoted_from);
+            self.stop_playback();
+            // mpv had already moved to this load by itself; the coordinator may not have heard
+            // yet and would wait on the old one for ever. If it has moved on, this is ignored.
+            if let Some(old) = from {
+                self.emit(old, EngineEvent::Eof);
+            }
+        } else if self.queued.as_ref().is_some_and(|q| q.load == load) {
+            self.dequeue();
+        }
+    }
+
+    // ------------------------------------------------------------- gapless
+
+    /// Line the next track up behind the one playing, so mpv carries on into it with no gap.
+    /// Declined silently (the coordinator then opens it normally at the end of this track)
+    /// when gapless is off, nothing is playing yet, the lease is unusable, or the stream needs
+    /// request headers other than the playing one's: mpv keeps one global header list, and
+    /// changing it would change the stream already playing.
+    fn preload(&mut self, load: LoadId, lease: LeaseId) {
+        if !self.gapless {
+            return;
+        }
+        let Some(playing) = self
+            .active
+            .as_ref()
+            .filter(|a| a.loaded && a.promoted_from.is_none())
+        else {
+            return;
+        };
+        let playing_headers = playing.headers.clone();
+        if self.queued.as_ref().is_some_and(|q| q.load == load) {
+            return;
+        }
+        self.dequeue();
+        let Ok(lease) = self.leases.get_fresh(
+            lease,
+            unix_now(),
+            self.cfg.lease_margin,
+            self.cfg.max_unknown_lease_age,
+        ) else {
+            return;
+        };
+        let headers = HeaderPlan::from(lease.headers_for(lease.url()));
+        if headers != playing_headers {
+            return;
+        }
+        // The URL goes through the API, never a command line or a log line.
+        if self
+            .mpv
+            .command("loadfile", &[lease.url().as_str(), "append"])
+            .is_err()
+        {
+            return;
+        }
+        self.queued = Some(Queued {
+            load,
+            video_id: lease.video_id().as_str().to_owned(),
+            headers,
+        });
+    }
+
+    /// Takes back the lined-up track (`playlist-clear` keeps the one playing).
+    fn dequeue(&mut self) {
+        if self.queued.take().is_some() {
+            let _ = self.mpv.command("playlist-clear", &[]);
+        }
+    }
+
+    /// The track playing ended and the lined-up one carries on. mpv has already begun it, so its
+    /// gain is applied now, here, before its first sample (the old track's tail is already past
+    /// the volume filter); the coordinator hears of it when mpv reports the file loaded.
+    fn promote(&mut self, next: Queued) {
+        let from = self.active.as_ref().map(|a| a.load);
+        self.position.reset();
+        self.active = Some(Active {
+            load: next.load,
+            loudness_db: self.loudness.get(&next.video_id),
+            video_id: next.video_id,
+            headers: next.headers,
+            promoted_from: from,
+            started: false,
+            loaded: false,
+            paused: false,
+            seek: None,
+            buffering: false,
+            logs: VecDeque::new(),
+            device_reported: false,
+            ao_checked: false,
+        });
+        self.track_changed();
     }
 
     fn set_pause(&mut self, load: LoadId, pause: bool) {
@@ -529,25 +711,11 @@ impl Pump {
     /// every request of this load (including a redirect target) would receive it: see the
     /// redirect test and docs/m2-media-notes.md. Only the allow-listed, non-secret headers can
     /// ever be here; Cookie/Authorization never are.
-    fn set_request_headers(&self, headers: &[(String, String)]) -> Result<(), ()> {
-        let mut fields: Vec<String> = Vec::new();
-        let mut ua: Option<String> = None;
-        for (name, value) in headers {
-            let lname = name.to_ascii_lowercase();
-            if !ALLOWED_HEADERS.contains(&lname.as_str())
-                || value.contains(['\r', '\n'])
-                || name.contains(['\r', '\n', ':'])
-            {
-                continue;
-            }
-            if lname == "user-agent" {
-                ua = Some(value.clone());
-            } else {
-                fields.push(format!("{name}: {value}"));
-            }
-        }
-        let _ = self.mpv.set_property("user-agent", ua.unwrap_or_default().as_str());
-        set_string_list(&self.mpv, "http-header-fields", &fields)
+    fn set_request_headers(&self, plan: &HeaderPlan) -> Result<(), ()> {
+        let _ = self
+            .mpv
+            .set_property("user-agent", plan.user_agent.clone().unwrap_or_default().as_str());
+        set_string_list(&self.mpv, "http-header-fields", &plan.fields)
     }
 
     fn clear_request_headers(&self) {
@@ -589,12 +757,19 @@ impl Pump {
                 };
                 a.loaded = true;
                 let load = a.load;
+                let carried_on = a.promoted_from.is_some();
                 let duration_ms = self
                     .mpv
                     .get_property::<f64>("duration")
                     .ok()
                     .filter(|d| d.is_finite() && *d > 0.0)
                     .map(|d| (d * 1000.0).round() as u64);
+                if carried_on {
+                    // mpv moved on to the lined-up track by itself: tell the coordinator, and
+                    // drop the finished file from mpv's playlist (it keeps the current one).
+                    let _ = self.mpv.command("playlist-clear", &[]);
+                    self.emit(load, EngineEvent::Transitioned);
+                }
                 self.emit(load, EngineEvent::Opened { duration_ms });
             }
             OwnedEvent::Seek => {
@@ -646,29 +821,45 @@ impl Pump {
             mpv_end_file_reason_MPV_END_FILE_REASON_ERROR as ERROR,
         };
         let Some(a) = self.active.as_ref() else { return };
-        if !a.started {
-            return; // end of the file this load replaced
+        // Before StartFile this is the end of the file this load replaced, unless mpv carried on
+        // into this load by itself and the file failed before it ever started.
+        if !a.started && a.promoted_from.is_none() {
+            return;
         }
-        let load = a.load;
+        let (load, from, loaded) = (a.load, a.promoted_from, a.loaded);
         if reason == EOF as u32 {
-            let loaded = a.loaded;
+            // The track ended with another lined up behind it: mpv carries straight on, so the
+            // coordinator hears of the change when it is loaded, not of an end.
+            if loaded {
+                if let Some(next) = self.queued.take() {
+                    self.promote(next);
+                    return;
+                }
+            }
             self.active = None;
             self.clear_request_headers();
-            self.emit(
-                load,
-                if loaded {
-                    EngineEvent::Eof
-                } else {
-                    EngineEvent::Error(Failure::Media)
-                },
-            );
+            if loaded {
+                self.emit(load, EngineEvent::Eof);
+            } else {
+                self.fail_load(load, from, Failure::Media);
+            }
         } else if reason == ERROR as u32 {
             let failure = classify_end_file_error(error, a.logs.iter().map(String::as_str));
             self.active = None;
             self.clear_request_headers();
-            self.emit(load, EngineEvent::Error(failure));
+            self.fail_load(load, from, failure);
         }
         // STOP/QUIT/REDIRECT: we asked for it (close, stop, replace); say nothing.
+    }
+
+    /// A load failed. If mpv had carried on into it by itself, the coordinator is still waiting
+    /// on the track before it, so that one is reported ended too: it then moves on (and tries
+    /// the failed track again, from scratch).
+    fn fail_load(&mut self, load: LoadId, from: Option<LoadId>, failure: Failure) {
+        self.emit(load, EngineEvent::Error(failure));
+        if let Some(old) = from {
+            self.emit(old, EngineEvent::Eof);
+        }
     }
 
     // ----------------------------------------------------------------- poll
@@ -712,6 +903,10 @@ impl Pump {
         }
         if let Some(ms) = self.position_ms() {
             if let Some(ms) = self.position.offer(Instant::now(), ms) {
+                // Playing on its own for a moment: the hand-over has long been heard.
+                if let Some(a) = self.active.as_mut() {
+                    a.promoted_from = None;
+                }
                 self.emit(load, EngineEvent::Position(ms));
             }
         }

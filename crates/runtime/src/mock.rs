@@ -71,6 +71,8 @@ pub enum EngineCall {
     Stop,
     SetVolume(u8),
     SetNormalization(bool),
+    Preload(LoadId),
+    SetGapless(bool),
 }
 
 /// Models what the audio device is doing.
@@ -81,6 +83,8 @@ pub struct MockEngine {
     audible: Option<LoadId>,
     paused: bool,
     closed: HashSet<u64>,
+    /// The load handed over by `preload` and not yet taken back or played.
+    lined_up: Option<LoadId>,
 }
 
 impl MockEngine {
@@ -103,6 +107,28 @@ impl MockEngine {
     pub fn event(&self, load: LoadId, event: EngineEvent) -> Event {
         Event::Engine { load, event }
     }
+    /// The load lined up to follow the one playing, if any.
+    pub fn lined_up(&self) -> Option<LoadId> {
+        self.lined_up
+    }
+    /// The track now playing ends and the lined-up one carries on with no gap: the events the
+    /// engine sends for that (`Transitioned`, then `Opened` with the duration). Nothing
+    /// lined up gives none: the old track just ends.
+    pub fn gapless_boundary(&mut self, duration_ms: u64) -> Vec<Event> {
+        let Some(next) = self.lined_up.take() else {
+            return Vec::new();
+        };
+        self.audible = Some(next);
+        vec![
+            self.event(next, EngineEvent::Transitioned),
+            self.event(
+                next,
+                EngineEvent::Opened {
+                    duration_ms: Some(duration_ms),
+                },
+            ),
+        ]
+    }
 }
 
 impl MediaEngine for MockEngine {
@@ -114,6 +140,8 @@ impl MediaEngine for MockEngine {
         });
         self.audible = Some(load);
         self.paused = start_paused;
+        // Opening replaces the playlist, lined-up track included.
+        self.lined_up = None;
     }
     fn pause(&mut self, load: LoadId) {
         self.calls.push(EngineCall::Pause(load));
@@ -137,12 +165,16 @@ impl MediaEngine for MockEngine {
     fn close(&mut self, load: LoadId) {
         self.calls.push(EngineCall::Close(load));
         self.closed.insert(load.get());
+        if self.lined_up == Some(load) {
+            self.lined_up = None;
+        }
         if self.audible == Some(load) {
             self.audible = None;
         }
     }
     fn stop(&mut self) {
         self.calls.push(EngineCall::Stop);
+        self.lined_up = None;
         self.audible = None;
         self.paused = false;
     }
@@ -151,5 +183,12 @@ impl MediaEngine for MockEngine {
     }
     fn set_normalization(&mut self, on: bool) {
         self.calls.push(EngineCall::SetNormalization(on));
+    }
+    fn preload(&mut self, load: LoadId, _lease: LeaseId) {
+        self.calls.push(EngineCall::Preload(load));
+        self.lined_up = Some(load);
+    }
+    fn set_gapless(&mut self, on: bool) {
+        self.calls.push(EngineCall::SetGapless(on));
     }
 }
