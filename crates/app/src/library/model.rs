@@ -566,8 +566,13 @@ impl LibraryModel {
         let Some(detail) = self.collection_mut(id) else {
             return;
         };
-        let rows: Vec<TrackRow> = detail.listing.items().to_vec();
-        self.play_rows(&rows, request, cx);
+        let rows: Vec<(Track, Option<String>)> = detail
+            .listing
+            .items()
+            .iter()
+            .map(|row| (row.track.clone(), row.thumbnail.clone()))
+            .collect();
+        self.play_tracks(rows, request, cx);
     }
 
     /// An artist's play commands act on the top songs shown on the page.
@@ -575,32 +580,33 @@ impl LibraryModel {
         let Some(detail) = self.artist_mut(id) else {
             return;
         };
-        let rows: Vec<TrackRow> = detail
+        let rows: Vec<(Track, Option<String>)> = detail
             .content()
-            .map(|c| c.top_songs.clone())
+            .map(|c| {
+                c.top_songs
+                    .iter()
+                    .map(|r| (r.track.clone(), r.thumbnail.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
-        self.play_rows(&rows, request, cx);
+        self.play_tracks(rows, request, cx);
     }
 
-    /// Queues the rows' tracks and hands the player their listing thumbnails, so what plays
-    /// shows the art the list showed.
-    fn play_rows(&mut self, rows: &[TrackRow], request: PlayRequest, cx: &mut Context<Self>) {
+    /// `rows` pair each track with its listing thumbnail, which the artwork source is told about
+    /// first: it only knows the start-up queue's covers otherwise.
+    fn play_tracks(
+        &mut self,
+        rows: Vec<(Track, Option<String>)>,
+        request: PlayRequest,
+        cx: &mut Context<Self>,
+    ) {
         if rows.is_empty() {
             return;
         }
-        let tracks: Vec<Track> = rows.iter().map(|row| row.track.clone()).collect();
-        let thumbs: Vec<(String, String)> = rows
-            .iter()
-            .filter_map(|row| {
-                Some((
-                    row.track.video_id.as_str().to_owned(),
-                    row.thumbnail.clone()?,
-                ))
-            })
-            .collect();
+        let (tracks, thumbs): (Vec<Track>, Vec<Option<String>>) = rows.into_iter().unzip();
         self.player.update(cx, |p, cx| {
-            for (id, url) in &thumbs {
-                p.hint_art(id, Some(url));
+            for (track, thumb) in tracks.iter().zip(&thumbs) {
+                p.hint_art(track.video_id.as_str(), thumb.as_deref());
             }
             p.play_tracks(tracks, request.start, request.shuffle, cx)
         });
