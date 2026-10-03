@@ -265,7 +265,11 @@ fn sign_out_handler(
 ) -> impl Fn(&mut Window, &mut App) + 'static {
     let (model, player) = (model.clone(), player.clone());
     move |_, cx| {
-        player.update(cx, |m, cx| m.handle(Event::Stop, cx));
+        player.update(cx, |m, cx| {
+            m.handle(Event::Stop, cx);
+            // The saved queue is the account's own: it goes with the session.
+            m.forget_saved_queue();
+        });
         model.update(cx, |m, cx| m.sign_out(cx));
     }
 }

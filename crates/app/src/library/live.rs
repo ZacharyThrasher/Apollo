@@ -212,6 +212,14 @@ impl LibrarySource for InnerTubeLibrary {
             .block_on(async { source.home_continuation(token).await })
     }
 
+    fn radio(&self, video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            Ok(source.radio(video_id).await?.into_iter().map(row).collect())
+        })
+    }
+
     fn set_liked(&self, video_id: &str, liked: bool) -> Result<(), WriteFailure> {
         let source = self.source().map_err(write_failure)?;
         self.rt.block_on(async {
