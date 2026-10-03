@@ -21,6 +21,9 @@ impl BrowseId {
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Opaque playlist ID (library playlist, album playlist, radio/mix list).
@@ -45,6 +48,12 @@ pub struct QueueEntryId(pub(crate) u64);
 impl QueueEntryId {
     pub fn get(self) -> u64 {
         self.0
+    }
+
+    /// Rebuild an ID from stored data. [`crate::queue::Queue::restore`] checks
+    /// that restored IDs are unique and below the queue's next ID.
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw)
     }
 }
 

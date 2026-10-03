@@ -446,6 +446,96 @@ impl Queue {
     }
 }
 
+/// Everything needed to rebuild a [`Queue`] exactly (BUILD_SPEC STORE-01).
+/// Contains tracks and ordering only: never leases, URLs or credentials.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueSnapshot {
+    pub next_id: u64,
+    pub history: Vec<QueueEntry>,
+    /// The current entry and whether its row was removed by the user.
+    pub current: Option<(QueueEntry, bool)>,
+    pub manual: Vec<QueueEntry>,
+    pub context: Vec<QueueEntry>,
+    pub radio: Vec<QueueEntry>,
+    pub canonical: Vec<QueueEntryId>,
+    pub shuffle: bool,
+    pub seed: u64,
+    pub repeat: Repeat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreError {
+    DuplicateEntryId,
+    /// An entry ID is not below `next_id`, so a future mint could collide.
+    IdOutOfRange,
+    /// An entry sits in a segment that does not match its origin.
+    OriginMismatch,
+    /// The canonical order names an entry the queue does not contain.
+    UnknownCanonicalEntry,
+}
+
+impl Queue {
+    pub fn snapshot(&self) -> QueueSnapshot {
+        QueueSnapshot {
+            next_id: self.next_id,
+            history: self.history.clone(),
+            current: self.current.as_ref().map(|c| (c.entry.clone(), c.removed)),
+            manual: self.manual.clone(),
+            context: self.context.clone(),
+            radio: self.radio.clone(),
+            canonical: self.canonical.clone(),
+            shuffle: self.shuffle,
+            seed: self.seed,
+            repeat: self.repeat,
+        }
+    }
+
+    /// Rebuild a queue from stored data, rejecting anything that would break
+    /// the occurrence-ID or segment invariants.
+    pub fn restore(snap: QueueSnapshot) -> Result<Self, RestoreError> {
+        let mut seen = std::collections::HashSet::new();
+        let all = snap
+            .history
+            .iter()
+            .chain(snap.current.iter().map(|(e, _)| e))
+            .chain(&snap.manual)
+            .chain(&snap.context)
+            .chain(&snap.radio);
+        for e in all {
+            if !seen.insert(e.id) {
+                return Err(RestoreError::DuplicateEntryId);
+            }
+            if e.id.0 >= snap.next_id {
+                return Err(RestoreError::IdOutOfRange);
+            }
+        }
+        let ok_origin = |seg: &[QueueEntry], origin: Origin| seg.iter().all(|e| e.origin == origin);
+        if !ok_origin(&snap.manual, Origin::Manual)
+            || !ok_origin(&snap.context, Origin::Context)
+            || !ok_origin(&snap.radio, Origin::Radio)
+        {
+            return Err(RestoreError::OriginMismatch);
+        }
+        if snap.canonical.iter().any(|id| !seen.contains(id)) {
+            return Err(RestoreError::UnknownCanonicalEntry);
+        }
+        Ok(Self {
+            next_id: snap.next_id,
+            history: snap.history,
+            current: snap
+                .current
+                .map(|(entry, removed)| Current { entry, removed }),
+            manual: snap.manual,
+            context: snap.context,
+            radio: snap.radio,
+            canonical: snap.canonical,
+            shuffle: snap.shuffle,
+            seed: snap.seed,
+            repeat: snap.repeat,
+        })
+    }
+}
+
 /// Small deterministic PRNG so shuffle order is reproducible from a stored seed.
 struct SplitMix64(u64);
 
@@ -702,5 +792,57 @@ mod tests {
         assert!(q.current().is_none());
         q.play_context(tracks(&["a", "b"]), 99);
         assert_eq!(cur(&q), "b");
+    }
+
+    #[test]
+    fn snapshot_round_trips_and_keeps_minting_unique_ids() {
+        let mut q = Queue::new();
+        q.play_context(tracks(&["a", "b", "c", "d"]), 1);
+        q.add_to_queue(tracks(&["m"]));
+        q.append_radio(tracks(&["r"]));
+        q.set_shuffle(true, 99);
+        q.set_repeat(Repeat::All);
+        let snap = q.snapshot();
+        let mut restored = Queue::restore(snap.clone()).expect("valid snapshot");
+        assert_eq!(restored.snapshot(), snap);
+        assert_eq!(restored.upcoming_ids(), q.upcoming_ids());
+        // New entries after a restore never collide with restored IDs.
+        let new_ids = restored.add_to_queue(tracks(&["x"]));
+        assert!(!q.contains(new_ids[0]));
+        // Toggling shuffle off after restore still recovers canonical order.
+        restored.set_shuffle(false, 0);
+        assert_eq!(vids(restored.context().iter()), ["c", "d"]);
+    }
+
+    #[test]
+    fn restore_rejects_inconsistent_snapshots() {
+        let mut q = Queue::new();
+        q.play_context(tracks(&["a", "b", "c"]), 0);
+        let good = q.snapshot();
+
+        let mut dup = good.clone();
+        dup.context.push(dup.context[0].clone());
+        assert_eq!(
+            Queue::restore(dup).err(),
+            Some(RestoreError::DuplicateEntryId)
+        );
+
+        let mut low = good.clone();
+        low.next_id = 1;
+        assert_eq!(Queue::restore(low).err(), Some(RestoreError::IdOutOfRange));
+
+        let mut origin = good.clone();
+        origin.context[0].origin = Origin::Manual;
+        assert_eq!(
+            Queue::restore(origin).err(),
+            Some(RestoreError::OriginMismatch)
+        );
+
+        let mut canon = good;
+        canon.canonical.push(QueueEntryId(999));
+        assert_eq!(
+            Queue::restore(canon).err(),
+            Some(RestoreError::UnknownCanonicalEntry)
+        );
     }
 }

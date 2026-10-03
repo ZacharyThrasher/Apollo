@@ -207,6 +207,14 @@ impl Coordinator {
         }
     }
 
+    /// Rebuild after a restart: paused, nothing audible, and the first Play
+    /// resolves a fresh stream and resumes near `position_ms`.
+    pub fn restored(queue: Queue, position_ms: u64) -> Self {
+        let mut c = Self::new(queue);
+        c.position_ms = position_ms;
+        c
+    }
+
     // ---- read access -------------------------------------------------
 
     pub fn queue(&self) -> &Queue {
@@ -1367,5 +1375,39 @@ mod tests {
         }
         assert_eq!(cur(&c), "b");
         assert_eq!(c.phase(), Phase::Resolving);
+    }
+
+    // TEST-22 (logic part)
+    #[test]
+    fn restored_session_is_paused_and_first_play_resolves_fresh_near_saved_position() {
+        let mut q = Queue::new();
+        q.play_context(tracks(&["a", "b"]), 0);
+        let mut c = Coordinator::restored(Queue::restore(q.snapshot()).unwrap(), 73_000);
+        assert_eq!(c.phase(), Phase::Idle);
+        assert_eq!(c.intent(), Intent::Paused);
+        assert_eq!(c.active_load(), None, "nothing starts by itself on launch");
+        let fx = c.handle(Event::Play);
+        let (load, resume) = fx
+            .iter()
+            .find_map(|e| match e {
+                Effect::Resolve {
+                    load, resume_ms, ..
+                } => Some((*load, *resume_ms)),
+                _ => None,
+            })
+            .expect("fresh resolution on first Play");
+        assert_eq!(resume, 73_000);
+        let fx = c.handle(Event::Resolved {
+            load,
+            result: Ok(LeaseId(1)),
+        });
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Open {
+                start_ms: 73_000,
+                start_paused: false,
+                ..
+            }
+        )));
     }
 }
