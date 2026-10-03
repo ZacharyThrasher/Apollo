@@ -67,6 +67,13 @@ icons! {
     Checkmark => "checkmark-regular",
     LyricsRegular => "lyrics-regular",
     LyricsFilled => "lyrics-filled",
+    MoreHorizontal => "more-horizontal-regular",
+    Album => "album-regular",
+    Person => "person-regular",
+    Link => "link-regular",
+    Radio => "live-regular",
+    QueueAdd => "queue-add-regular",
+    PlayNext => "play-next-regular",
 }
 
 pub struct Assets;

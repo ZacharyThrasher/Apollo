@@ -52,8 +52,22 @@ pub const MIGRATIONS: &[Migration] = &[Migration {
             entry_id INTEGER NOT NULL
         );
     ",
-}, Migration {
+},
+Migration {
     version: 2,
+    sql: "
+        -- YouTube's measured loudness (dB against its reference level) per video, so the player
+        -- request is made once per track. NULL = the service had no measurement; those rows are
+        -- believed for a day (see apollo-services-common).
+        CREATE TABLE loudness (
+            video_id     TEXT PRIMARY KEY,
+            loudness_db  REAL,
+            fetched_unix INTEGER NOT NULL
+        );
+        CREATE INDEX loudness_fetched ON loudness (fetched_unix);
+    ",
+}, Migration {
+    version: 3,
     sql: "
         -- Lyrics found (or not found) per video. `kind` says how to read `body`: LRC text for
         -- 'synced', plain text for 'plain', empty for 'none' (looked up, nothing there).

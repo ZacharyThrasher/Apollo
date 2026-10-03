@@ -17,9 +17,10 @@ use crate::lyrics::LyricsModel;
 use crate::motion::PanelSlide;
 use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
-use crate::settings::FlagStore;
+use crate::settings::LyricsOpenStore;
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
+use crate::ui::playback_page::PlaybackPage;
 use crate::ui::home_page::{self, HomeView};
 use crate::ui::library::{self, LibraryView};
 use crate::ui::lyrics_pane::LyricsPane;
@@ -27,6 +28,7 @@ use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::playlist_picker::{self, PlaylistPicker};
+use crate::ui::track_menu::{self, MenuHandle, TrackMenu};
 use crate::ui::queue_panel::QueuePanel;
 use crate::ui::search_page::{self, SearchPage};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
@@ -72,6 +74,7 @@ pub fn bind_keys(cx: &mut App) {
     library::bind_keys(cx);
     home_page::bind_keys(cx);
     playlist_picker::bind_keys(cx);
+    track_menu::bind_keys(cx);
 }
 
 /// A toast on screen, possibly on its way out.
@@ -85,6 +88,7 @@ pub struct Shell {
     player: Entity<PlayerModel>,
     account: Entity<AccountModel>,
     account_page: Entity<AccountPage>,
+    playback_page: Entity<PlaybackPage>,
     library: Entity<LibraryView>,
     home: Entity<HomeModel>,
     home_page: Entity<HomeView>,
@@ -94,6 +98,8 @@ pub struct Shell {
     /// Likes and playlist adds, and the short error a failed one leaves.
     writes: Entity<LibraryWrites>,
     picker: Entity<PlaylistPicker>,
+    /// The menu a right-click or a row's More button opens.
+    menu: Entity<TrackMenu>,
     /// The error on screen: it outlives the notice by the length of its fade-out.
     toast: Option<ToastShown>,
     /// Where a page opened from another route (a Search card) returns to when Back closes the
@@ -176,6 +182,22 @@ impl Shell {
         let picker = cx.new(|cx| PlaylistPicker::new(player.clone(), writes.clone(), cx));
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         cx.observe(&picker, |_, _, cx| cx.notify()).detach();
+        let menu = cx.new(|cx| {
+            TrackMenu::new(
+                player.clone(),
+                writes.clone(),
+                picker.clone(),
+                {
+                    let weak = weak.clone();
+                    move |target, window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.open_target(target, window, cx));
+                    }
+                },
+                cx,
+            )
+        });
+        cx.observe(&menu, |_, _, cx| cx.notify()).detach();
+        cx.set_global(MenuHandle(menu.clone()));
         let queue_panel = cx.new(|cx| {
             QueuePanel::new(
                 player.clone(),
@@ -209,6 +231,7 @@ impl Shell {
             )
         });
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
+        let playback_page = cx.new(|cx| PlaybackPage::new(player.clone(), cx));
         let library = cx.new(|cx| {
             LibraryView::new(
                 player.clone(),
@@ -284,6 +307,7 @@ impl Shell {
             player,
             account,
             account_page,
+            playback_page,
             library,
             home,
             home_page,
@@ -291,6 +315,7 @@ impl Shell {
             home_epoch: 0,
             writes,
             picker,
+            menu,
             toast: None,
             detail_origin: None,
             library_epoch: 0,
@@ -337,6 +362,7 @@ impl Shell {
             // Likes and the open picker belong to the old account.
             self.writes.update(cx, |w, cx| w.reset(cx));
             self.picker.update(cx, |p, cx| p.reset(cx));
+            self.menu.update(cx, |m, cx| m.reset(cx));
         }
         let model = self.account.read(cx);
         let (signed_out, by_choice) = (model.is_signed_out(), model.is_signed_out_by_choice());
@@ -410,6 +436,10 @@ impl Shell {
 
     pub fn picker(&self) -> &Entity<PlaylistPicker> {
         &self.picker
+    }
+
+    pub fn menu(&self) -> &Entity<TrackMenu> {
+        &self.menu
     }
 
     pub fn nav_expanded(&self) -> bool {
@@ -545,18 +575,18 @@ impl Shell {
     pub fn install_lyrics(
         &mut self,
         service: Arc<apollo_lyrics::LyricsService>,
-        flag: Option<Arc<dyn FlagStore>>,
+        store: Option<Arc<dyn LyricsOpenStore>>,
         cx: &mut Context<Self>,
     ) {
         self.lyrics.update(cx, |l, cx| l.install(service, cx));
         self.lyrics_pane
-            .update(cx, |p, _| p.set_flag_store(flag.clone()));
-        let Some(flag) = flag else { return };
+            .update(cx, |p, _| p.set_store(store.clone()));
+        let Some(store) = store else { return };
         let pane = self.lyrics_pane.downgrade();
         cx.spawn(async move |_, cx| {
             let saved = cx
                 .background_executor()
-                .spawn(async move { flag.load() })
+                .spawn(async move { store.load() })
                 .await;
             let _ = pane.update(cx, |p, cx| p.restore_open(saved, cx));
         })
@@ -802,6 +832,7 @@ impl Render for Shell {
                 )
                 .when(self.route == Route::Settings, |page| {
                     page.child(self.account_page.clone())
+                        .child(self.playback_page.clone())
                 })
         };
 
@@ -891,6 +922,7 @@ impl Render for Shell {
             )
         });
         let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
+        let menu = self.menu.read(cx).is_open().then(|| self.menu.clone());
 
         let fonts = cx.global::<style::Fonts>().text.clone();
         div()
@@ -940,6 +972,7 @@ impl Render for Shell {
             .child(bar)
             .children(toast)
             .children(picker)
+            .children(menu)
     }
 }
 

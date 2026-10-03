@@ -21,7 +21,7 @@ Re-sync by diffing against upstream at a newer revision; keep the list below cur
 
 | Dropped | Reason |
 | --- | --- |
-| `player` endpoint, stream clients (`VISIONOS`, `ANDROID_VR`, `IOS`, `TVHTML5*`, `WEB_CREATOR`), `models/player.rs` | Audio is resolved by yt-dlp; no cipher/PO-token code in the app |
+| The `player` endpoint as a stream source, stream clients (`VISIONOS`, `ANDROID_VR`, `IOS`, `TVHTML5*`, `WEB_CREATOR`), upstream `models/player.rs` | Audio is resolved by yt-dlp; no cipher/PO-token code in the app. Only the loudness read is back, see Local changes |
 | `rustypipe_fallback.rs` and the `rustypipe` dependency | Anonymous stream fallback; the spec forbids guest fallback |
 | `blocklist.rs`, hide-videos filter | Product features, not part of the adapter; can come back as domain policy |
 | Session "healer" (`wait_for_session_heal`, `begin_heal`, `without_healing`, 90 s wait) | App-specific webview healing. A 401/403 now returns `Error::SessionExpired` and raises `session_rejected`; the account model decides what it means |
@@ -45,6 +45,17 @@ Re-sync by diffing against upstream at a newer revision; keep the list below cur
 - `add_to_playlist_options` / `parse_add_to_playlist`: the sheet of editable playlists with
   `containsSelectedVideos`. The fixture `add_to_playlist.json` is hand-written from memory of the
   response shape, not a recording; verify against the live account in the Windows check.
+
+- `InnerTube::player_loudness` and `models/player.rs` (Zach approved one metadata-only `player`
+  call per track for volume normalization, 2026-10-03): the plain WEB_REMIX `player` request
+  (`videoId`, `contentCheckOk`/`racyCheckOk`, no signature timestamp, no PO token) answered with
+  `playerConfig.audioConfig.loudnessDb` (and `perceptualLoudnessDb`, diagnostics only), falling back to the first audio adaptive format's
+  `loudnessDb`. The
+  response's `streamingData` and playback-tracking URLs are dropped unread; Apollo does not report
+  plays. This is a new, minimal parser, not upstream's `models/player.rs`. Its fixtures are
+  hand-written from memory of the response shape, not recordings: an anonymous `player` request
+  answers `UNPLAYABLE` with no `playerConfig`, so the real shape and the session-bound answer are
+  verified only in the signed-in Windows check.
 
 ## Audit notes
 

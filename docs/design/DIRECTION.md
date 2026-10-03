@@ -75,6 +75,7 @@ Applied to the queue panel (`ui/queue_panel.rs`) and Now Playing (`ui/now_playin
 5. **Clear:** clears up next only, with no confirmation; the playing track keeps playing.
 6. **No-art glyph:** 20px on tiles up to 56px; a quarter of the tile size above that.
 7. **Now Playing:** opened from the player bar's art/title block, closed with Esc, the chevron, or navigating. Art `min(50vh, 480px)`, title in the 40px style, then one line of artist name(s) and album separated by " · " at 18px regular in text.secondary, 8px below the title, truncating with an ellipsis. The progress row and transport sit below, shared with the player bar. Ambient art is blurred at 15% opacity (inside the 12-18% range) and sits only behind this view.
+8. **Autoplay switch:** right-aligned in the queue header, after shuffle, repeat and clear: a compact 28x16 switch (accent track when on, `border.strong` when off, 12px knob) with the label "Autoplay" in body text.secondary. On by default and remembered. When up next is down to one track (or none) while something plays, a song radio seeded by the last track is appended; repeat-all takes priority. Radio rows look like any other queue row.
 
 ## Library decisions (coordinator, 2026-10-03)
 Applied to the Library page (`ui/library.rs`).
@@ -111,6 +112,16 @@ Applied to the Home route (`ui/home_page.rs`, `home.rs`); the feed is YouTube Mu
 6. **Freshness:** shelves are kept in memory for the session and reload in the background when Home is reopened after 10 minutes. A failed refresh keeps what is shown. A different account drops them.
 7. **Keyboard:** one Tab stop per shelf at the page's tab index, so Tab reaches the player bar quickly. Each shelf is still a list named by its title. Nothing more is planned for accessibility on this personal app (Zach, 2026-10-03).
 8. **Approved as built:** the primary Sign in button when signed out, "Nothing to show" with Retry, "Couldn't load more" with Retry, and the 32px circle chevrons on bg.overlay with border.strong.
+
+## Track menu decisions (coordinator brief, 2026-10-03)
+Applied to the menu opened by right-click or a row's More button (`ui/track_menu.rs`).
+1. **Where:** right-click on any song row or tile (Library and playlist/album/artist lists, Search, Home, the queue panel) and on album and playlist cards. A hovered row also shows a "More" button (Fluent more-horizontal) at its right end, in a 32px slot that is always reserved. Artist cards have no menu.
+2. **Surface:** the add-to-playlist popover's: bg.overlay, 8px radius, border.subtle, no scrim. Rows are 32px with a 16px Fluent icon in text.secondary and a body label in text.primary; hover and the keyboard cursor use the list hover tint; groups are split by 1px border.subtle lines. Built choice, not in the brief: the menu is 220px wide with 4px inside padding.
+3. **Placement:** at the pointer for a right-click, under the More button with the right edges lined up for the button. It flips to the other side of the pointer or button when it would leave the window and never covers the title bar. Esc or a click outside closes it; Up, Down, Home, End and Enter work it.
+4. **Song items, in groups:** Play next, Add to queue; Start radio, Add to playlist…; Like / Remove from Liked; Go to artist, Go to album (each hidden when unknown); Copy link; and in the queue panel Remove from queue (not on the playing row).
+5. **Card items:** Play, Shuffle; Add to queue, Start radio; Copy link. The card's first page of songs is what plays or queues; Start radio is seeded from its first song.
+6. **Start radio:** the song plays at once and, when the radio arrives, it replaces everything that was up next. If the radio cannot be fetched the queue is left as it was.
+7. **Feedback:** success is silent (no "Added to queue" or "Link copied" toast exists; the existing toast is error-only). Failures use the existing error toast: "Couldn't start radio", "Couldn't load tracks".
 
 ## Lyrics decisions (coordinator, 2026-10-03)
 Applied to the lyrics pane (`ui/lyrics_pane.rs`, `lyrics.rs`) and the Lyrics button in the player bar. Tokens are in `theme::tokens::lyrics`.

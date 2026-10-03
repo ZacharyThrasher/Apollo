@@ -18,7 +18,7 @@ use gpui::{
 
 use crate::lyrics::{current_line, LyricsModel, LyricsState};
 use crate::player::PlayerModel;
-use crate::settings::FlagStore;
+use crate::settings::LyricsOpenStore;
 use crate::style::{self, color};
 use crate::ui::skeleton;
 
@@ -41,7 +41,7 @@ struct Glide {
 pub struct LyricsPane {
     player: Entity<PlayerModel>,
     lyrics: Entity<LyricsModel>,
-    flag: Option<Arc<dyn FlagStore>>,
+    store: Option<Arc<dyn LyricsOpenStore>>,
     /// Lyrics take the right side of Now Playing.
     open: bool,
     scroll: ScrollHandle,
@@ -68,7 +68,7 @@ impl LyricsPane {
         Self {
             player,
             lyrics,
-            flag: None,
+            store: None,
             open: false,
             scroll: ScrollHandle::new(),
             followed: None,
@@ -85,8 +85,8 @@ impl LyricsPane {
     }
 
     /// Where the choice is remembered between runs (none in tests).
-    pub fn set_flag_store(&mut self, flag: Option<Arc<dyn FlagStore>>) {
-        self.flag = flag;
+    pub fn set_store(&mut self, store: Option<Arc<dyn LyricsOpenStore>>) {
+        self.store = store;
     }
 
     /// Apply the remembered choice at startup. Does not save it again.
@@ -104,8 +104,8 @@ impl LyricsPane {
         }
         self.open = open;
         self.reset_follow();
-        if let Some(flag) = self.flag.clone() {
-            std::thread::spawn(move || flag.save(open));
+        if let Some(store) = self.store.clone() {
+            std::thread::spawn(move || store.save(open));
         }
         cx.notify();
     }

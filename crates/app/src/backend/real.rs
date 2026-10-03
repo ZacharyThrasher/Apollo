@@ -32,13 +32,15 @@ use apollo_domain::model::{ArtistRef, Track, VideoId};
 use apollo_media::{MediaConfig, MpvEngine};
 use apollo_resolver::diag::list_liked_music;
 use apollo_resolver::{ResolverConfig, YtDlpResolver};
-use apollo_services_common::{EventSink, LeaseStore};
+use apollo_services_common::{EventSink, LeaseStore, LoudnessFetcher, LoudnessTable};
 
+use super::real_loudness::AccountLoudness;
 use super::real_search::AccountSearch;
 use super::{LibraryTrack, Ports, Prepared};
 use crate::account::{AccountPorts, AvatarSource, SessionSource, SignInError};
 use crate::art::{sized_thumbnail, ArtSource, DecodedArt};
 use crate::library::live::InnerTubeLibrary;
+use crate::loudness::{LoudnessResolver, SqliteLoudness};
 use crate::player::DEFAULT_VOLUME;
 use crate::url_thumbs::ThumbSource;
 
@@ -150,10 +152,26 @@ pub fn prepare(
     // Logout: forget every resolved URL and lease, and end the helpers that hold cookies.
     let handle = resolver.handle();
     account.on_logout(move || handle.invalidate());
+    // Volume normalization: the fetcher learns each track's loudness beside the resolver and
+    // fills this table; the engine reads it when a track opens. If the fetcher cannot start,
+    // every track simply plays at unity.
+    let loudness = LoudnessTable::new();
+    let loudness_fetcher = AccountLoudness::new(account.clone()).ok().map(|source| {
+        LoudnessFetcher::new(
+            loudness.clone(),
+            source,
+            SqliteLoudness::at(app_dir.join("apollo.db")),
+        )
+    });
+    let resolver: Box<dyn apollo_runtime::Resolver + Send> = match loudness_fetcher {
+        Some(fetcher) => Box::new(LoudnessResolver::new(resolver, fetcher)),
+        None => Box::new(resolver),
+    };
     let engine = MpvEngine::new(
         MediaConfig {
             audio_output: opts.silent.then(|| "null".to_string()),
             volume: DEFAULT_VOLUME,
+            loudness,
             ..Default::default()
         },
         leases,
@@ -212,7 +230,7 @@ pub fn prepare(
     Ok(Prepared {
         label: "real services",
         ports: Ports {
-            resolver: Box::new(resolver),
+            resolver,
             engine: Box::new(engine),
         },
         queue,

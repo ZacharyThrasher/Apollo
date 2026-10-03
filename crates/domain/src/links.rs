@@ -5,6 +5,7 @@
 
 use url::Url;
 
+use crate::library::{Collection, CollectionKind};
 use crate::model::{PlaylistId, VideoId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +81,24 @@ pub fn parse_external_link(input: &str) -> Result<ExternalLink, LinkError> {
     }
 }
 
+/// The shareable link of a track on YouTube Music.
+pub fn track_url(video: &VideoId) -> String {
+    format!("https://music.youtube.com/watch?v={}", video.as_str())
+}
+
+/// The shareable link of an album or playlist: a playlist by its list id (the `VL` browse prefix
+/// dropped), an album by its browse id.
+pub fn collection_url(collection: &Collection) -> String {
+    let id = collection.id.as_str();
+    match collection.kind {
+        CollectionKind::Playlist => format!(
+            "https://music.youtube.com/playlist?list={}",
+            id.strip_prefix("VL").unwrap_or(id)
+        ),
+        CollectionKind::Album => format!("https://music.youtube.com/browse/{id}"),
+    }
+}
+
 fn id_chars_ok(s: &str) -> bool {
     s.bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
@@ -122,6 +141,35 @@ mod tests {
         ] {
             assert_eq!(parse_external_link(u), Ok(track(V, None)), "{u}");
         }
+    }
+
+    #[test]
+    fn a_track_link_is_the_music_watch_url_and_parses_back() {
+        let video = VideoId::new(V);
+        let url = track_url(&video);
+        assert_eq!(url, "https://music.youtube.com/watch?v=dQw4w9WgXcQ");
+        assert_eq!(parse_external_link(&url), Ok(track(V, None)));
+    }
+
+    #[test]
+    fn collection_links_name_the_playlist_or_the_album() {
+        let collection = |kind, id: &str| Collection {
+            kind,
+            id: crate::model::BrowseId::new(id),
+            title: String::new(),
+            subtitle: None,
+            thumbnail: None,
+        };
+        let playlist = collection_url(&collection(CollectionKind::Playlist, "VLPL123"));
+        assert_eq!(playlist, "https://music.youtube.com/playlist?list=PL123");
+        assert_eq!(
+            parse_external_link(&playlist),
+            Ok(ExternalLink::Playlist(PlaylistId::new("PL123")))
+        );
+        assert_eq!(
+            collection_url(&collection(CollectionKind::Album, "MPREb_abc")),
+            "https://music.youtube.com/browse/MPREb_abc"
+        );
     }
 
     #[test]

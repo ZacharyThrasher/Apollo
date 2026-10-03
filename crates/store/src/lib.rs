@@ -13,6 +13,7 @@
 //!   (or logout) purges it instead of replaying it.
 
 mod lyrics;
+mod loudness;
 mod migrations;
 mod queue;
 
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 pub use lyrics::CachedLyrics;
+pub use loudness::LoudnessRow;
 pub use migrations::{Migration, MIGRATIONS};
 
 #[derive(Debug)]

@@ -15,8 +15,7 @@ use crate::lyrics::SimLyrics;
 use crate::player::PlayerModel;
 use crate::search::Unavailable;
 use crate::settings::{
-    default_db_path, FlagStore, SqliteFlag, SqliteVolume as SettingsVolume, VolumeStore,
-    KEY_LYRICS_OPEN,
+    AutoplayStore, LyricsOpenStore, NormalizeStore, QueueStore, SqliteSettings, VolumeStore,
 };
 use crate::ui::shell::{self, Quit, Shell};
 use crate::url_thumbs::NoThumbs;
@@ -42,6 +41,44 @@ pub fn follow_reduced_motion(cx: &mut App, animations_enabled: impl Fn() -> bool
     .detach();
 }
 
+/// Everything kept between runs, each behind its own port (all `None` where there is no
+/// `%LOCALAPPDATA%`, which leaves persistence off).
+#[derive(Clone, Default)]
+struct Stores {
+    volume: Option<Arc<dyn VolumeStore>>,
+    autoplay: Option<Arc<dyn AutoplayStore>>,
+    normalize: Option<Arc<dyn NormalizeStore>>,
+    queue: Option<Arc<dyn QueueStore>>,
+    lyrics_open: Option<Arc<dyn LyricsOpenStore>>,
+    /// The store's file, where the lyrics cache keeps its rows too.
+    db_path: Option<std::path::PathBuf>,
+}
+
+impl Stores {
+    fn default_location() -> Self {
+        match SqliteSettings::default_location().map(Arc::new) {
+            Some(db) => Self {
+                volume: Some(db.clone()),
+                autoplay: Some(db.clone()),
+                normalize: Some(db.clone()),
+                lyrics_open: Some(db.clone()),
+                db_path: Some(db.path().to_path_buf()),
+                queue: Some(db),
+            },
+            None => Self::default(),
+        }
+    }
+}
+
+/// The opaque id the saved queue is bound to: the channel the owner chose. `None` while nobody
+/// is signed in, which keeps the queue from being saved or restored.
+fn queue_account_key(account: &apollo_account::service::AccountService) -> Option<String> {
+    match account.view().identity {
+        apollo_account::service::IdentityState::Selected(identity) => Some(identity.key()),
+        _ => None,
+    }
+}
+
 pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     // Windows "Animation effects" off means every transition is instant.
     follow_reduced_motion(cx, crate::platform::animations_enabled);
@@ -49,21 +86,20 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     shell::bind_keys(cx);
     cx.on_action(|_: &Quit, cx| cx.quit());
 
-    let volume_store: Option<Arc<dyn VolumeStore>> =
-        SettingsVolume::default_location().map(|s| Arc::new(s) as Arc<dyn VolumeStore>);
+    let stores = Stores::default_location();
     let player = cx.new(|_| PlayerModel::new());
     player.update(cx, |m, _| {
-        m.set_volume_store(volume_store.clone());
+        m.set_volume_store(stores.volume.clone());
+        m.set_autoplay_store(stores.autoplay.clone());
+        m.set_normalize_store(stores.normalize.clone());
         m.set_latency_log(crate::latency::default_log());
     });
     let ports = mode.account_ports();
     let account = cx.new(|cx| AccountModel::new(ports.clone(), cx));
     let window = open_window(cx, player.clone(), account.clone());
-    let lyrics_flag = SqliteFlag::default_location(KEY_LYRICS_OPEN)
-        .map(|flag| Arc::new(flag) as Arc<dyn FlagStore>);
-    let service = lyrics_service(&mode);
+    let lyrics = lyrics_service(&mode, stores.db_path.clone());
     let _ = window.update(cx, |shell, _, cx| {
-        shell.install_lyrics(service, lyrics_flag, cx)
+        shell.install_lyrics(lyrics, stores.lyrics_open.clone(), cx)
     });
     // Media keys and the SMTC overlay, on the window just opened.
     #[cfg(windows)]
@@ -75,7 +111,7 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
         window,
         account,
         ports,
-        volume_store,
+        stores,
     );
 
     cx.on_app_quit(move |cx| {
@@ -88,12 +124,11 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
 }
 
 /// Where lyrics come from: LRCLIB with the SQLite cache, or the fixtures under the simulation.
-fn lyrics_service(mode: &Mode) -> Arc<LyricsService> {
+fn lyrics_service(mode: &Mode, db_path: Option<std::path::PathBuf>) -> Arc<LyricsService> {
     if matches!(mode, Mode::Sim | Mode::SimSignedOut) {
         return Arc::new(LyricsService::new(vec![Arc::new(SimLyrics)], None));
     }
-    let cache =
-        default_db_path().map(|path| Arc::new(SqliteCache::at(path)) as Arc<dyn LyricsCache>);
+    let cache = db_path.map(|path| Arc::new(SqliteCache::at(path)) as Arc<dyn LyricsCache>);
     Arc::new(LyricsService::new(vec![Arc::new(Lrclib::new())], cache))
 }
 
@@ -128,6 +163,16 @@ fn open_window(
     window
 }
 
+/// What a previous run left behind, read before the player is installed.
+struct Saved {
+    volume: Option<u8>,
+    autoplay: Option<bool>,
+    normalize: Option<bool>,
+    queue: Option<(apollo_domain::queue::Queue, u64)>,
+    queue_store: Option<Arc<dyn QueueStore>>,
+    key: Option<String>,
+}
+
 /// Restores the account, prepares the backend (both off the UI thread), installs it, then feeds
 /// adapter completions to the model until the window goes away.
 fn start_services(
@@ -137,7 +182,7 @@ fn start_services(
     window: WindowHandle<Shell>,
     account: gpui::Entity<AccountModel>,
     ports: AccountPorts,
-    volume_store: Option<Arc<dyn VolumeStore>>,
+    stores: Stores,
 ) {
     let (sink, mut rx) = channel_sink();
     let weak = player.downgrade();
@@ -155,10 +200,21 @@ fn start_services(
         };
         account.update(cx, |m, cx| m.startup_finished(cx));
         let service = ports.service.clone();
-        let (prepared, saved_volume) = cx
+        let (prepared, saved) = cx
             .background_executor()
             .spawn(async move {
-                let saved = volume_store.and_then(|s| s.load());
+                let key = queue_account_key(&service);
+                let saved = Saved {
+                    volume: stores.volume.and_then(|s| s.load()),
+                    autoplay: stores.autoplay.and_then(|s| s.load()),
+                    normalize: stores.normalize.and_then(|s| s.load()),
+                    queue: key
+                        .as_deref()
+                        .zip(stores.queue.as_ref())
+                        .and_then(|(key, s)| s.load(key)),
+                    queue_store: stores.queue,
+                    key,
+                };
                 (mode.prepare(sink, &service), saved)
             })
             .await;
@@ -166,8 +222,11 @@ fn start_services(
             Ok(prepared) => {
                 let (search, thumbs) = (prepared.search.clone(), prepared.thumbs.clone());
                 let _ = weak.update(cx, |m, cx| {
-                    m.restore_volume(saved_volume);
-                    m.install(prepared, cx);
+                    m.restore_volume(saved.volume);
+                    m.restore_autoplay(saved.autoplay);
+                    m.restore_normalize(saved.normalize);
+                    m.set_queue_store(saved.queue_store, saved.key);
+                    m.install_with(prepared, saved.queue, cx);
                 });
                 let _ = window.update(cx, |shell, _, cx| shell.install_search(search, thumbs, cx));
             }

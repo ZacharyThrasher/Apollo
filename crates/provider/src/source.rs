@@ -10,7 +10,8 @@ use crate::artist::{page_from_artist, ArtistPage};
 use crate::home::{home_page, HomePage};
 use crate::map::{
     account_validation, classify, classify_write, collections_from_grid, liked_from_rating,
-    page_from_album, page_from_continuation, page_from_playlist, target_from_option, ListedTrack,
+    page_from_album, page_from_continuation, page_from_playlist, target_from_option, track_from_song,
+    ListedTrack,
 };
 use crate::search::{search_results, SearchResults};
 
@@ -209,6 +210,29 @@ impl InnerTubeSource {
         Ok(next.rating.map(liked_from_rating))
     }
 
+    /// The tracks YouTube Music's own autoplay would play after `video_id`: the song radio
+    /// (`RDAMVM<id>`), signed in, so it follows the account's taste. The seed itself and
+    /// repeats are left out. A radio YouTube reports as dead (the panel holds only the seed and
+    /// names the mix the song really belongs to) is asked for again through that mix.
+    pub async fn radio(&self, video_id: &str) -> Result<Vec<ListedTrack>, LoadFailure> {
+        let mix = format!("RDAMVM{video_id}");
+        let mut next = self
+            .tube
+            .next(&self.client, Some(video_id), Some(&mix))
+            .await
+            .map_err(|e| classify(&e))?;
+        if next.items.iter().all(|s| s.video_id == video_id) {
+            if let Some(automix) = next.automix_playlist_id.take() {
+                next = self
+                    .tube
+                    .next(&self.client, Some(video_id), Some(&automix))
+                    .await
+                    .map_err(|e| classify(&e))?;
+            }
+        }
+        Ok(radio_tracks(&next.items, video_id))
+    }
+
     /// The playlists the account can add `video_id` to, each flagged when it already holds it.
     pub async fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
         let options = self
@@ -231,6 +255,18 @@ impl InnerTubeSource {
             .add_to_playlist(&self.client, bare, video_id)
             .await
             .map_err(|e| classify_write(&e))
+    }
+
+    /// How loud YouTube measured a track (`loudnessDb`, dB against its reference level), from one
+    /// metadata-only `player` request. `Ok(None)` is an answer: the service had no measurement for
+    /// the track. Nothing else in the response is read, and it carries no plays or history.
+    pub async fn loudness_db(&self, video_id: &str) -> Result<Option<f32>, LoadFailure> {
+        let loudness = self
+            .tube
+            .player_loudness(&self.client, video_id)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(loudness.loudness_db)
     }
 
     /// Best-effort `visitorData`, which the service expects alongside the cookie. A failure
@@ -273,6 +309,18 @@ pub(crate) fn playlist_browse_id(id: &str) -> String {
     }
 }
 
+/// A radio panel as the tracks to queue: playable rows only, without the seed and without a
+/// video that appears twice.
+pub(crate) fn radio_tracks(items: &[innertube::SongItem], seed: &str) -> Vec<ListedTrack> {
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(seed.to_owned());
+    items
+        .iter()
+        .filter_map(track_from_song)
+        .filter(|listed| seen.insert(listed.track.video_id.as_str().to_owned()))
+        .collect()
+}
+
 fn to_validation_error(err: innertube::Error) -> ValidationError {
     match classify(&err) {
         LoadFailure::Session => ValidationError::Expired,
@@ -282,7 +330,33 @@ fn to_validation_error(err: innertube::Error) -> ValidationError {
 
 #[cfg(test)]
 mod tests {
-    use super::playlist_browse_id;
+    use super::{playlist_browse_id, radio_tracks};
+    use innertube::SongItem;
+
+    fn song(id: &str, title: &str) -> SongItem {
+        SongItem {
+            video_id: id.into(),
+            title: title.into(),
+            artists: "Artist".into(),
+            ..SongItem::default()
+        }
+    }
+
+    #[test]
+    fn a_radio_drops_the_seed_repeats_and_unplayable_rows() {
+        let items = [
+            song("seed0000001", "Seed"),
+            song("next0000001", "One"),
+            song("next0000002", "Two"),
+            song("next0000001", "One again"),
+            song("", "No id"),
+        ];
+        let ids: Vec<String> = radio_tracks(&items, "seed0000001")
+            .into_iter()
+            .map(|l| l.track.video_id.as_str().to_owned())
+            .collect();
+        assert_eq!(ids, ["next0000001", "next0000002"]);
+    }
 
     #[test]
     fn a_bare_playlist_id_gets_the_browse_prefix_once() {

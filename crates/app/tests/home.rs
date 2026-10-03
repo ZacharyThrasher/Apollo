@@ -641,3 +641,68 @@ fn the_chevrons_show_on_hover_and_page_the_row(cx: &mut TestAppContext) {
     click(vcx, "home-previous-0");
     assert_eq!(page.view.read_with(vcx, |v, _| v.row_offset(0)), 0.0);
 }
+
+// ---- the track menu ------------------------------------------------------------------------------
+
+use apollo_app::ui::track_menu::{Command, Subject};
+use gpui::MouseButton;
+
+fn right_click(vcx: &mut VisualTestContext, id: &'static str) {
+    let at = vcx
+        .debug_bounds(id)
+        .unwrap_or_else(|| panic!("{id} is on screen"))
+        .center();
+    vcx.simulate_mouse_move(at, None, Modifiers::none());
+    vcx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+    vcx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+    vcx.run_until_parked();
+}
+
+fn menu_subject(page: &Page, vcx: &mut VisualTestContext) -> Option<Subject> {
+    let menu = page.shell.read_with(vcx, |s, _| s.menu().clone());
+    menu.read_with(vcx, |m, _| m.subject().cloned())
+}
+
+#[gpui::test]
+fn right_clicking_a_song_tile_opens_the_track_menu(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    right_click(vcx, "home-0-0");
+    assert!(matches!(menu_subject(&page, vcx), Some(Subject::Track(_))));
+    let menu = page.shell.read_with(vcx, |s, _| s.menu().clone());
+    let commands = menu.read_with(vcx, |m, cx| m.commands(cx));
+    assert!(commands.contains(&Command::PlayNext));
+    assert!(commands.contains(&Command::StartRadio));
+    assert_eq!(
+        current(&page, vcx).as_deref(),
+        Some("startTrack01"),
+        "the click did not play the tile"
+    );
+}
+
+#[gpui::test]
+fn a_song_tiles_more_button_shows_on_hover_and_opens_the_same_menu(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    let tile = vcx.debug_bounds("home-0-0").expect("tile is on screen").center();
+    vcx.simulate_mouse_move(tile, None, Modifiers::none());
+    vcx.executor().advance_clock(Duration::from_millis(400));
+    vcx.run_until_parked();
+    click(vcx, "home-0-0-more");
+    assert!(matches!(menu_subject(&page, vcx), Some(Subject::Track(_))));
+    assert_eq!(
+        current(&page, vcx).as_deref(),
+        Some("startTrack01"),
+        "the button did not play the tile either"
+    );
+}
+
+#[gpui::test]
+fn album_cards_and_song_cards_on_shelves_have_menus(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    // "Albums for you": an album card gets the shorter menu.
+    right_click(vcx, "home-1-0");
+    assert!(matches!(menu_subject(&page, vcx), Some(Subject::Collection(_))));
+    vcx.simulate_keystrokes("escape");
+    // "Listen again": its second item is an album and its third a song card.
+    right_click(vcx, "home-2-2");
+    assert!(matches!(menu_subject(&page, vcx), Some(Subject::Track(_))));
+}

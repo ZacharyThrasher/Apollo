@@ -11,7 +11,7 @@ use apollo_app::backend::{LibraryTrack, Ports, Prepared};
 use apollo_app::lyrics::LyricsState;
 use apollo_app::player::PlayerModel;
 use apollo_app::search::SearchSource;
-use apollo_app::settings::FlagStore;
+use apollo_app::settings::LyricsOpenStore;
 use apollo_app::style::Fonts;
 use apollo_app::ui::lyrics_pane::LyricsPane;
 use apollo_app::ui::shell::{self, Shell};
@@ -71,7 +71,7 @@ impl LyricsSource for Script {
 
 #[derive(Default)]
 struct MemFlag(Mutex<Option<bool>>);
-impl FlagStore for MemFlag {
+impl LyricsOpenStore for MemFlag {
     fn load(&self) -> Option<bool> {
         *self.0.lock().unwrap()
     }
@@ -158,7 +158,7 @@ fn setup_with(
     let service = Arc::new(LyricsService::new(vec![script.clone()], None));
     if install {
         shell.update(vcx, |s, cx| {
-            s.install_lyrics(service, Some(flag.clone() as Arc<dyn FlagStore>), cx)
+            s.install_lyrics(service, Some(flag.clone() as Arc<dyn LyricsOpenStore>), cx)
         });
     }
     vcx.run_until_parked();
