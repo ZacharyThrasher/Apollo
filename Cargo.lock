@@ -213,6 +213,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "apollo-services-common"
+version = "0.0.0"
+dependencies = [
+ "apollo-domain",
+ "getrandom 0.3.4",
+ "windows 0.62.2",
+ "zeroize",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
