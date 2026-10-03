@@ -71,7 +71,10 @@ fn main() -> ExitCode {
         }
     };
 
-    let s = |name: &str| mpv.get_property::<String>(name).unwrap_or_else(|e| format!("<{e:?}>"));
+    let s = |name: &str| {
+        mpv.get_property::<String>(name)
+            .unwrap_or_else(|e| format!("<{e:?}>"))
+    };
     println!("mpv-version: {}", s("mpv-version"));
     println!("ffmpeg-version: {}", s("ffmpeg-version"));
 
@@ -99,10 +102,20 @@ fn main() -> ExitCode {
                 duration = mpv.get_property::<f64>("duration").unwrap_or(0.0);
                 let codec = s("audio-codec-name");
                 let fmt = s("file-format");
-                let sr = mpv.get_property::<i64>("audio-params/samplerate").unwrap_or(0);
-                let ch = mpv.get_property::<i64>("audio-params/channel-count").unwrap_or(0);
-                println!("  loaded: format={fmt} codec={codec} {sr} Hz {ch} ch duration={duration:.3}s");
-                checks.record("file loaded + decoder opened", !codec.starts_with('<'), format!("codec={codec}"));
+                let sr = mpv
+                    .get_property::<i64>("audio-params/samplerate")
+                    .unwrap_or(0);
+                let ch = mpv
+                    .get_property::<i64>("audio-params/channel-count")
+                    .unwrap_or(0);
+                println!(
+                    "  loaded: format={fmt} codec={codec} {sr} Hz {ch} ch duration={duration:.3}s"
+                );
+                checks.record(
+                    "file loaded + decoder opened",
+                    !codec.starts_with('<'),
+                    format!("codec={codec}"),
+                );
                 checks.record("duration known", duration > 1.0, format!("{duration:.3}s"));
                 phase = Phase::Playing1;
                 phase_since = Instant::now();
@@ -132,10 +145,17 @@ fn main() -> ExitCode {
                     checks.record(
                         "end-of-file event (reason EOF)",
                         ok,
-                        format!("reason={name} after {:.2}s total", started.elapsed().as_secs_f64()),
+                        format!(
+                            "reason={name} after {:.2}s total",
+                            started.elapsed().as_secs_f64()
+                        ),
                     );
                 } else {
-                    checks.record("unexpected EndFile before EOF phase", false, format!("reason={name} in {phase:?}"));
+                    checks.record(
+                        "unexpected EndFile before EOF phase",
+                        false,
+                        format!("reason={name} in {phase:?}"),
+                    );
                 }
                 phase = Phase::Done;
             }
@@ -165,14 +185,18 @@ fn main() -> ExitCode {
                 }
             }
             Phase::SeekStart | Phase::SeekMid | Phase::SeekEnd => {
-                if restart_seen_after_seek && pos >= 0.0 || seek_issued_at.elapsed() > Duration::from_secs(3) {
+                if restart_seen_after_seek && pos >= 0.0
+                    || seek_issued_at.elapsed() > Duration::from_secs(3)
+                {
                     let label = match phase {
                         Phase::SeekStart => "seek near start",
                         Phase::SeekMid => "seek to middle",
                         _ => "seek near end",
                     };
                     // time-pos keeps advancing from the target; allow up to 1.0 s of drift.
-                    let ok = restart_seen_after_seek && pos >= seek_target - 0.05 && pos <= seek_target + 1.0;
+                    let ok = restart_seen_after_seek
+                        && pos >= seek_target - 0.05
+                        && pos <= seek_target + 1.0;
                     checks.record(label, ok, format!("target {seek_target:.3}s, engine pos {pos:.3}s, restart event {restart_seen_after_seek}"));
                     phase = match phase {
                         Phase::SeekStart => Phase::Playing2,
@@ -193,5 +217,9 @@ fn main() -> ExitCode {
     println!("RESULT {path}: {} checks, {failed} failed", checks.0.len());
     // Keep Format referenced so a future observe_property addition stays type-checked.
     let _ = Format::Double;
-    if failed == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) }
+    if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
