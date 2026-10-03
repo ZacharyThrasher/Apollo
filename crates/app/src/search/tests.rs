@@ -35,6 +35,7 @@ impl SearchSource for Script {
                 occurrence: None,
                 thumbnail: None,
                 explicit: false,
+                liked: None,
             }],
             albums: vec![Hit {
                 id: BrowseId::new("MPREb_x"),

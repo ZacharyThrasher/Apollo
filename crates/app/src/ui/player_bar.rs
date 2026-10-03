@@ -14,6 +14,7 @@ use crate::player::{failure_text, PlayerModel, PlayerView, Status};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
+use crate::ui::row_actions::{heart_icon, heart_label};
 use crate::ui::slider::{Slider, SliderState};
 use crate::ui::tooltip::Tooltip;
 use crate::ui::transport::{self, TransportFocus};
@@ -37,6 +38,7 @@ pub struct BarFocus {
     pub repeat: FocusHandle,
     pub mute: FocusHandle,
     pub queue: FocusHandle,
+    pub like: FocusHandle,
     pub progress: FocusHandle,
     pub volume: FocusHandle,
     /// Replaces the progress row while an error shows; shares its place in the tab order.
@@ -69,6 +71,9 @@ pub struct PlayerBar {
     pub on_queue_toggle: Rc<Handler>,
     pub now_playing_open: bool,
     pub on_now_playing_toggle: Rc<Handler>,
+    /// The playing track is liked (what the heart shows).
+    pub liked: bool,
+    pub on_like: Rc<Handler>,
 }
 
 fn volume_icon(volume: u8, muted: bool) -> Icon {
@@ -254,6 +259,23 @@ impl RenderOnce for PlayerBar {
             .w(relative(layout::PLAYER_BAR_SIDE_FRACTION))
             .min_w(px(layout::PLAYER_BAR_SIDE_MIN))
             .max_w(px(layout::PLAYER_BAR_SIDE_MAX))
+            .child(
+                div().debug_selector(|| "bar-like".into()).child(
+                    button(
+                        "like",
+                        &self.focus.like,
+                        heart_icon(self.liked),
+                        heart_label(self.liked),
+                        controls,
+                    )
+                    .icon_color(transport::on_off(self.liked))
+                    .toggled(self.liked)
+                    .on_click({
+                        let f = self.on_like.clone();
+                        move |w, cx| f(w, cx)
+                    }),
+                ),
+            )
             .child(
                 button(
                     "mute",

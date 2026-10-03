@@ -11,7 +11,7 @@ use gpui::{
 };
 
 use crate::account::AccountModel;
-use crate::library::Target;
+use crate::library::{LibraryWrites, Target};
 use crate::motion::PanelSlide;
 use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
@@ -21,10 +21,12 @@ use crate::ui::library::{self, LibraryView};
 use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
+use crate::ui::playlist_picker::{self, PlaylistPicker};
 use crate::ui::queue_panel::QueuePanel;
 use crate::ui::search_page::{self, SearchPage};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
 use crate::ui::titlebar::TitleBar;
+use crate::ui::toast::toast;
 use crate::url_thumbs::{ThumbSource, ThumbStore};
 
 actions!(
@@ -63,6 +65,7 @@ pub fn bind_keys(cx: &mut App) {
     crate::ui::card::bind_keys(cx);
     search_page::bind_keys(cx);
     library::bind_keys(cx);
+    playlist_picker::bind_keys(cx);
 }
 
 pub struct Shell {
@@ -70,6 +73,9 @@ pub struct Shell {
     account: Entity<AccountModel>,
     account_page: Entity<AccountPage>,
     library: Entity<LibraryView>,
+    /// Likes and playlist adds, and the short error a failed one leaves.
+    writes: Entity<LibraryWrites>,
+    picker: Entity<PlaylistPicker>,
     /// Where a page opened from another route (a Search card) returns to when Back closes the
     /// last of them. `None` while the pages were opened from the Library itself.
     detail_origin: Option<Route>,
@@ -129,14 +135,19 @@ impl Shell {
             repeat: stop(cx, 24),
             progress: stop(cx, 25),
             retry: stop(cx, 25),
-            mute: stop(cx, 26),
-            volume: stop(cx, 27),
-            queue: stop(cx, 28),
+            like: stop(cx, 26),
+            mute: stop(cx, 27),
+            volume: stop(cx, 28),
+            queue: stop(cx, 29),
         };
         let progress = cx.new(|_| SliderState::default());
         let volume = cx.new(|_| SliderState::default());
         let root_focus = cx.focus_handle();
         let weak = cx.weak_entity();
+        let writes = cx.new(|cx| LibraryWrites::new(player.clone(), cx));
+        let picker = cx.new(|cx| PlaylistPicker::new(player.clone(), writes.clone(), cx));
+        cx.observe(&writes, |_, _, cx| cx.notify()).detach();
+        cx.observe(&picker, |_, _, cx| cx.notify()).detach();
         let queue_panel = cx.new(|cx| {
             QueuePanel::new(
                 player.clone(),
@@ -152,6 +163,8 @@ impl Shell {
         let now_playing = cx.new(|cx| {
             NowPlaying::new(
                 player.clone(),
+                writes.clone(),
+                picker.clone(),
                 {
                     let (weak, root) = (weak.clone(), root_focus.clone());
                     move |window, cx| {
@@ -166,6 +179,8 @@ impl Shell {
         let library = cx.new(|cx| {
             LibraryView::new(
                 player.clone(),
+                writes.clone(),
+                picker.clone(),
                 {
                     let weak = weak.clone();
                     move |window, cx| {
@@ -197,6 +212,8 @@ impl Shell {
         let search = cx.new(|cx| {
             SearchPage::new(
                 player.clone(),
+                writes.clone(),
+                picker.clone(),
                 search_model.clone(),
                 thumbs.clone(),
                 root_focus.clone(),
@@ -214,6 +231,8 @@ impl Shell {
             account,
             account_page,
             library,
+            writes,
+            picker,
             detail_origin: None,
             library_epoch: 0,
             routed_to_sign_in: false,
@@ -247,6 +266,9 @@ impl Shell {
             self.library_epoch = epoch;
             self.detail_origin = None;
             self.library.update(cx, |l, cx| l.reset(cx));
+            // Likes and the open picker belong to the old account.
+            self.writes.update(cx, |w, cx| w.reset(cx));
+            self.picker.update(cx, |p, cx| p.reset(cx));
         }
         let model = self.account.read(cx);
         let (signed_out, by_choice) = (model.is_signed_out(), model.is_signed_out_by_choice());
@@ -266,6 +288,14 @@ impl Shell {
 
     pub fn library(&self) -> &Entity<LibraryView> {
         &self.library
+    }
+
+    pub fn writes(&self) -> &Entity<LibraryWrites> {
+        &self.writes
+    }
+
+    pub fn picker(&self) -> &Entity<PlaylistPicker> {
+        &self.picker
     }
 
     pub fn nav_expanded(&self) -> bool {
@@ -538,6 +568,10 @@ impl Render for Shell {
             _ => page.into_any_element(),
         };
 
+        let playing = self.player.read(cx).current_video();
+        let liked = playing
+            .as_deref()
+            .is_some_and(|id| self.writes.read(cx).is_liked(id));
         let bar = PlayerBar {
             player: self.player.clone(),
             view,
@@ -550,13 +584,36 @@ impl Render for Shell {
                 move |_, cx| shell.update(cx, |s, cx| s.toggle_queue(cx))
             })),
             now_playing_open: self.now_playing_open,
-            on_now_playing_toggle: Rc::new(Box::new(move |_, cx| {
-                shell.update(cx, |s, cx| {
-                    let open = !s.now_playing_open;
-                    s.set_now_playing(open, cx);
-                });
+            on_now_playing_toggle: Rc::new(Box::new({
+                let shell = shell.clone();
+                move |_, cx| {
+                    shell.update(cx, |s, cx| {
+                        let open = !s.now_playing_open;
+                        s.set_now_playing(open, cx);
+                    });
+                }
+            })),
+            liked,
+            on_like: Rc::new(Box::new({
+                let writes = self.writes.clone();
+                move |_, cx| {
+                    if let Some(video) = &playing {
+                        writes.update(cx, |w, cx| w.toggle_like(video, cx));
+                    }
+                }
             })),
         };
+
+        // A failed library write leaves a short error above the player bar.
+        let toast = self.writes.read(cx).notice().cloned().map(|notice| {
+            let writes = self.writes.clone();
+            toast(
+                &notice,
+                move |cx| writes.update(cx, |w, cx| w.dismiss_notice(cx)),
+                cx,
+            )
+        });
+        let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
 
         let fonts = cx.global::<style::Fonts>().text.clone();
         div()
@@ -583,6 +640,7 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &FocusSearch, window, cx| this.open_search(window, cx)),
             )
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -603,5 +661,7 @@ impl Render for Shell {
                     .children(queue),
             )
             .child(bar)
+            .children(toast)
+            .children(picker)
     }
 }

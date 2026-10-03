@@ -118,6 +118,8 @@ pub fn track_from_item(item: &BrowseItem) -> Option<ListedTrack> {
         occurrence: None,
         thumbnail: item.thumbnail.clone(),
         explicit: item.explicit,
+        // A search response states no per-account field, `likeStatus` included.
+        liked: None,
     })
 }
 

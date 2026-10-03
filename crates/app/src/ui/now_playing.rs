@@ -11,13 +11,16 @@ use gpui::{
 };
 
 use crate::assets::Icon;
+use crate::library::writes::LibraryWrites;
 use crate::player::PlayerModel;
 use crate::style::color;
 use crate::ui::art_tile::art_tile_fluid;
 use crate::ui::button::{Handler, IconButton};
 use crate::ui::player_bar::text_line;
+use crate::ui::playlist_picker::PlaylistPicker;
+use crate::ui::row_actions::{heart_icon, heart_label};
 use crate::ui::slider::SliderState;
-use crate::ui::transport::{self, TransportFocus};
+use crate::ui::transport::{self, on_off, TransportFocus};
 
 /// Tab order: after the nav rail, before the queue panel and the player bar.
 const TAB_CLOSE: isize = 6;
@@ -51,7 +54,11 @@ pub fn art_side(viewport_height: f32) -> f32 {
 
 pub struct NowPlaying {
     player: Entity<PlayerModel>,
+    writes: Entity<LibraryWrites>,
+    picker: Entity<PlaylistPicker>,
     focus_close: FocusHandle,
+    focus_like: FocusHandle,
+    focus_playlist: FocusHandle,
     focus: TransportFocus,
     progress: Entity<SliderState>,
     on_close: Rc<Handler>,
@@ -60,6 +67,8 @@ pub struct NowPlaying {
 impl NowPlaying {
     pub fn new(
         player: Entity<PlayerModel>,
+        writes: Entity<LibraryWrites>,
+        picker: Entity<PlaylistPicker>,
         on_close: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -68,9 +77,13 @@ impl NowPlaying {
         };
         let progress = cx.new(|_| SliderState::default());
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
+        cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         cx.observe(&progress, |_, _, cx| cx.notify()).detach();
         Self {
             focus_close: stop(cx, TAB_CLOSE),
+            // Same slot as the transport: they sit above it, so they come first.
+            focus_like: stop(cx, TAB_TRANSPORT),
+            focus_playlist: stop(cx, TAB_TRANSPORT),
             focus: TransportFocus {
                 shuffle: stop(cx, TAB_TRANSPORT),
                 previous: stop(cx, TAB_TRANSPORT + 1),
@@ -80,6 +93,8 @@ impl NowPlaying {
                 progress: stop(cx, TAB_TRANSPORT + 5),
             },
             player,
+            writes,
+            picker,
             progress,
             on_close: Rc::new(Box::new(on_close)),
         }
@@ -120,6 +135,48 @@ impl Render for NowPlaying {
             .aspect_square()
             .flex_none();
 
+        // Like and add to playlist sit at the end of the title line, so the page keeps its
+        // height. Inert while nothing is queued.
+        let video = self.player.read(cx).current_video();
+        let liked = video
+            .as_deref()
+            .is_some_and(|id| self.writes.read(cx).is_liked(id));
+        let actions = video.clone().filter(|_| v.has_track).map(|video| {
+            let like = IconButton::new(
+                "np-like",
+                &self.focus_like,
+                heart_icon(liked),
+                heart_label(liked),
+                v.accent,
+            )
+            .icon_color(on_off(liked))
+            .toggled(liked)
+            .on_click({
+                let (writes, video) = (self.writes.clone(), video.clone());
+                move |_, cx| writes.update(cx, |w, cx| w.toggle_like(&video, cx))
+            });
+            let add = IconButton::new(
+                "np-playlist",
+                &self.focus_playlist,
+                Icon::PlaylistAdd,
+                "Add to playlist",
+                v.accent,
+            )
+            .on_click({
+                let (picker, title) = (self.picker.clone(), v.title.clone());
+                move |window, cx| {
+                    picker.update(cx, |p, cx| p.open(&video, title.clone(), window, cx))
+                }
+            });
+            div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .gap(px(spacing::S1))
+                .child(div().debug_selector(|| "np-like".into()).child(like))
+                .child(div().debug_selector(|| "np-playlist".into()).child(add))
+        });
+
         let text = div()
             .debug_selector(|| "np-text".into())
             .flex()
@@ -128,14 +185,19 @@ impl Render for NowPlaying {
             .min_w_0()
             .child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(spacing::S3))
                     .line_height(gpui::relative(TITLE_LINE_HEIGHT))
-                    .child(text_line(
+                    .child(div().flex_1().min_w_0().child(text_line(
                         "np-title",
                         v.title.clone(),
                         typography::NOW_PLAYING_TITLE,
                         color::text_primary(),
                         cx,
-                    )),
+                    )))
+                    .children(actions),
             )
             .child(
                 div()

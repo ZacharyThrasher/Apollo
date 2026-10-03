@@ -27,6 +27,7 @@ use crate::library::model::{
     ArtSize, ArtistDetail, ArtistTarget, Detail, LibraryModel, Load, PlayRequest, Tab, Target,
 };
 use crate::library::source::{ArtistContent, TrackRow};
+use crate::library::writes::LibraryWrites;
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::style::{self, color};
@@ -34,6 +35,8 @@ use crate::ui::art_tile::art_tile_shaped;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::card::{grid, heading, Card};
 use crate::ui::playing_row;
+use crate::ui::playlist_picker::PlaylistPicker;
+use crate::ui::row_actions::{heart_action, playlist_action, ACTION_SIZE};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::tooltip::Tooltip;
@@ -48,6 +51,8 @@ actions!(
         ListFirst,
         ListLast,
         ListActivate,
+        LikeRow,
+        AddRowToPlaylist,
         Back
     ]
 );
@@ -66,6 +71,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("home", ListFirst, Some(LIST_CONTEXT)),
         KeyBinding::new("end", ListLast, Some(LIST_CONTEXT)),
         KeyBinding::new("enter", ListActivate, Some(LIST_CONTEXT)),
+        KeyBinding::new("l", LikeRow, Some(LIST_CONTEXT)),
+        KeyBinding::new("p", AddRowToPlaylist, Some(LIST_CONTEXT)),
         KeyBinding::new("alt-left", Back, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Back, Some(KEY_CONTEXT)),
     ]);
@@ -156,6 +163,8 @@ impl PageScroll {
 pub struct LibraryView {
     model: Entity<LibraryModel>,
     player: Entity<PlayerModel>,
+    writes: Entity<LibraryWrites>,
+    picker: Entity<PlaylistPicker>,
     focus: Focus,
     playlists_scroll: UniformListScrollHandle,
     albums_scroll: UniformListScrollHandle,
@@ -183,6 +192,8 @@ pub struct LibraryView {
 impl LibraryView {
     pub fn new(
         player: Entity<PlayerModel>,
+        writes: Entity<LibraryWrites>,
+        picker: Entity<PlaylistPicker>,
         on_search: impl Fn(&mut Window, &mut App) + 'static,
         on_closed: impl Fn(&mut Window, &mut App) + 'static,
         on_sign_in: impl Fn(&mut Window, &mut App) + 'static,
@@ -202,13 +213,17 @@ impl LibraryView {
             list: stop(cx, 9),
             retry: stop(cx, 10),
         };
-        let model = cx.new(|cx| LibraryModel::new(player.clone(), cx));
+        let model = cx.new(|cx| LibraryModel::new(player.clone(), writes.clone(), cx));
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
+        // Hearts follow the likes made anywhere.
+        cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         // The accent and the playing row follow the player.
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         Self {
             model,
             player,
+            writes,
+            picker,
             focus,
             playlists_scroll: UniformListScrollHandle::new(),
             albums_scroll: UniformListScrollHandle::new(),
@@ -261,11 +276,15 @@ impl LibraryView {
                     .child("Signed out"),
             )
             .child(
-                div().debug_selector(|| "library-sign-in".into()).flex().flex_row().child(
-                    TextButton::new("library-sign-in", &self.focus.retry, "Sign in", accent)
-                        .primary()
-                        .on_click(move |window, cx| on_sign_in(window, cx)),
-                ),
+                div()
+                    .debug_selector(|| "library-sign-in".into())
+                    .flex()
+                    .flex_row()
+                    .child(
+                        TextButton::new("library-sign-in", &self.focus.retry, "Sign in", accent)
+                            .primary()
+                            .on_click(move |window, cx| on_sign_in(window, cx)),
+                    ),
             )
             .into_any_element()
     }
@@ -843,6 +862,32 @@ impl LibraryView {
             let i = this.selected;
             this.activate(i, window, cx)
         }))
+        .on_action(cx.listener(|this, _: &LikeRow, _, cx| {
+            if let Some((video, _)) = this.selected_track(cx) {
+                this.writes.update(cx, |w, cx| w.toggle_like(&video, cx));
+            }
+        }))
+        .on_action(cx.listener(|this, _: &AddRowToPlaylist, window, cx| {
+            if let Some((video, title)) = this.selected_track(cx) {
+                this.picker
+                    .update(cx, |p, cx| p.open(&video, title, window, cx));
+            }
+        }))
+    }
+
+    /// The video id and title of the track row the keyboard is on (none in the lists of
+    /// playlists and albums, which are not tracks).
+    fn selected_track(&self, cx: &App) -> Option<(String, SharedString)> {
+        let model = self.model.read(cx);
+        let row = if let Some(artist) = model.artist() {
+            artist.content()?.top_songs.get(self.selected)?
+        } else {
+            model.detail()?.listing.items().get(self.selected)?
+        };
+        Some((
+            row.track.video_id.as_str().to_owned(),
+            row.track.title.clone().into(),
+        ))
     }
 
     fn render_rows(
@@ -1488,6 +1533,15 @@ impl LibraryView {
         let album: Option<SharedString> = row.track.album.as_ref().map(|a| a.title.clone().into());
         let hovered = frame.level > 0.0;
         let accent = frame.accent;
+        let video: String = row.track.video_id.as_str().to_owned();
+        let liked = self.writes.read(cx).is_liked(&video);
+        let actions = self.row_actions(
+            ix,
+            &video,
+            row.track.title.clone().into(),
+            liked,
+            hovered || frame.selected,
+        );
         let index_cell = div()
             .w(px(INDEX_WIDTH))
             .flex_none()
@@ -1518,7 +1572,9 @@ impl LibraryView {
             cx,
         )
         .aria_label(row.track.title.clone())
-        .when(playing, |d| d.child(playing_row::marker(color::accent(accent))))
+        .when(playing, |d| {
+            d.child(playing_row::marker(color::accent(accent)))
+        })
         .child(index_cell)
         .child(art)
         .child(
@@ -1573,6 +1629,7 @@ impl LibraryView {
                 )
             })))
         })
+        .child(actions)
         .child(
             div()
                 .w(px(DURATION_WIDTH))
@@ -1589,6 +1646,40 @@ impl LibraryView {
                 )),
         )
         .into_any_element()
+    }
+
+    /// The like and add-to-playlist actions of a track row. Their room is always reserved, so
+    /// nothing shifts when they appear: both show on hover or under the keyboard, and the heart
+    /// stays once the track is liked.
+    fn row_actions(
+        &self,
+        ix: usize,
+        video: &str,
+        title: SharedString,
+        liked: bool,
+        active: bool,
+    ) -> gpui::Div {
+        let slot = || div().size(px(ACTION_SIZE)).flex_none();
+        let heart = slot()
+            .debug_selector(move || format!("track-like-{ix}"))
+            .when(active || liked, |d| {
+                let (writes, video) = (self.writes.clone(), video.to_owned());
+                d.child(heart_action(("track-like", ix), liked, move |_, cx| {
+                    writes.update(cx, |w, cx| w.toggle_like(&video, cx))
+                }))
+            });
+        let add = slot()
+            .debug_selector(move || format!("track-playlist-{ix}"))
+            .when(active, |d| {
+                let (picker, video) = (self.picker.clone(), video.to_owned());
+                d.child(playlist_action(
+                    ("track-playlist", ix),
+                    move |window, cx| {
+                        picker.update(cx, |p, cx| p.open(&video, title.clone(), window, cx))
+                    },
+                ))
+            });
+        div().flex().flex_row().flex_none().child(heart).child(add)
     }
 
     /// The row after the last track: still loading, a failure part-way, or unreadable rows.

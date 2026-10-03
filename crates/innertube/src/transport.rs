@@ -32,6 +32,10 @@ pub enum Error {
     /// YouTube refused the stored credentials (401/403, or the logged-out browse state).
     #[error("session rejected by YouTube Music")]
     SessionExpired,
+    /// The service answered normally and said no (an edit it did not accept). The request was
+    /// understood and did not take effect, unlike a timeout, whose outcome is unknown.
+    #[error("{0}")]
+    Refused(String),
     #[error("{0}")]
     Other(String),
 }

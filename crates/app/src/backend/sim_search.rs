@@ -32,6 +32,7 @@ fn song(f: &Fixture) -> ListedTrack {
         occurrence: None,
         thumbnail: thumb_url(f.art),
         explicit: false,
+        liked: None,
     }
 }
 
@@ -66,6 +67,7 @@ impl SearchSource for SimSearch {
                     occurrence: None,
                     thumbnail: None,
                     explicit: false,
+                    liked: None,
                 })
                 .collect();
             return Ok(SearchResults {

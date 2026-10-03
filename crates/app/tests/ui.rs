@@ -47,6 +47,7 @@ impl SearchSource for TestSearch {
                         occurrence: None,
                         thumbnail: Some(format!("https://t/{i}")),
                         explicit: false,
+                        liked: None,
                     })
                     .collect(),
                 ..SearchResults::default()

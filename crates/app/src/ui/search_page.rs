@@ -19,12 +19,15 @@ use gpui::{
 
 use crate::assets::Icon;
 use crate::library::model::{ArtistTarget, Target};
+use crate::library::writes::LibraryWrites;
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::search::{failure_text, SearchModel, SearchState};
 use crate::style::{self, color};
 use crate::ui::button::{focus_ring, keyboard_focused, IconButton};
 use crate::ui::card::{grid, heading, tile, Card};
+use crate::ui::playlist_picker::PlaylistPicker;
+use crate::ui::row_actions::{heart_action, playlist_action, ACTION_SIZE};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{self, TextField, TextFieldEvent};
@@ -39,6 +42,8 @@ actions!(
         SelectPrevious,
         PlaySelected,
         QueueSelected,
+        LikeSelected,
+        PlaylistSelected,
         BackToField,
     ]
 );
@@ -54,6 +59,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", SelectPrevious, Some(RESULTS_CONTEXT)),
         KeyBinding::new("enter", PlaySelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("ctrl-enter", QueueSelected, Some(RESULTS_CONTEXT)),
+        KeyBinding::new("l", LikeSelected, Some(RESULTS_CONTEXT)),
+        KeyBinding::new("p", PlaylistSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("escape", BackToField, Some(RESULTS_CONTEXT)),
     ]);
 }
@@ -70,6 +77,8 @@ pub type OpenTarget = Rc<dyn Fn(Target, &mut Window, &mut App) + 'static>;
 
 pub struct SearchPage {
     player: Entity<PlayerModel>,
+    writes: Entity<LibraryWrites>,
+    picker: Entity<PlaylistPicker>,
     model: Entity<SearchModel>,
     thumbs: Entity<ThumbStore>,
     field: Entity<TextField>,
@@ -89,8 +98,11 @@ pub struct SearchPage {
 impl SearchPage {
     /// `root_focus` is where focus goes when the field is left with Escape; `on_open` is what a
     /// card does.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         player: Entity<PlayerModel>,
+        writes: Entity<LibraryWrites>,
+        picker: Entity<PlaylistPicker>,
         model: Entity<SearchModel>,
         thumbs: Entity<ThumbStore>,
         root_focus: FocusHandle,
@@ -123,8 +135,11 @@ impl SearchPage {
         .detach();
         cx.observe(&thumbs, |_, _, cx| cx.notify()).detach();
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
+        cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         Self {
             player,
+            writes,
+            picker,
             model,
             thumbs,
             field,
@@ -230,6 +245,31 @@ impl SearchPage {
             self.player.update(cx, |m, cx| {
                 m.hint_art(song.track.video_id.as_str(), song.thumbnail.as_deref());
                 m.add_to_queue(song.track, cx)
+            });
+        }
+    }
+
+    fn like_selected(&mut self, _: &LikeSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
+            self.writes
+                .update(cx, |w, cx| w.toggle_like(song.track.video_id.as_str(), cx));
+        }
+    }
+
+    fn playlist_selected(
+        &mut self,
+        _: &PlaylistSelected,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
+            self.picker.update(cx, |p, cx| {
+                p.open(
+                    song.track.video_id.as_str(),
+                    song.track.title.clone(),
+                    window,
+                    cx,
+                )
             });
         }
     }
@@ -350,6 +390,8 @@ impl Render for SearchPage {
                     .on_action(cx.listener(Self::select_previous))
                     .on_action(cx.listener(Self::play_selected))
                     .on_action(cx.listener(Self::queue_selected))
+                    .on_action(cx.listener(Self::like_selected))
+                    .on_action(cx.listener(Self::playlist_selected))
                     .on_action(cx.listener(Self::back_to_field))
                     .role(gpui::Role::ListBox)
                     .aria_label("Search results")
@@ -426,6 +468,22 @@ impl SearchPage {
                         thumb: thumb_of(&song.thumbnail),
                         selected: list_focused && self.selected == Some(index),
                         accent,
+                        liked: self.writes.read(cx).is_liked(song.track.video_id.as_str()),
+                        on_like: {
+                            let (writes, video) =
+                                (self.writes.clone(), song.track.video_id.as_str().to_owned());
+                            Box::new(move |_, cx| {
+                                writes.update(cx, |w, cx| w.toggle_like(&video, cx))
+                            })
+                        },
+                        on_playlist: {
+                            let (picker, track) = (self.picker.clone(), song.track.clone());
+                            Box::new(move |window, cx| {
+                                picker.update(cx, |p, cx| {
+                                    p.open(track.video_id.as_str(), track.title.clone(), window, cx)
+                                })
+                            })
+                        },
                         on_play: {
                             let (player, track, thumb) = (
                                 self.player.clone(),
@@ -583,6 +641,9 @@ struct SongRow {
     thumb: Thumb,
     selected: bool,
     accent: Accent,
+    liked: bool,
+    on_like: RowAction,
+    on_playlist: RowAction,
     on_play: RowAction,
     on_queue: RowAction,
 }
@@ -601,6 +662,8 @@ impl RenderOnce for SongRow {
         let play_art = play.clone();
         let play_info = play;
         let queue = self.on_queue;
+        let (on_like, on_playlist) = (self.on_like, self.on_playlist);
+        let liked = self.liked;
         let accent = color::accent(self.accent);
         let id = self.index;
 
@@ -695,6 +758,23 @@ impl RenderOnce for SongRow {
                 )
             });
 
+        // Like and add to playlist: their room is always there too; the heart stays once liked.
+        let slot = || div().size(px(ACTION_SIZE)).flex_none();
+        let like = slot()
+            .debug_selector(move || format!("song-like-{id}"))
+            .when(active || liked, |d| {
+                d.child(heart_action(("song-like", id), liked, move |w, cx| {
+                    on_like(w, cx)
+                }))
+            });
+        let playlist = slot()
+            .debug_selector(move || format!("song-playlist-{id}"))
+            .when(active, |d| {
+                d.child(playlist_action(("song-playlist", id), move |w, cx| {
+                    on_playlist(w, cx)
+                }))
+            });
+
         let row_fade = fade.clone();
         div()
             .id(("song-row", id))
@@ -738,6 +818,8 @@ impl RenderOnce for SongRow {
             .child(art)
             .child(info)
             .children(duration)
+            .child(like)
+            .child(playlist)
             .child(add)
     }
 }

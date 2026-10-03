@@ -5,9 +5,11 @@
 pub mod model;
 pub mod sim;
 pub mod source;
+pub mod writes;
 
 #[cfg(feature = "provider")]
 pub mod live;
 
 pub use model::{ArtistDetail, Detail, Load, PlayRequest, Tab, Target};
 pub use source::{ArtistContent, LibrarySource, TrackRow};
+pub use writes::{LibraryWrites, Notice, WritesEvent};

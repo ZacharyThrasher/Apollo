@@ -350,3 +350,70 @@ fn a_card_without_a_title_or_id_is_dropped_not_shown_blank() {
     c[0].id = String::new();
     assert!(collections_from_grid(&c, CollectionKind::Playlist).is_empty());
 }
+
+fn row_rated(video_id: &str, set_id: &str, status: Option<&str>) -> Value {
+    let mut r = row(video_id, set_id, "Song");
+    if let Some(status) = status {
+        r["musicResponsiveListItemRenderer"]["menu"] = json!({ "menuRenderer": {
+            "topLevelButtons": [{ "likeButtonRenderer": { "likeStatus": status } }]
+        } });
+    }
+    r
+}
+
+#[test]
+fn a_rows_like_status_becomes_liked_and_a_row_that_says_nothing_stays_unknown() {
+    let p = parse_playlist(&playlist_json(
+        vec![
+            row_rated("aaaaaaaaaaa", "s1", Some("LIKE")),
+            row_rated("bbbbbbbbbbb", "s2", Some("INDIFFERENT")),
+            row_rated("ccccccccccc", "s3", Some("DISLIKE")),
+            row_rated("ddddddddddd", "s4", None),
+        ],
+        None,
+    ));
+    let liked: Vec<_> = page_from_playlist(&p).items.iter().map(|t| t.liked).collect();
+    assert_eq!(
+        liked,
+        [Some(true), Some(false), Some(false), None],
+        "a dislike is not a like, and silence is not 'not liked'"
+    );
+}
+
+#[test]
+fn a_sheet_row_becomes_a_target_with_the_bare_id() {
+    let option = innertube::PlaylistOption {
+        id: "PLabc".into(),
+        title: "Road Trip".into(),
+        thumbnail: Some("https://i.ytimg.com/x.jpg".into()),
+        contains_video: true,
+    };
+    assert_eq!(
+        target_from_option(&option),
+        PlaylistTarget {
+            id: "PLabc".into(),
+            title: "Road Trip".into(),
+            thumbnail: Some("https://i.ytimg.com/x.jpg".into()),
+            holds_track: true,
+        }
+    );
+}
+
+#[test]
+fn a_refusal_is_a_definite_no_and_an_unreadable_answer_is_not() {
+    assert_eq!(
+        classify_write(&innertube::Error::SessionExpired),
+        WriteFailure::Session
+    );
+    assert_eq!(
+        classify_write(&innertube::Error::Refused("no".into())),
+        WriteFailure::Rejected
+    );
+    let json_err = serde_json::from_str::<Value>("{").unwrap_err();
+    assert_eq!(
+        classify_write(&innertube::Error::Json(json_err)),
+        WriteFailure::Unknown,
+        "the reply was unreadable, so the write may have landed"
+    );
+    assert!(classify_write(&innertube::Error::Other("x".into())) == WriteFailure::Rejected);
+}

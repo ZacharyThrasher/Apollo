@@ -133,6 +133,23 @@ impl<T: ListItem> Listing<T> {
         self.state == LoadState::Complete && self.items.is_empty() && self.skipped == 0
     }
 
+    /// Drop the items `keep` rejects, without touching paging state. Returns how many went. The
+    /// keys of dropped items are forgotten, so a later page can bring one back.
+    pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) -> usize {
+        let before = self.items.len();
+        let keys = &mut self.keys;
+        self.items.retain(|item| {
+            let kept = keep(item);
+            if !kept {
+                if let Some(k) = item.dedup_key() {
+                    keys.remove(&k);
+                }
+            }
+            kept
+        });
+        before - self.items.len()
+    }
+
     /// A request for the next page is marked in flight.
     pub fn mark_loading_more(&mut self, rev: Revision) -> bool {
         if rev != self.revision || self.continuation.is_none() {
@@ -221,6 +238,19 @@ mod tests {
             continuation: cont.map(str::to_owned),
             skipped: 0,
         }
+    }
+
+    #[test]
+    fn retain_drops_rows_and_lets_a_later_page_bring_one_back() {
+        let mut l = Listing::new();
+        let rev = l.begin();
+        l.apply(rev, page(vec![Row("a"), Row("b"), Row("c")], Some("t1")));
+        assert_eq!(l.retain(|r| r.0 != "b"), 1);
+        assert_eq!(l.items(), [Row("a"), Row("c")]);
+        assert_eq!(l.state(), LoadState::HasMore, "paging is untouched");
+        // "a" is still known, so a repeat is dropped; "b" was forgotten, so it can return.
+        l.apply(rev, page(vec![Row("a"), Row("b")], None));
+        assert_eq!(l.items(), [Row("a"), Row("c"), Row("b")]);
     }
 
     // TEST-17

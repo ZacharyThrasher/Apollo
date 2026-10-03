@@ -1,12 +1,15 @@
-//! High-level endpoint facade over the transport. Read paths plus `rate`; the playlist and
-//! library write actions are deliberately left out until M3 needs them (see NOTICE.md).
+//! High-level endpoint facade over the transport. Read paths plus the two writes Apollo makes:
+//! `rate` (like / unlike) and adding one track to a playlist. Playlist create, rename, delete and
+//! removal, and the library `feedback` toggles, stay out until a milestone needs them
+//! (see NOTICE.md).
 
 use serde::Serialize;
 
 use crate::clients::YouTubeClient;
 use crate::models::browse::{
     self, AlbumPage, ArtistPage, BrowseItem, HistoryGroup, HomePage, MoodSection,
-    PlaylistContinuation, PlaylistPage, PlaylistSort, SearchResults, SearchSuggestions,
+    PlaylistContinuation, PlaylistOption, PlaylistPage, PlaylistSort, SearchResults,
+    SearchSuggestions,
 };
 use crate::models::context::Context;
 use crate::models::metadata::{
@@ -504,33 +507,181 @@ impl InnerTube {
 
     /// Rate a video, or clear its rating. context/01. The three states are mutually exclusive on
     /// YouTube's side: disliking a liked track removes it from Liked Music in the same call.
+    ///
+    /// Idempotent: liking a liked track, or clearing a clear one, changes nothing, so the
+    /// transport's retry on a connect error or timeout cannot double anything.
     pub async fn rate(
         &self,
         client: &YouTubeClient,
         video_id: &str,
         rating: Rating,
     ) -> Result<(), Error> {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct LikeBody {
-            context: Context,
-            target: Target,
-        }
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Target {
-            video_id: String,
-        }
-        let path = match rating {
-            Rating::Like => "like/like",
-            Rating::Dislike => "like/dislike",
-            Rating::Indifferent => "like/removelike",
-        };
-        let body = LikeBody {
-            context: self.context_for(client),
-            target: Target { video_id: video_id.to_owned() },
-        };
-        self.post(path, client, &body, true).await?;
+        let body = rate_body(self.context_for(client), video_id);
+        self.post(rate_path(rating), client, &body, true).await?;
         Ok(())
+    }
+
+    /// The playlists the signed-in account can add this video to, and whether each already holds
+    /// it (`playlist/get_add_to_playlist`, the request YouTube Music's own "Save to playlist"
+    /// sheet makes). Only playlists the account may edit come back, which is why the picker asks
+    /// here instead of listing the library's saved playlists.
+    pub async fn add_to_playlist_options(
+        &self,
+        client: &YouTubeClient,
+        video_id: &str,
+    ) -> Result<Vec<PlaylistOption>, Error> {
+        let body = add_options_body(self.context_for(client), video_id);
+        let value = self.post("playlist/get_add_to_playlist", client, &body, true).await?;
+        // A reply with no sheet in it is a shape this parser does not know. `Json` is what the
+        // callers already treat as "could not be read", as opposed to "there is nothing".
+        browse::parse_add_to_playlist(&value).ok_or_else(|| {
+            Error::Json(serde::de::Error::custom("no add-to-playlist sheet in the response"))
+        })
+    }
+
+    /// Add one video to a playlist the account owns (`browse/edit_playlist`, `ACTION_ADD_VIDEO`).
+    /// `playlist_id` is the bare id (`PL…`), not the `VL…` browse id.
+    ///
+    /// Sent with `DEDUPE_OPTION_SKIP`, so a track already in the playlist is skipped rather than
+    /// added a second time. That also makes the request safe to repeat: the transport retries a
+    /// connect error or timeout, and a request that did land the first time must not add the
+    /// track twice. The service answers `STATUS_SUCCEEDED` or says no; anything else is
+    /// [`Error::Refused`].
+    pub async fn add_to_playlist(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        video_id: &str,
+    ) -> Result<(), Error> {
+        let body = add_to_playlist_body(self.context_for(client), playlist_id, video_id);
+        let value = self.post("browse/edit_playlist", client, &body, true).await?;
+        if browse::edit_succeeded(&value) {
+            Ok(())
+        } else {
+            Err(Error::Refused("playlist edit was not accepted".into()))
+        }
+    }
+}
+
+fn rate_path(rating: Rating) -> &'static str {
+    match rating {
+        Rating::Like => "like/like",
+        Rating::Dislike => "like/dislike",
+        Rating::Indifferent => "like/removelike",
+    }
+}
+
+fn rate_body(context: Context, video_id: &str) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LikeBody {
+        context: Context,
+        target: Target,
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Target {
+        video_id: String,
+    }
+    serde_json::to_value(LikeBody { context, target: Target { video_id: video_id.to_owned() } })
+        .expect("a plain struct serialises")
+}
+
+fn add_options_body(context: Context, video_id: &str) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        video_id: String,
+        exclude_watch_later: bool,
+    }
+    serde_json::to_value(Body {
+        context,
+        video_id: video_id.to_owned(),
+        // Watch Later is a YouTube (not YouTube Music) list: not a place a song goes here.
+        exclude_watch_later: true,
+    })
+    .expect("a plain struct serialises")
+}
+
+fn add_to_playlist_body(context: Context, playlist_id: &str, video_id: &str) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        playlist_id: String,
+        actions: [Action; 1],
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Action {
+        action: &'static str,
+        added_video_id: String,
+        dedupe_option: &'static str,
+    }
+    serde_json::to_value(Body {
+        context,
+        playlist_id: playlist_id.to_owned(),
+        actions: [Action {
+            action: "ACTION_ADD_VIDEO",
+            added_video_id: video_id.to_owned(),
+            dedupe_option: "DEDUPE_OPTION_SKIP",
+        }],
+    })
+    .expect("a plain struct serialises")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::clients::Clients;
+    use crate::transport::Session;
+
+    fn tube() -> (InnerTube, YouTubeClient) {
+        let client = Clients::bundled().get(crate::METADATA_CLIENT).cloned().unwrap();
+        let session = Session {
+            cookie: Some("SAPISID=x".into()),
+            data_sync_id: Some("PAGE1".into()),
+            ..Session::default()
+        };
+        (InnerTube::new(session, None).unwrap(), client)
+    }
+
+    #[test]
+    fn each_rating_has_its_own_endpoint_and_the_video_is_the_target() {
+        assert_eq!(rate_path(Rating::Like), "like/like");
+        assert_eq!(rate_path(Rating::Dislike), "like/dislike");
+        assert_eq!(rate_path(Rating::Indifferent), "like/removelike");
+        let (tube, client) = tube();
+        let body = rate_body(tube.context_for(&client), "dQw4w9WgXcQ");
+        assert_eq!(body["target"], json!({ "videoId": "dQw4w9WgXcQ" }));
+        assert_eq!(body["context"]["client"]["clientName"], "WEB_REMIX");
+        // The signed-in channel rides along, as on every other authenticated request.
+        assert_eq!(body["context"]["user"]["onBehalfOfUser"], "PAGE1");
+    }
+
+    #[test]
+    fn adding_to_a_playlist_asks_to_skip_a_duplicate_and_names_one_video() {
+        let (tube, client) = tube();
+        let body = add_to_playlist_body(tube.context_for(&client), "PLabc", "dQw4w9WgXcQ");
+        assert_eq!(body["playlistId"], "PLabc");
+        assert_eq!(
+            body["actions"],
+            json!([{
+                "action": "ACTION_ADD_VIDEO",
+                "addedVideoId": "dQw4w9WgXcQ",
+                "dedupeOption": "DEDUPE_OPTION_SKIP"
+            }])
+        );
+    }
+
+    #[test]
+    fn the_playlist_sheet_request_leaves_out_watch_later() {
+        let (tube, client) = tube();
+        let body = add_options_body(tube.context_for(&client), "dQw4w9WgXcQ");
+        assert_eq!(body["videoId"], "dQw4w9WgXcQ");
+        assert_eq!(body["excludeWatchLater"], true);
     }
 }

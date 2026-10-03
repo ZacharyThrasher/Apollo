@@ -1,7 +1,7 @@
 //! The port the library screen reads through. Blocking by design: the screen calls it from
 //! GPUI's background executor, never on the UI thread, and nothing here touches GPUI types.
 
-use apollo_domain::library::Collection;
+use apollo_domain::library::{Collection, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{BrowseId, Track};
 use apollo_provider::ArtistSection;
@@ -16,6 +16,8 @@ pub struct TrackRow {
     pub occurrence: Option<String>,
     pub thumbnail: Option<String>,
     pub explicit: bool,
+    /// Whether the account has liked the track, when the row said so.
+    pub liked: Option<bool>,
 }
 
 impl ListItem for TrackRow {
@@ -59,6 +61,31 @@ pub trait LibrarySource: Send + Sync {
 
     /// Cover art for a thumbnail URL a collection or row carried.
     fn artwork(&self, url: &str) -> Option<DecodedArt>;
+
+    // ---- writes ---------------------------------------------------------------------------
+    // Blocking like the reads. Defaults say "not supported", so a source that only lists (a
+    // test double) needs none of this.
+
+    /// Like or unlike a track. Idempotent.
+    fn set_liked(&self, _video_id: &str, _liked: bool) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    /// Whether the account has liked a track; `None` when the service did not say.
+    fn liked(&self, _video_id: &str) -> Result<Option<bool>, LoadFailure> {
+        Ok(None)
+    }
+
+    /// The playlists the account can add a track to, each flagged when it already holds it.
+    fn playlists_for(&self, _video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
+    /// Add a track to a playlist the account owns (the bare id of a [`PlaylistTarget`]). A track
+    /// already there is not added twice.
+    fn add_to_playlist(&self, _playlist_id: &str, _video_id: &str) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
 }
 
 /// What the screen says for a failed load: what happened in six words or fewer.

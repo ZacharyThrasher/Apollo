@@ -25,7 +25,7 @@ Re-sync by diffing against upstream at a newer revision; keep the list below cur
 | `rustypipe_fallback.rs` and the `rustypipe` dependency | Anonymous stream fallback; the spec forbids guest fallback |
 | `blocklist.rs`, hide-videos filter | Product features, not part of the adapter; can come back as domain policy |
 | Session "healer" (`wait_for_session_heal`, `begin_heal`, `without_healing`, 90 s wait) | App-specific webview healing. A 401/403 now returns `Error::SessionExpired` and raises `session_rejected`; the account model decides what it means |
-| `post_upload`, playlist cover/edit/create/delete, `feedback`, `subscribe` | Write actions; re-vendor in M3 when needed |
+| `post_upload`, playlist cover/create/delete and the other `edit_playlist` actions, `feedback`, `subscribe` | Write actions; M4. Re-vendored in M3: `like/like`, `like/removelike` (`rate`), `edit_playlist` add-video, `playlist/get_add_to_playlist` |
 | `register_playback`, CPN generation | History write; M4 |
 | Lyrics (`models/lyrics.rs`, `IOS_MUSIC` client) | M4 |
 | `tests/live_smoke.rs`, `examples/`, `integration-tests` feature | Network tests; ours must run offline |
@@ -40,6 +40,11 @@ Re-sync by diffing against upstream at a newer revision; keep the list below cur
   did not become a track (unknown renderer, or a known one with no usable video). Unknown
   renderers in the track shelf are counted instead of vanishing.
 - `Error::SessionExpired` message is neutral; user-facing copy belongs to the UI layer.
+- `Error::Refused`: the service answered 200 but its edit status was not `STATUS_SUCCEEDED`.
+  Writes are idempotent (add uses `DEDUPE_OPTION_SKIP`) because the transport retries POSTs.
+- `add_to_playlist_options` / `parse_add_to_playlist`: the sheet of editable playlists with
+  `containsSelectedVideos`. The fixture `add_to_playlist.json` is hand-written from memory of the
+  response shape, not a recording; verify against the live account in the Windows check.
 
 ## Audit notes
 

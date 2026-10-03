@@ -32,3 +32,54 @@ impl Collection {
         self.kind == CollectionKind::Playlist && self.id.as_str() == LIKED_MUSIC_BROWSE_ID
     }
 }
+
+/// Why a library write (a like, an add to a playlist) did not happen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteFailure {
+    /// The service no longer accepts the session.
+    Session,
+    Throttled,
+    /// The service answered and said no: the write did not take effect.
+    Rejected,
+    /// No usable answer (a timeout, a dropped connection, an unreadable reply): the write may
+    /// or may not have landed, so it is read back before anything is believed.
+    Unknown,
+    /// This backend cannot write.
+    Unsupported,
+}
+
+impl WriteFailure {
+    /// True when the write might have taken effect anyway.
+    pub fn outcome_unknown(self) -> bool {
+        self == WriteFailure::Unknown
+    }
+}
+
+/// A playlist a track can be added to (one the account may edit).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaylistTarget {
+    /// The bare playlist id (`PL…`), as the edit takes it; not the `VL…` browse id.
+    pub id: String,
+    pub title: String,
+    pub thumbnail: Option<String>,
+    /// The playlist already holds the track the list was asked for.
+    pub holds_track: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_unknown_outcome_needs_reading_back() {
+        assert!(WriteFailure::Unknown.outcome_unknown());
+        for f in [
+            WriteFailure::Session,
+            WriteFailure::Throttled,
+            WriteFailure::Rejected,
+            WriteFailure::Unsupported,
+        ] {
+            assert!(!f.outcome_unknown(), "{f:?}");
+        }
+    }
+}
