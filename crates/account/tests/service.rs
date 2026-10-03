@@ -243,6 +243,43 @@ fn ambiguous_identity_blocks_until_an_explicit_choice_and_the_choice_persists() 
     assert_eq!(i.key(), "PAGE2");
 }
 
+// A restart must not silently disable content: the owner's Premium declaration is stored with
+// the session and comes back on restore (AUTH-01 is still the owner's own declaration).
+#[test]
+fn the_premium_declaration_survives_a_restart() {
+    let env = Env::new();
+    let v = Scripted::new(vec![valid(1)]);
+    let svc = env.service(&v);
+    assert_eq!(svc.import(jar(), true), ImportOutcome::Valid);
+    assert!(svc.view().can_use_content());
+
+    let v2 = Scripted::new(vec![valid(1)]);
+    let svc2 = env.service(&v2);
+    assert_eq!(svc2.restore(), RestoreOutcome::Restored);
+    assert_eq!(svc2.view().premium, PremiumEvidence::OwnerDeclared);
+    assert!(svc2.view().can_use_content());
+}
+
+#[test]
+fn an_undeclared_session_stays_undeclared_after_a_restart_and_a_late_declaration_is_stored() {
+    let env = Env::new();
+    let v = Scripted::new(vec![valid(1)]);
+    let svc = env.service(&v);
+    assert_eq!(svc.import(jar(), false), ImportOutcome::Valid);
+
+    let v2 = Scripted::new(vec![valid(1)]);
+    let svc2 = env.service(&v2);
+    assert_eq!(svc2.restore(), RestoreOutcome::Restored);
+    assert_eq!(svc2.view().premium, PremiumEvidence::Undeclared);
+    assert!(!svc2.view().can_use_content());
+
+    svc2.declare_premium(true);
+    let v3 = Scripted::new(vec![valid(1)]);
+    let svc3 = env.service(&v3);
+    assert_eq!(svc3.restore(), RestoreOutcome::Restored);
+    assert!(svc3.view().can_use_content(), "the declaration made later was written to the store");
+}
+
 // TEST-04 / SEC-03: logout order and completeness.
 #[test]
 fn logout_runs_hooks_first_then_drops_secrets_and_deletes_storage() {
