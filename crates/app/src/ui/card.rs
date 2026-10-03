@@ -75,7 +75,7 @@ pub fn grid() -> gpui::Div {
         .flex()
         .flex_row()
         .flex_wrap()
-        .gap(px(spacing::S2))
+        .gap(px(spacing::S4))
         .ml(px(-INSET))
 }
 
@@ -86,6 +86,8 @@ pub struct Card {
     title: SharedString,
     subtitle: Option<SharedString>,
     thumb: Thumb,
+    /// An artist's artwork is a circle; albums and playlists are rounded squares.
+    circle: bool,
     focus: FocusHandle,
     accent: Accent,
     on_open: Rc<dyn Fn(&mut Window, &mut App) + 'static>,
@@ -106,10 +108,19 @@ impl Card {
             title: title.into(),
             subtitle,
             thumb,
+            circle: false,
             focus: focus.clone(),
             accent,
             on_open: Rc::new(on_open),
         }
+    }
+}
+
+impl Card {
+    /// Draws the artwork as a circle (an artist).
+    pub fn circular(mut self, circle: bool) -> Self {
+        self.circle = circle;
+        self
     }
 }
 
@@ -172,7 +183,13 @@ impl RenderOnce for Card {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(radius::MEDIUM))
+                    .map(|d| {
+                        if self.circle {
+                            d.rounded_full()
+                        } else {
+                            d.rounded(px(radius::MEDIUM))
+                        }
+                    })
                     .overflow_hidden()
                     .bg(color::bg_overlay())
                     .child(tile(&self.thumb)),

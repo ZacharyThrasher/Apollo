@@ -427,8 +427,11 @@ impl SearchPage {
                         selected: list_focused && self.selected == Some(index),
                         accent,
                         on_play: {
-                            let (player, track, thumb) =
-                                (self.player.clone(), song.track.clone(), song.thumbnail.clone());
+                            let (player, track, thumb) = (
+                                self.player.clone(),
+                                song.track.clone(),
+                                song.thumbnail.clone(),
+                            );
                             Box::new(move |_, cx| {
                                 player.update(cx, |m, cx| {
                                     m.hint_art(track.video_id.as_str(), thumb.as_deref());
@@ -437,8 +440,11 @@ impl SearchPage {
                             })
                         },
                         on_queue: {
-                            let (player, track, thumb) =
-                                (self.player.clone(), song.track.clone(), song.thumbnail.clone());
+                            let (player, track, thumb) = (
+                                self.player.clone(),
+                                song.track.clone(),
+                                song.thumbnail.clone(),
+                            );
                             Box::new(move |_, cx| {
                                 player.update(cx, |m, cx| {
                                     m.hint_art(track.video_id.as_str(), thumb.as_deref());
@@ -479,6 +485,7 @@ impl SearchPage {
                         accent,
                         move |window, cx| on_open(target.clone(), window, cx),
                     )
+                    .circular(kind == "artist")
                 })
                 .collect();
             children.push(grid().children(cards).into_any_element());

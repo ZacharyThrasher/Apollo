@@ -422,6 +422,21 @@ impl LibraryView {
         glyph_color: gpui::Hsla,
         cx: &mut App,
     ) -> AnyElement {
+        self.art_tile_shaped(url, size, px_size, glyph, glyph_color, false, cx)
+    }
+
+    /// `circle` is the artist's shape: the one cue that tells an artist from an album.
+    #[allow(clippy::too_many_arguments)]
+    fn art_tile_shaped(
+        &mut self,
+        url: Option<&str>,
+        size: ArtSize,
+        px_size: f32,
+        glyph: Icon,
+        glyph_color: gpui::Hsla,
+        circle: bool,
+        cx: &mut App,
+    ) -> AnyElement {
         let image = url.and_then(|url| {
             let model = self.model.read(cx);
             if !model.art_requested(url, size) {
@@ -433,7 +448,9 @@ impl LibraryView {
         });
         // Everything but Liked Music (which has no cover) is the shell's art tile.
         if !matches!(glyph, Icon::HeartFilled) {
-            return art_tile(px_size, image).into_any_element();
+            return art_tile(px_size, image)
+                .when(circle, |d| d.rounded_full())
+                .into_any_element();
         }
         // A decorative glyph: the 3:1 non-text minimum applies, not 4.5:1.
         div()
@@ -1131,12 +1148,13 @@ impl LibraryView {
             Load::Ready(c) => (!c.top_songs.is_empty(), false),
             Load::Failed(_) => (false, false),
         };
-        let art = self.art_tile(
+        let art = self.art_tile_shaped(
             thumbnail.as_deref(),
             ArtSize::Header,
             HEADER_ART,
             Icon::MusicNote,
             color::text_tertiary(),
+            true,
             cx,
         );
         let play_busy = pending.is_some_and(|p| p.shuffle != Some(true));
