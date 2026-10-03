@@ -1,0 +1,40 @@
+[package]
+name = "apollo-account"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Account service: cookie jar, vault + AEAD storage, identity validation, login helper handoff, imports"
+
+[features]
+# Fake login helper binary and test-only hooks.
+test-support = []
+
+[dependencies]
+apollo-services-common = { path = "../services-common" }
+chacha20poly1305 = "0.10"
+getrandom = "0.3"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+ureq = "3"
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Credentials",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+]
+
+[dev-dependencies]
+apollo-account = { path = ".", features = ["test-support"] }
+
+[[bin]]
+name = "apollo-fake-login-helper"
+path = "src/bin/fake_login_helper.rs"
+required-features = ["test-support"]

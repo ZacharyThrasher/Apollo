@@ -153,6 +153,48 @@ pub fn current_user_sid() -> io::Result<String> {
     }
 }
 
+/// Create `path` (and missing parents) as a *persistent* user-only directory: the leaf gets a
+/// protected DACL granting only the current user. If it already exists it must be a real
+/// directory (not a reparse point); its ACL is not rewritten here.
+pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 || !meta.is_dir() {
+            return Err(io::Error::other("private dir path is not a plain directory"));
+        }
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    create_protected_dir(path)
+}
+
+/// Creates the leaf directory with a protected DACL (no inheritance, current user only).
+/// Fails if it already exists.
+fn create_protected_dir(path: &Path) -> io::Result<()> {
+    let sddl = format!("D:P(A;OICI;FA;;;{})", current_user_sid()?);
+    let sddl_w: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl_w.as_ptr()),
+            SDDL_REVISION_1,
+            &mut sd,
+            None,
+        )
+        .map_err(io::Error::other)?;
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd.0,
+            bInheritHandle: false.into(),
+        };
+        let path_w = wide(path.as_os_str());
+        let r = CreateDirectoryW(PCWSTR(path_w.as_ptr()), Some(&sa));
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+        r.map_err(io::Error::other)
+    }
+}
+
 /// A private directory only the current user can open. Removed (best effort, zeroing files)
 /// on drop.
 #[derive(Debug)]
@@ -171,27 +213,7 @@ impl PrivateDir {
             crate::random_hex(8)
         );
         let path = base.join(name);
-        let sddl = format!("D:P(A;OICI;FA;;;{})", current_user_sid()?);
-        let sddl_w: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
-        unsafe {
-            let mut sd = PSECURITY_DESCRIPTOR::default();
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                PCWSTR(sddl_w.as_ptr()),
-                SDDL_REVISION_1,
-                &mut sd,
-                None,
-            )
-            .map_err(io::Error::other)?;
-            let sa = SECURITY_ATTRIBUTES {
-                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: sd.0,
-                bInheritHandle: false.into(),
-            };
-            let path_w = wide(path.as_os_str());
-            let r = CreateDirectoryW(PCWSTR(path_w.as_ptr()), Some(&sa));
-            let _ = LocalFree(Some(HLOCAL(sd.0)));
-            r.map_err(io::Error::other)?;
-        }
+        create_protected_dir(&path)?;
         let meta = std::fs::symlink_metadata(&path)?;
         if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
             let _ = std::fs::remove_dir(&path);
