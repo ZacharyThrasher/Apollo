@@ -153,12 +153,41 @@ pub fn authorization_header(jar: &CookieJar, now_unix: u64) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-fn cookie_header(jar: &CookieJar) -> String {
+/// Does a cookie with this `domain` attribute get sent to `host`? Standard domain matching: the
+/// host equals the domain or is a subdomain of it. A `.google.com` cookie is NOT sent to
+/// music.youtube.com.
+fn domain_matches(cookie_domain: &str, host: &str) -> bool {
+    let d = cookie_domain.trim_start_matches('.').to_ascii_lowercase();
+    let h = host.to_ascii_lowercase();
+    h == d || h.ends_with(&format!(".{d}"))
+}
+
+/// The `Cookie:` header a browser would send to `https://{host}/`: only matching, unexpired
+/// cookies. The jar legitimately holds the same name under several domains (for example
+/// SAPISID under both .google.com and .youtube.com); sending them all makes the service pick
+/// the wrong ones and report a logged-out session.
+fn cookie_header_for(jar: &CookieJar, host: &str, now_unix: u64) -> String {
     jar.cookies
         .iter()
+        .filter(|c| domain_matches(&c.domain, host))
+        .filter(|c| c.path == "/" || c.path.is_empty() || "/".starts_with(&c.path))
+        .filter(|c| c.expires_unix.is_none_or(|e| e as u64 > now_unix))
         .map(|c| format!("{}={}", c.name, c.value))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// The `SAPISID` family must also come from the cookies that match the host.
+fn matching_jar(jar: &CookieJar, host: &str) -> CookieJar {
+    CookieJar {
+        cookies: jar
+            .cookies
+            .iter()
+            .filter(|c| domain_matches(&c.domain, host))
+            .cloned()
+            .collect(),
+        ephemeral_seed: jar.ephemeral_seed,
+    }
 }
 
 pub struct InnerTubeValidator {
@@ -181,9 +210,19 @@ impl InnerTubeValidator {
     }
 
     fn call(&self, jar: &CookieJar, endpoint: &str) -> Result<HttpResponse, NetError> {
-        let auth = authorization_header(jar, (self.clock)()).unwrap_or_default();
+        let now = (self.clock)();
+        let host = self
+            .base
+            .split("://")
+            .nth(1)
+            .unwrap_or(&self.base)
+            .split('/')
+            .next()
+            .unwrap_or("music.youtube.com")
+            .to_string();
+        let auth = authorization_header(&matching_jar(jar, &host), now).unwrap_or_default();
         let headers = vec![
-            ("Cookie".to_string(), cookie_header(jar)),
+            ("Cookie".to_string(), cookie_header_for(jar, &host, now)),
             ("Authorization".to_string(), auth),
             ("Origin".to_string(), ORIGIN.to_string()),
             ("X-Origin".to_string(), ORIGIN.to_string()),
@@ -497,6 +536,53 @@ mod tests {
     fn debug_output_hides_identity_and_values() {
         let id = Identity { name: "Real Name".into(), handle: Some("@h".into()), page_id: Some("P".into()), selected_by_service: true };
         assert!(!format!("{id:?} {:?}", Validation::Valid { identities: vec![id.clone()] }).contains("Real Name"));
+    }
+
+    // Found with the real Firefox profile: SAPISID etc. exist under .google.com AND .youtube.com.
+    // Sending both (17 KB, duplicate names) made the service answer "logged out".
+    #[test]
+    fn only_cookies_matching_the_request_host_are_sent() {
+        let mut jar = jar_with(&["SAPISID", "SID"]);
+        for (name, domain, value) in [
+            ("SAPISID", ".google.com", "GOOGLE-DOMAIN-VALUE"),
+            ("SID", ".google.com", "GOOGLE-DOMAIN-SID"),
+            ("OTHER", ".example.com", "NOT-FOR-YOUTUBE"),
+            ("LOOKALIKE", ".notyoutube.com", "NOT-FOR-YOUTUBE"),
+        ] {
+            jar.cookies.push(Cookie {
+                name: name.into(),
+                value: value.into(),
+                domain: domain.into(),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+                expires_unix: Some(4_102_444_800),
+            });
+        }
+        jar.cookies.push(Cookie {
+            name: "EXPIRED".into(),
+            value: "OLD".into(),
+            domain: ".youtube.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: false,
+            expires_unix: Some(1_000),
+        });
+        let header = cookie_header_for(&jar, "music.youtube.com", 1_800_000_000);
+        assert!(header.contains("SAPISID=VALUECANARY-SAPISID"), "{header}");
+        assert!(header.contains("SID=VALUECANARY-SID"), "{header}");
+        for bad in ["GOOGLE-DOMAIN", "NOT-FOR-YOUTUBE", "OLD"] {
+            assert!(!header.contains(bad), "{bad} must not be sent: {header}");
+        }
+        assert_eq!(header.matches("SAPISID=").count(), 1, "no duplicate names: {header}");
+        // And the Authorization hash is computed from the youtube.com SAPISID, not google.com's.
+        let m = matching_jar(&jar, "music.youtube.com");
+        assert!(m.cookies.iter().all(|c| c.domain != ".google.com"));
+        assert_eq!(domain_matches(".youtube.com", "music.youtube.com"), true);
+        assert_eq!(domain_matches("youtube.com", "music.youtube.com"), true);
+        assert_eq!(domain_matches("music.youtube.com", "music.youtube.com"), true);
+        assert_eq!(domain_matches(".google.com", "music.youtube.com"), false);
+        assert_eq!(domain_matches(".youtube.com", "evilyoutube.com"), false);
     }
 
     #[test]
