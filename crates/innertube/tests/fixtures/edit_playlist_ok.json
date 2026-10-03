@@ -1,0 +1,7 @@
+{
+  "responseContext": {},
+  "status": "STATUS_SUCCEEDED",
+  "playlistEditResults": [
+    { "playlistEditVideoAddedResultData": { "videoId": "dQw4w9WgXcQ", "setVideoId": "ABCDEF" } }
+  ]
+}

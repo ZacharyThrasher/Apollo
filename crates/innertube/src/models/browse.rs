@@ -1091,6 +1091,54 @@ pub(crate) fn is_signed_out(root: &Value) -> bool {
     !find_all(root, "signInEndpoint").is_empty()
 }
 
+/// One playlist of the "Save to playlist" sheet: a playlist the account may add this video to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlaylistOption {
+    /// The bare playlist id (`PL…`), as `browse/edit_playlist` takes it.
+    pub id: String,
+    pub title: String,
+    pub thumbnail: Option<String>,
+    /// The playlist already holds the video the sheet was opened for. `containsSelectedVideos` is
+    /// `ALL`, `SOME` or `NONE`; with one video selected only `ALL` and `NONE` occur.
+    pub contains_video: bool,
+}
+
+/// Parse a `playlist/get_add_to_playlist` answer. Tolerant: any `playlistAddToOptionRenderer`
+/// anywhere in the tree counts, and a row without an id or a title is dropped. A playlist
+/// listed twice keeps its first row.
+///
+/// `None` when the answer has no `addToPlaylistRenderer` at all: that is a response this parser
+/// does not know (or a signed-out one), not an account with no playlists, whose sheet is a
+/// renderer with an empty list.
+pub fn parse_add_to_playlist(root: &Value) -> Option<Vec<PlaylistOption>> {
+    if find_all(root, "addToPlaylistRenderer").is_empty() {
+        return None;
+    }
+    let mut seen = std::collections::HashSet::new();
+    Some(find_all(root, "playlistAddToOptionRenderer")
+        .into_iter()
+        .filter_map(|node| {
+            let id = node.get("playlistId").and_then(Value::as_str)?.trim().to_owned();
+            let title = text_or_runs(node.get("title"))?.trim().to_owned();
+            if id.is_empty() || title.is_empty() || !seen.insert(id.clone()) {
+                return None;
+            }
+            Some(PlaylistOption {
+                id,
+                title,
+                thumbnail: last_thumbnail(node),
+                contains_video: node.get("containsSelectedVideos").and_then(Value::as_str)
+                    == Some("ALL"),
+            })
+        })
+        .collect())
+}
+
+/// Whether a `browse/edit_playlist` answer says the edit was accepted.
+pub fn edit_succeeded(root: &Value) -> bool {
+    root.get("status").and_then(Value::as_str) == Some("STATUS_SUCCEEDED")
+}
+
 // --- node parsers -------------------------------------------------------------------------
 
 /// A carousel content node is a two-row card, a track row, or a podcast episode (the home
@@ -1814,6 +1862,50 @@ mod tests {
         // A normal playlist response has no signInEndpoint.
         let ok = json!({ "contents": { "musicPlaylistShelfRenderer": { "contents": [] } } });
         assert!(!is_signed_out(&ok));
+    }
+
+    #[test]
+    fn the_save_to_playlist_sheet_lists_editable_playlists_with_what_they_hold() {
+        let root: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/add_to_playlist.json"))
+                .unwrap();
+        let options = parse_add_to_playlist(&root).unwrap();
+        // The repeat, the row with no id and the row with a blank title are dropped.
+        assert_eq!(options.len(), 2);
+        assert_eq!(
+            options[0],
+            PlaylistOption {
+                id: "PLroadtrip0001".into(),
+                title: "Road Trip".into(),
+                thumbnail: Some("https://i.ytimg.com/vi/a/big.jpg".into()),
+                contains_video: false,
+            }
+        );
+        assert_eq!(
+            (options[1].id.as_str(), options[1].title.as_str(), options[1].contains_video),
+            ("PLfocus0002", "Focus", true),
+            "a simpleText title reads like runs, and ALL means it already holds the track"
+        );
+        assert_eq!(options[1].thumbnail, None);
+        // A response with no sheet is not "no playlists"; an empty sheet is.
+        assert_eq!(parse_add_to_playlist(&json!({})), None);
+        assert_eq!(
+            parse_add_to_playlist(&json!({ "contents": [{ "addToPlaylistRenderer": { "playlists": [] } }] })),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn only_a_succeeded_status_counts_as_an_accepted_edit() {
+        let ok: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/edit_playlist_ok.json"))
+                .unwrap();
+        let failed: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/edit_playlist_failed.json"))
+                .unwrap();
+        assert!(edit_succeeded(&ok));
+        assert!(!edit_succeeded(&failed));
+        assert!(!edit_succeeded(&json!({ "responseContext": {} })), "no status is not success");
     }
 
     #[test]

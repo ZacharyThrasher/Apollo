@@ -16,6 +16,7 @@ use gpui::{Context, Entity, RenderImage};
 use image::imageops;
 
 use super::source::{ArtistContent, LibrarySource, TrackRow};
+use super::writes::{LibraryWrites, WritesEvent};
 use crate::art::{sized_thumbnail, DecodedArt};
 use crate::player::{PlayerModel, Status};
 use crate::url_thumbs::Thumb as ThumbView;
@@ -139,6 +140,8 @@ pub struct Detail {
     pub collection: Collection,
     pub listing: Listing<TrackRow>,
     pub pending: Option<PlayRequest>,
+    /// Bumped by every silent refresh; an older refresh's answer is dropped.
+    refresh: u64,
 }
 
 impl Detail {
@@ -181,12 +184,24 @@ struct Thumbs {
     inflight: usize,
 }
 
+/// What a page of rows says about likes: each row's own `likeStatus`, or liked for every row of
+/// Liked Music (being listed there is what liked means).
+fn like_seeds(rows: &[TrackRow], liked_music: bool) -> Vec<(String, bool)> {
+    rows.iter()
+        .filter_map(|r| {
+            let liked = if liked_music { Some(true) } else { r.liked }?;
+            Some((r.track.video_id.as_str().to_owned(), liked))
+        })
+        .collect()
+}
+
 fn key(url: &str, size: ArtSize) -> String {
     format!("{size:?}|{url}")
 }
 
 pub struct LibraryModel {
     player: Entity<PlayerModel>,
+    writes: Entity<LibraryWrites>,
     source: Option<Arc<dyn LibrarySource>>,
     tab: Tab,
     collections: Load<Collections>,
@@ -199,10 +214,20 @@ pub struct LibraryModel {
 }
 
 impl LibraryModel {
-    pub fn new(player: Entity<PlayerModel>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        player: Entity<PlayerModel>,
+        writes: Entity<LibraryWrites>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&player, |m, _, cx| m.try_start(cx)).detach();
+        // Liked Music follows the likes made anywhere in the app.
+        cx.subscribe(&writes, |m, _, event, cx| match event {
+            WritesEvent::LikeSettled { video_id, liked } => m.liked_changed(video_id, *liked, cx),
+        })
+        .detach();
         let mut model = Self {
             player,
+            writes,
             source: None,
             tab: Tab::Playlists,
             collections: Load::Idle,
@@ -363,6 +388,7 @@ impl LibraryModel {
             collection,
             listing: Listing::new(),
             pending: None,
+            refresh: 0,
         }));
         self.load_detail(cx);
     }
@@ -459,14 +485,19 @@ impl LibraryModel {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let detail = self.collection_mut(detail_id)?;
+        let liked_music = detail.collection.is_liked_music();
+        let mut seeds = Vec::new();
         let next = match result {
-            Ok(page) => match detail.listing.apply(rev, page) {
-                Applied::Yes => detail
-                    .listing
-                    .continuation()
-                    .map(|(_, token)| token.to_owned()),
-                Applied::Stale | Applied::RepeatedContinuation => None,
-            },
+            Ok(page) => {
+                seeds = like_seeds(&page.items, liked_music);
+                match detail.listing.apply(rev, page) {
+                    Applied::Yes => detail
+                        .listing
+                        .continuation()
+                        .map(|(_, token)| token.to_owned()),
+                    Applied::Stale | Applied::RepeatedContinuation => None,
+                }
+            }
             Err(failure) => {
                 detail.listing.fail(rev, failure);
                 None
@@ -478,11 +509,101 @@ impl LibraryModel {
         let settled = !detail.is_loading();
         let failed = detail.failure().is_some();
         let pending = if settled { detail.pending.take() } else { None };
+        self.writes.update(cx, |w, cx| w.seed(seeds, cx));
         if let Some(request) = pending.filter(|_| !failed) {
             self.play_collection(detail_id, request, cx);
         }
         cx.notify();
         next
+    }
+
+    // ---- likes ---------------------------------------------------------------------------
+
+    /// A like or unlike landed: any open Liked Music page follows it without a reload. An unlike
+    /// drops the row on the spot; a like fetches the list again behind the rows already shown
+    /// and swaps it in when it is whole (a page that is still loading already brings the
+    /// current list). A page that is not open needs nothing: opening one always loads it fresh.
+    fn liked_changed(&mut self, video_id: &str, liked: bool, cx: &mut Context<Self>) {
+        let mut refresh = Vec::new();
+        let mut dropped = false;
+        for entry in &mut self.stack {
+            let Entry::Collection(d) = entry else {
+                continue;
+            };
+            if !d.collection.is_liked_music() {
+                continue;
+            }
+            if liked {
+                let listed = d
+                    .listing
+                    .items()
+                    .iter()
+                    .any(|r| r.track.video_id.as_str() == video_id);
+                if !listed && !d.is_loading() {
+                    refresh.push(d.id);
+                }
+            } else {
+                dropped |= d.listing.retain(|r| r.track.video_id.as_str() != video_id) > 0;
+            }
+        }
+        for id in refresh {
+            self.refresh_detail(id, cx);
+        }
+        if dropped {
+            cx.notify();
+        }
+    }
+
+    /// Load a page's list again without clearing what it shows; swap it in when it is complete.
+    /// Quiet on failure: the rows already shown stay.
+    fn refresh_detail(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let Some(detail) = self.collection_mut(id) else {
+            return;
+        };
+        detail.refresh += 1;
+        let (generation, collection) = (detail.refresh, detail.collection.clone());
+        cx.spawn(async move |this, cx| {
+            let mut fresh = Listing::<TrackRow>::new();
+            let rev = fresh.begin();
+            let mut result = {
+                let source = source.clone();
+                cx.background_executor()
+                    .spawn(async move { source.tracks(&collection) })
+                    .await
+            };
+            let whole = loop {
+                let Ok(page) = result else {
+                    break false;
+                };
+                if fresh.apply(rev, page) != Applied::Yes {
+                    break false;
+                }
+                let Some((_, token)) = fresh.continuation() else {
+                    break true;
+                };
+                let token = token.to_owned();
+                let source = source.clone();
+                result = cx
+                    .background_executor()
+                    .spawn(async move { source.more_tracks(&token) })
+                    .await;
+            };
+            if !whole {
+                return;
+            }
+            let _ = this.update(cx, |m, cx| {
+                if let Some(d) = m.collection_mut(id) {
+                    if d.refresh == generation && !d.is_loading() {
+                        d.listing = fresh;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     // ---- artist --------------------------------------------------------------------------
@@ -523,10 +644,15 @@ impl LibraryModel {
         };
         let pending = detail.pending.take();
         let ok = result.is_ok();
+        let seeds = result
+            .as_ref()
+            .map(|c| like_seeds(&c.top_songs, false))
+            .unwrap_or_default();
         detail.state = match result {
             Ok(content) => Load::Ready(Arc::new(content)),
             Err(failure) => Load::Failed(failure),
         };
+        self.writes.update(cx, |w, cx| w.seed(seeds, cx));
         if let Some(request) = pending.filter(|_| ok) {
             self.play_artist(id, request, cx);
         }

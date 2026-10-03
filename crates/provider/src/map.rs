@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use apollo_domain::account::{IdentityId, Validation, ValidationError};
-use apollo_domain::library::{Collection, CollectionKind};
+use apollo_domain::library::{Collection, CollectionKind, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track, VideoId};
 use innertube::{
-    AccountIdentity, AccountInfo, AlbumPage, BrowseItem, PlaylistContinuation, PlaylistPage,
-    SongItem,
+    AccountIdentity, AccountInfo, AlbumPage, BrowseItem, PlaylistContinuation, PlaylistOption,
+    PlaylistPage, Rating, SongItem,
 };
 
 /// A track as it appears in a listing: the playable identity plus the row's own occurrence token,
@@ -17,6 +17,9 @@ pub struct ListedTrack {
     pub occurrence: Option<String>,
     pub thumbnail: Option<String>,
     pub explicit: bool,
+    /// Whether the account has liked the track, when the row says (`likeStatus`). `None` is "the
+    /// row did not say", never "not liked".
+    pub liked: Option<bool>,
 }
 
 impl ListItem for ListedTrack {
@@ -86,7 +89,23 @@ pub fn track_from_song(song: &SongItem) -> Option<ListedTrack> {
         occurrence: song.occurrence_id.clone(),
         thumbnail: song.thumbnail.clone(),
         explicit: song.explicit,
+        liked: song.rating.map(liked_from_rating),
     })
+}
+
+/// A dislike is not a like: only `Like` reads as liked.
+pub fn liked_from_rating(rating: Rating) -> bool {
+    rating == Rating::Like
+}
+
+/// A playlist the account can add to, from the "Save to playlist" sheet.
+pub fn target_from_option(option: &PlaylistOption) -> PlaylistTarget {
+    PlaylistTarget {
+        id: option.id.clone(),
+        title: option.title.clone(),
+        thumbnail: option.thumbnail.clone(),
+        holds_track: option.contains_video,
+    }
 }
 
 /// Maps rows and folds mapping failures into the page's `skipped` count, so a bad row is never
@@ -165,7 +184,29 @@ pub fn classify(err: &innertube::Error) -> LoadFailure {
             None if e.is_decode() => LoadFailure::Parse,
             None => LoadFailure::Network,
         },
-        innertube::Error::VisitorDataNotFound | innertube::Error::Other(_) => LoadFailure::Other,
+        innertube::Error::VisitorDataNotFound
+        | innertube::Error::Refused(_)
+        | innertube::Error::Other(_) => LoadFailure::Other,
+    }
+}
+
+/// What a transport error means to a write. A refusal or a 4xx is a definite "no"; a timeout, a
+/// dropped connection, a 5xx or an unreadable answer leaves the outcome open, because the service
+/// may have applied the write before the reply went missing.
+pub fn classify_write(err: &innertube::Error) -> WriteFailure {
+    match err {
+        innertube::Error::SessionExpired => WriteFailure::Session,
+        innertube::Error::Refused(_) => WriteFailure::Rejected,
+        innertube::Error::Http(e) => match e.status().map(|s| s.as_u16()) {
+            Some(401 | 403) => WriteFailure::Session,
+            Some(429) => WriteFailure::Throttled,
+            Some(400..=499) => WriteFailure::Rejected,
+            _ => WriteFailure::Unknown,
+        },
+        innertube::Error::Json(_) => WriteFailure::Unknown,
+        innertube::Error::VisitorDataNotFound | innertube::Error::Other(_) => {
+            WriteFailure::Rejected
+        }
     }
 }
 

@@ -60,6 +60,9 @@ icons! {
     Add => "add-regular",
     ArrowLeft => "arrow-left-regular",
     HeartFilled => "heart-filled",
+    HeartRegular => "heart-regular",
+    PlaylistAdd => "playlist-add-regular",
+    Checkmark => "checkmark-regular",
 }
 
 pub struct Assets;

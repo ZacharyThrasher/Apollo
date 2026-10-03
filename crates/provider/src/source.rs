@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use apollo_domain::account::{Validation, ValidationError};
-use apollo_domain::library::{Collection, CollectionKind};
+use apollo_domain::library::{Collection, CollectionKind, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{LoadFailure, Page};
-use innertube::{Clients, InnerTube, Session, YouTubeClient, METADATA_CLIENT};
+use innertube::{Clients, InnerTube, Rating, Session, YouTubeClient, METADATA_CLIENT};
 use tokio::sync::Notify;
 
 use crate::artist::{page_from_artist, ArtistPage};
 use crate::map::{
-    account_validation, classify, collections_from_grid, page_from_album, page_from_continuation,
-    page_from_playlist, ListedTrack,
+    account_validation, classify, classify_write, collections_from_grid, liked_from_rating,
+    page_from_album, page_from_continuation, page_from_playlist, target_from_option, ListedTrack,
 };
 use crate::search::{search_results, SearchResults};
 
@@ -160,6 +160,59 @@ impl InnerTubeSource {
             return Err(LoadFailure::Parse);
         }
         Ok(results)
+    }
+
+    /// Like or unlike a track on the account (`like/like`, `like/removelike`). Idempotent. A
+    /// failure says whether the write is known not to have happened or might have: see
+    /// [`WriteFailure::outcome_unknown`].
+    pub async fn set_liked(&self, video_id: &str, liked: bool) -> Result<(), WriteFailure> {
+        let rating = if liked {
+            Rating::Like
+        } else {
+            Rating::Indifferent
+        };
+        self.tube
+            .rate(&self.client, video_id, rating)
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// Whether the account has liked a track: what YouTube Music's own player bar asks (a `next`
+    /// for the video, whose overlay carries the rating). `None` when the answer did not say.
+    pub async fn liked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
+        let next = self
+            .tube
+            .next(&self.client, Some(video_id), None)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(next.rating.map(liked_from_rating))
+    }
+
+    /// The playlists the account can add `video_id` to, each flagged when it already holds it.
+    pub async fn playlists_for(
+        &self,
+        video_id: &str,
+    ) -> Result<Vec<PlaylistTarget>, LoadFailure> {
+        let options = self
+            .tube
+            .add_to_playlist_options(&self.client, video_id)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(options.iter().map(target_from_option).collect())
+    }
+
+    /// Add one track to a playlist the account owns. A track already there is skipped, not added
+    /// twice. `playlist_id` may carry the `VL` browse prefix.
+    pub async fn add_to_playlist(
+        &self,
+        playlist_id: &str,
+        video_id: &str,
+    ) -> Result<(), WriteFailure> {
+        let bare = playlist_id.strip_prefix("VL").unwrap_or(playlist_id);
+        self.tube
+            .add_to_playlist(&self.client, bare, video_id)
+            .await
+            .map_err(|e| classify_write(&e))
     }
 
     /// Best-effort `visitorData`, which the service expects alongside the cookie. A failure

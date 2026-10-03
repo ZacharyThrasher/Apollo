@@ -1,0 +1,49 @@
+{
+  "_note": "Hand-written after the shape of the web client's 'Save to playlist' sheet (playlist/get_add_to_playlist); not a recording. Re-record on a real account when one is at hand.",
+  "responseContext": {},
+  "contents": [
+    {
+      "addToPlaylistRenderer": {
+        "playlists": [
+          {
+            "playlistAddToOptionRenderer": {
+              "playlistId": "PLroadtrip0001",
+              "title": { "runs": [{ "text": "Road Trip" }] },
+              "privacy": "PRIVATE",
+              "containsSelectedVideos": "NONE",
+              "thumbnails": [
+                { "thumbnails": [{ "url": "https://i.ytimg.com/vi/a/small.jpg", "width": 60, "height": 60 }, { "url": "https://i.ytimg.com/vi/a/big.jpg", "width": 120, "height": 120 }] }
+              ]
+            }
+          },
+          {
+            "playlistAddToOptionRenderer": {
+              "playlistId": "PLfocus0002",
+              "title": { "simpleText": "Focus" },
+              "privacy": "UNLISTED",
+              "containsSelectedVideos": "ALL"
+            }
+          },
+          {
+            "playlistAddToOptionRenderer": {
+              "playlistId": "PLroadtrip0001",
+              "title": { "runs": [{ "text": "Road Trip (listed twice)" }] },
+              "containsSelectedVideos": "NONE"
+            }
+          },
+          {
+            "playlistAddToOptionRenderer": {
+              "title": { "runs": [{ "text": "No id" }] }
+            }
+          },
+          {
+            "playlistAddToOptionRenderer": {
+              "playlistId": "PLuntitled03",
+              "title": { "runs": [{ "text": "  " }] }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

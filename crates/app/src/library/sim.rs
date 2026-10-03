@@ -2,9 +2,12 @@
 //! the shapes the screen has to survive: Liked Music, several playlists and albums, a long
 //! paged playlist, an empty one and one that always fails to load.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use apollo_domain::library::{Collection, CollectionKind, LIKED_MUSIC_BROWSE_ID};
+use apollo_domain::library::{
+    Collection, CollectionKind, PlaylistTarget, WriteFailure, LIKED_MUSIC_BROWSE_ID,
+};
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track};
 use apollo_provider::ArtistSection;
@@ -39,10 +42,78 @@ const SLOW_LATENCY: Duration = Duration::from_millis(1_500);
 /// Prefix of the generated track ids; the remaining five characters are the position.
 pub const GENERATED_PREFIX: &str = "simLib";
 
-#[derive(Clone, Debug, Default)]
+/// How the simulated service answers a write (tests drive the failure paths with this).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WriteBehaviour {
+    #[default]
+    Succeed,
+    /// The service refuses (or, for `Unknown`, the reply is lost): the write does not land.
+    Fail(WriteFailure),
+    /// The write lands, but the reply is lost, so the caller sees an unknown outcome.
+    LandsReplyLost,
+}
+
+/// Playlists the simulated account can add to, in the order the picker lists them. A playlist
+/// id here is the bare one (no `VL`).
+const OWNED: &[(&str, &str)] = &[
+    ("PLsimroad", "Road Trip"),
+    ("PLsimlong", "Long Haul"),
+    ("PLsimempty", "Nothing Yet"),
+    (
+        "PLsimlongtitle",
+        "A Playlist With A Remarkably Long Title That Will Not Fit On One Line Of The List",
+    ),
+    ("PLsimmix001", "Mix 001"),
+    ("PLsimmix002", "Mix 002"),
+    ("PLsimmix003", "Mix 003"),
+    ("PLsimmix004", "Mix 004"),
+    ("PLsimmix005", "Mix 005"),
+    ("PLsimmix006", "Mix 006"),
+    ("PLsimmix007", "Mix 007"),
+    ("PLsimmix008", "Mix 008"),
+];
+/// The fixture positions Road Trip starts with (see `rows_for`).
+const ROAD_TRIP_FIXTURES: [usize; 3] = [0, 1, 5];
+
+#[derive(Debug)]
+struct SimState {
+    /// Video ids in Liked Music, most recently liked first.
+    liked: Vec<String>,
+    /// `(bare playlist id, video id)` added through `add_to_playlist`, oldest first.
+    added: Vec<(String, String)>,
+    writes: WriteBehaviour,
+    /// Makes `playlists_for` fail (the picker's error state).
+    playlists: Option<LoadFailure>,
+    /// Writes the simulation received, `(what, video id)`, for tests.
+    log: Vec<(String, String)>,
+}
+
+impl SimState {
+    fn new() -> Self {
+        Self {
+            liked: FIXTURES.iter().take(6).map(|f| f.id.to_owned()).collect(),
+            added: Vec::new(),
+            writes: WriteBehaviour::default(),
+            playlists: None,
+            log: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct SimLibrary {
     /// Skips the artificial latency (tests).
     instant: bool,
+    state: Arc<Mutex<SimState>>,
+}
+
+impl Default for SimLibrary {
+    fn default() -> Self {
+        Self {
+            instant: false,
+            state: Arc::new(Mutex::new(SimState::new())),
+        }
+    }
 }
 
 impl SimLibrary {
@@ -51,7 +122,50 @@ impl SimLibrary {
     }
 
     pub fn instant() -> Self {
-        Self { instant: true }
+        Self {
+            instant: true,
+            ..Self::default()
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, SimState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// How the next writes are answered (tests).
+    pub fn set_write_behaviour(&self, behaviour: WriteBehaviour) {
+        self.state().writes = behaviour;
+    }
+
+    /// Makes the playlist list fail (tests).
+    pub fn set_playlists_failure(&self, failure: Option<LoadFailure>) {
+        self.state().playlists = failure;
+    }
+
+    /// Video ids in Liked Music, most recently liked first.
+    pub fn liked_ids(&self) -> Vec<String> {
+        self.state().liked.clone()
+    }
+
+    /// `(bare playlist id, video id)` the service holds from `add_to_playlist` calls.
+    pub fn added(&self) -> Vec<(String, String)> {
+        self.state().added.clone()
+    }
+
+    /// Every write the service received, `("like" | "unlike" | "add:<playlist>", video id)`, in
+    /// order. A write that failed before landing is in here too.
+    pub fn write_log(&self) -> Vec<(String, String)> {
+        self.state().log.clone()
+    }
+
+    /// Liked Music as the service holds it now.
+    fn liked_rows(&self) -> Vec<TrackRow> {
+        self.state()
+            .liked
+            .iter()
+            .enumerate()
+            .map(|(n, id)| liked_row(id, n))
+            .collect()
     }
 
     fn wait(&self, d: Duration) {
@@ -97,6 +211,7 @@ fn fixture_row(f: &Fixture, n: usize) -> TrackRow {
         occurrence: Some(format!("occ-{}-{n}", f.id)),
         thumbnail: art_url(f),
         explicit: n % 4 == 3,
+        liked: None,
     }
 }
 
@@ -117,6 +232,7 @@ fn generated_row(n: usize) -> TrackRow {
         occurrence: Some(format!("occ-{id}")),
         thumbnail: Some(format!("sim://art/{}", (n % 12) * 30)),
         explicit: false,
+        liked: None,
     }
 }
 
@@ -125,6 +241,26 @@ fn fixture_rows(ids: &[usize]) -> Vec<TrackRow> {
         .enumerate()
         .map(|(n, &i)| fixture_row(&FIXTURES[i], n))
         .collect()
+}
+
+/// A Liked Music row for a video id: the fixture when it is one, else a plain row named for the
+/// id (a track the simulation has no metadata for).
+fn liked_row(id: &str, n: usize) -> TrackRow {
+    match FIXTURES.iter().find(|f| f.id == id) {
+        Some(f) => {
+            let mut row = fixture_row(f, n);
+            row.occurrence = Some(format!("occ-liked-{id}"));
+            row.liked = Some(true);
+            row
+        }
+        None => TrackRow {
+            track: Track::new(id, format!("Liked {id}")),
+            occurrence: Some(format!("occ-liked-{id}")),
+            thumbnail: None,
+            explicit: false,
+            liked: Some(true),
+        },
+    }
 }
 
 /// The collections the simulation lists, in service order (Liked Music first, as the service
@@ -279,6 +415,43 @@ fn rows_for(id: &str) -> Option<Vec<TrackRow>> {
     })
 }
 
+impl SimLibrary {
+    /// The rows of a collection: Liked Music follows the likes made here, a playlist grows by the
+    /// tracks added to it, everything else is fixed.
+    fn rows(&self, id: &str) -> Option<Vec<TrackRow>> {
+        if id == LIKED_MUSIC_BROWSE_ID {
+            return Some(self.liked_rows());
+        }
+        let mut rows = rows_for(id)?;
+        let bare = id.strip_prefix("VL").unwrap_or(id);
+        let added: Vec<String> = self
+            .state()
+            .added
+            .iter()
+            .filter(|(playlist, _)| playlist == bare)
+            .map(|(_, video)| video.clone())
+            .collect();
+        let at = rows.len();
+        rows.extend(added.iter().enumerate().map(|(n, id)| {
+            let mut row = liked_row(id, at + n);
+            row.occurrence = Some(format!("occ-added-{bare}-{id}"));
+            row.liked = None;
+            row
+        }));
+        Some(rows)
+    }
+
+    fn write_answer(&self, what: String, video_id: &str) -> Result<bool, WriteFailure> {
+        let mut state = self.state();
+        state.log.push((what, video_id.to_owned()));
+        match state.writes {
+            WriteBehaviour::Succeed => Ok(true),
+            WriteBehaviour::Fail(f) => Err(f),
+            WriteBehaviour::LandsReplyLost => Err(WriteFailure::Unknown),
+        }
+    }
+}
+
 impl LibrarySource for SimLibrary {
     fn collections(&self) -> Result<Vec<Collection>, LoadFailure> {
         self.wait(LATENCY);
@@ -291,7 +464,7 @@ impl LibrarySource for SimLibrary {
         if id == BROKEN_ID {
             return Err(LoadFailure::Network);
         }
-        let rows = rows_for(id).ok_or(LoadFailure::Other)?;
+        let rows = self.rows(id).ok_or(LoadFailure::Other)?;
         Ok(page_of(id, rows, 0))
     }
 
@@ -300,7 +473,7 @@ impl LibrarySource for SimLibrary {
         // Token: "<collection id>@<offset>".
         let (id, offset) = token.rsplit_once('@').ok_or(LoadFailure::Parse)?;
         let offset: usize = offset.parse().map_err(|_| LoadFailure::Parse)?;
-        let rows = rows_for(id).ok_or(LoadFailure::Other)?;
+        let rows = self.rows(id).ok_or(LoadFailure::Other)?;
         Ok(page_of(id, rows, offset))
     }
 
@@ -314,6 +487,65 @@ impl LibrarySource for SimLibrary {
             return Err(LoadFailure::Network);
         }
         artist_content(id.as_str()).ok_or(LoadFailure::Other)
+    }
+
+    fn set_liked(&self, video_id: &str, liked: bool) -> Result<(), WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        let lands = self.write_answer(if liked { "like" } else { "unlike" }.to_owned(), video_id);
+        let applies =
+            lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        if applies {
+            let mut state = self.state();
+            state.liked.retain(|id| id != video_id);
+            if liked {
+                state.liked.insert(0, video_id.to_owned());
+            }
+        }
+        lands.map(|_| ())
+    }
+
+    fn liked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        Ok(Some(self.state().liked.iter().any(|id| id == video_id)))
+    }
+
+    fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        let state = self.state();
+        if let Some(f) = state.playlists {
+            return Err(f);
+        }
+        Ok(OWNED
+            .iter()
+            .map(|(id, title)| {
+                let road_trip_holds = *id == "PLsimroad"
+                    && ROAD_TRIP_FIXTURES
+                        .iter()
+                        .any(|&i| FIXTURES[i].id == video_id);
+                PlaylistTarget {
+                    id: (*id).to_owned(),
+                    title: (*title).to_owned(),
+                    thumbnail: None,
+                    holds_track: road_trip_holds
+                        || state.added.iter().any(|(p, v)| p == id && v == video_id),
+                }
+            })
+            .collect())
+    }
+
+    fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> Result<(), WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        let lands = self.write_answer(format!("add:{playlist_id}"), video_id);
+        let applies =
+            lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        if applies {
+            let mut state = self.state();
+            let key = (playlist_id.to_owned(), video_id.to_owned());
+            if !state.added.contains(&key) {
+                state.added.push(key);
+            }
+        }
+        lands.map(|_| ())
     }
 
     fn artwork(&self, url: &str) -> Option<DecodedArt> {

@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use apollo_domain::library::Collection;
+use apollo_domain::library::{Collection, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::BrowseId;
 use apollo_provider::{InnerTubeSource, ListedTrack};
@@ -124,12 +124,24 @@ impl InnerTubeLibrary {
     }
 }
 
+/// A write that could not even start: no session means sign in again; anything else (the client
+/// would not build) never reached the service, so it is a definite no.
+fn write_failure(failure: LoadFailure) -> WriteFailure {
+    match failure {
+        LoadFailure::Session => WriteFailure::Session,
+        LoadFailure::Throttled => WriteFailure::Throttled,
+        // The account is signed in but the service has not confirmed it yet: nothing was sent.
+        LoadFailure::Network | LoadFailure::Parse | LoadFailure::Other => WriteFailure::Rejected,
+    }
+}
+
 fn row(listed: ListedTrack) -> TrackRow {
     TrackRow {
         track: listed.track,
         occurrence: listed.occurrence,
         thumbnail: listed.thumbnail,
         explicit: listed.explicit,
+        liked: listed.liked,
     }
 }
 
@@ -183,6 +195,38 @@ impl LibrarySource for InnerTubeLibrary {
             top_songs: page.top_songs.into_iter().map(row).collect(),
             sections: page.sections,
             skipped: page.skipped,
+        })
+    }
+
+    fn set_liked(&self, video_id: &str, liked: bool) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.set_liked(video_id, liked).await
+        })
+    }
+
+    fn liked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.liked(video_id).await
+        })
+    }
+
+    fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.playlists_for(video_id).await
+        })
+    }
+
+    fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.add_to_playlist(playlist_id, video_id).await
         })
     }
 
