@@ -1,9 +1,10 @@
-//! Library screen state: the collection lists, the open collection and its paged track list,
-//! the artwork cache, and the playback commands. No rendering; `ui::library` draws it.
+//! Library screen state: the collection lists, the stack of open pages (collections and
+//! artists) and their paged track lists, the artwork cache, and the playback commands. No
+//! rendering; `ui::library` draws it.
 //!
 //! All service calls go through [`LibrarySource`] on GPUI's background executor. Every
-//! completion carries the id it was started for, so an answer for a collection that has since
-//! been closed or replaced is dropped instead of landing in the wrong list.
+//! completion carries the id of the page it was started for, so an answer for a page that has
+//! since been closed is dropped instead of landing in the wrong list.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -14,9 +15,10 @@ use apollo_domain::model::{BrowseId, Track};
 use gpui::{Context, Entity, RenderImage};
 use image::imageops;
 
-use super::source::{LibrarySource, TrackRow};
+use super::source::{ArtistContent, LibrarySource, TrackRow};
 use crate::art::DecodedArt;
 use crate::player::{PlayerModel, Status};
+use crate::url_thumbs::Thumb as ThumbView;
 
 /// Cover downloads running at once. Fast scrolling queues many; the newest request goes first.
 const MAX_INFLIGHT_ART: usize = 4;
@@ -24,8 +26,10 @@ const MAX_INFLIGHT_ART: usize = 4;
 const ART_CACHE_CAP: usize = 400;
 /// Pixel size covers are decoded to (2x the 48px row art for high-DPI displays).
 const LIST_ART_PX: u32 = 96;
-/// Detail header art, drawn at 160px.
+/// Detail header art, drawn at 96px (2x for high-DPI displays and a little headroom).
 const HEADER_ART_PX: u32 = 320;
+/// Album and playlist cards on an artist page, drawn at 144px.
+const CARD_ART_PX: u32 = 288;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
@@ -77,6 +81,59 @@ impl PlayRequest {
     }
 }
 
+/// Something a card can open: an album or playlist (a collection) or an artist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    Collection(Collection),
+    Artist(ArtistTarget),
+}
+
+/// What is known about an artist before its page arrives (from the card that was tapped), so the
+/// header does not shift when the page lands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtistTarget {
+    pub id: BrowseId,
+    pub name: String,
+    pub thumbnail: Option<String>,
+}
+
+pub struct ArtistDetail {
+    id: u64,
+    pub target: ArtistTarget,
+    pub state: Load<Arc<ArtistContent>>,
+    pub pending: Option<PlayRequest>,
+}
+
+impl ArtistDetail {
+    /// The header's name: the page's own once it has arrived.
+    pub fn name(&self) -> &str {
+        match &self.state {
+            Load::Ready(c) => &c.name,
+            _ => &self.target.name,
+        }
+    }
+
+    /// The header's picture: the card's (usually square), else the page's.
+    pub fn thumbnail(&self) -> Option<&str> {
+        self.target.thumbnail.as_deref().or(match &self.state {
+            Load::Ready(c) => c.thumbnail.as_deref(),
+            _ => None,
+        })
+    }
+
+    pub fn content(&self) -> Option<&Arc<ArtistContent>> {
+        match &self.state {
+            Load::Ready(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+
+enum Entry {
+    Collection(Detail),
+    Artist(ArtistDetail),
+}
+
 pub struct Detail {
     id: u64,
     pub collection: Collection,
@@ -105,6 +162,7 @@ impl Detail {
 pub enum ArtSize {
     List,
     Header,
+    Card,
 }
 
 enum Thumb {
@@ -133,7 +191,9 @@ pub struct LibraryModel {
     tab: Tab,
     collections: Load<Collections>,
     collections_rev: u64,
-    detail: Option<Detail>,
+    /// Open pages, the one on screen last. Album and playlist pages opened from an artist page
+    /// stack on it, and back unwinds one at a time.
+    stack: Vec<Entry>,
     next_detail: u64,
     thumbs: Thumbs,
 }
@@ -147,7 +207,7 @@ impl LibraryModel {
             tab: Tab::Playlists,
             collections: Load::Idle,
             collections_rev: 0,
-            detail: None,
+            stack: Vec::new(),
             next_detail: 1,
             thumbs: Thumbs::default(),
         };
@@ -173,8 +233,25 @@ impl LibraryModel {
         }
     }
 
+    /// The collection page on screen, if that is what is on top.
     pub fn detail(&self) -> Option<&Detail> {
-        self.detail.as_ref()
+        match self.stack.last() {
+            Some(Entry::Collection(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The artist page on screen, if that is what is on top.
+    pub fn artist(&self) -> Option<&ArtistDetail> {
+        match self.stack.last() {
+            Some(Entry::Artist(a)) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// Pages open over the overview (0 when the lists are showing).
+    pub fn depth(&self) -> usize {
+        self.stack.len()
     }
 
     // ---- collections -------------------------------------------------------------------
@@ -208,7 +285,7 @@ impl LibraryModel {
     /// Forgets everything loaded (the account changed) and loads the lists again. Answers still
     /// in flight for the old account are dropped.
     pub fn reset(&mut self, cx: &mut Context<Self>) {
-        self.detail = None;
+        self.stack.clear();
         // Covers still downloading finish into the new cache harmlessly; keep their count.
         self.thumbs = Thumbs {
             inflight: self.thumbs.inflight,
@@ -263,22 +340,58 @@ impl LibraryModel {
         }
     }
 
-    // ---- one collection ----------------------------------------------------------------
+    // ---- pages --------------------------------------------------------------------------
 
-    pub fn open(&mut self, collection: Collection, cx: &mut Context<Self>) {
+    fn next_id(&mut self) -> u64 {
         let id = self.next_detail;
         self.next_detail += 1;
-        self.detail = Some(Detail {
+        id
+    }
+
+    pub fn open_target(&mut self, target: Target, cx: &mut Context<Self>) {
+        match target {
+            Target::Collection(c) => self.open(c, cx),
+            Target::Artist(a) => self.open_artist(a, cx),
+        }
+    }
+
+    /// Opens an album or playlist over whatever is showing.
+    pub fn open(&mut self, collection: Collection, cx: &mut Context<Self>) {
+        let id = self.next_id();
+        self.stack.push(Entry::Collection(Detail {
             id,
             collection,
             listing: Listing::new(),
             pending: None,
-        });
+        }));
         self.load_detail(cx);
     }
 
-    pub fn close(&mut self, cx: &mut Context<Self>) {
-        if self.detail.take().is_some() {
+    /// Opens an artist page over whatever is showing.
+    pub fn open_artist(&mut self, target: ArtistTarget, cx: &mut Context<Self>) {
+        let id = self.next_id();
+        self.stack.push(Entry::Artist(ArtistDetail {
+            id,
+            target,
+            state: Load::Idle,
+            pending: None,
+        }));
+        self.load_artist(cx);
+    }
+
+    /// Closes the page on top, back to the one beneath it (or the lists). Returns how many
+    /// pages are still open.
+    pub fn close(&mut self, cx: &mut Context<Self>) -> usize {
+        if self.stack.pop().is_some() {
+            cx.notify();
+        }
+        self.stack.len()
+    }
+
+    /// Back to the lists, whatever is open.
+    pub fn close_all(&mut self, cx: &mut Context<Self>) {
+        if !self.stack.is_empty() {
+            self.stack.clear();
             cx.notify();
         }
     }
@@ -288,8 +401,25 @@ impl LibraryModel {
         self.load_detail(cx);
     }
 
+    fn collection_mut(&mut self, id: u64) -> Option<&mut Detail> {
+        self.stack.iter_mut().find_map(|e| match e {
+            Entry::Collection(d) if d.id == id => Some(d),
+            _ => None,
+        })
+    }
+
+    fn artist_mut(&mut self, id: u64) -> Option<&mut ArtistDetail> {
+        self.stack.iter_mut().find_map(|e| match e {
+            Entry::Artist(a) if a.id == id => Some(a),
+            _ => None,
+        })
+    }
+
     fn load_detail(&mut self, cx: &mut Context<Self>) {
-        let (Some(source), Some(detail)) = (self.source.clone(), self.detail.as_mut()) else {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let Some(Entry::Collection(detail)) = self.stack.last_mut() else {
             return;
         };
         let (id, rev, collection) = (detail.id, detail.listing.begin(), detail.collection.clone());
@@ -328,7 +458,7 @@ impl LibraryModel {
         result: Result<Page<TrackRow>, LoadFailure>,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        let detail = self.detail.as_mut().filter(|d| d.id == detail_id)?;
+        let detail = self.collection_mut(detail_id)?;
         let next = match result {
             Ok(page) => match detail.listing.apply(rev, page) {
                 Applied::Yes => detail
@@ -349,29 +479,91 @@ impl LibraryModel {
         let failed = detail.failure().is_some();
         let pending = if settled { detail.pending.take() } else { None };
         if let Some(request) = pending.filter(|_| !failed) {
-            self.play(request, cx);
+            self.play_collection(detail_id, request, cx);
         }
         cx.notify();
         next
     }
 
-    // ---- playback ----------------------------------------------------------------------
+    // ---- artist --------------------------------------------------------------------------
 
-    /// Plays the open collection now, or as soon as every page has arrived.
-    pub fn request_play(&mut self, request: PlayRequest, cx: &mut Context<Self>) {
-        let Some(detail) = self.detail.as_mut() else {
+    pub fn reload_artist(&mut self, cx: &mut Context<Self>) {
+        self.load_artist(cx);
+    }
+
+    fn load_artist(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone() else {
             return;
         };
-        if detail.is_loading() {
-            detail.pending = Some(request);
-            cx.notify();
-        } else {
-            self.play(request, cx);
+        let Some(Entry::Artist(detail)) = self.stack.last_mut() else {
+            return;
+        };
+        let (id, browse_id) = (detail.id, detail.target.id.clone());
+        detail.state = Load::Loading;
+        detail.pending = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { source.artist(&browse_id) })
+                .await;
+            let _ = this.update(cx, |m, cx| m.apply_artist(id, result, cx));
+        })
+        .detach();
+    }
+
+    fn apply_artist(
+        &mut self,
+        id: u64,
+        result: Result<ArtistContent, LoadFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = self.artist_mut(id) else {
+            return;
+        };
+        let pending = detail.pending.take();
+        let ok = result.is_ok();
+        detail.state = match result {
+            Ok(content) => Load::Ready(Arc::new(content)),
+            Err(failure) => Load::Failed(failure),
+        };
+        if let Some(request) = pending.filter(|_| ok) {
+            self.play_artist(id, request, cx);
+        }
+        cx.notify();
+    }
+
+    // ---- playback ----------------------------------------------------------------------
+
+    /// Plays the open page now, or as soon as it has finished loading.
+    pub fn request_play(&mut self, request: PlayRequest, cx: &mut Context<Self>) {
+        match self.stack.last_mut() {
+            Some(Entry::Collection(detail)) => {
+                if detail.is_loading() {
+                    detail.pending = Some(request);
+                    cx.notify();
+                } else {
+                    let id = detail.id;
+                    self.play_collection(id, request, cx);
+                }
+            }
+            Some(Entry::Artist(detail)) => match detail.state {
+                Load::Idle | Load::Loading => {
+                    detail.pending = Some(request);
+                    cx.notify();
+                }
+                Load::Ready(_) => {
+                    let id = detail.id;
+                    self.play_artist(id, request, cx);
+                }
+                Load::Failed(_) => {}
+            },
+            None => {}
         }
     }
 
-    fn play(&mut self, request: PlayRequest, cx: &mut Context<Self>) {
-        let Some(detail) = self.detail.as_ref() else {
+    fn play_collection(&mut self, id: u64, request: PlayRequest, cx: &mut Context<Self>) {
+        let Some(detail) = self.collection_mut(id) else {
             return;
         };
         let tracks: Vec<Track> = detail
@@ -380,6 +572,22 @@ impl LibraryModel {
             .iter()
             .map(|row| row.track.clone())
             .collect();
+        self.play_tracks(tracks, request, cx);
+    }
+
+    /// An artist's play commands act on the top songs shown on the page.
+    fn play_artist(&mut self, id: u64, request: PlayRequest, cx: &mut Context<Self>) {
+        let Some(detail) = self.artist_mut(id) else {
+            return;
+        };
+        let tracks: Vec<Track> = detail
+            .content()
+            .map(|c| c.top_songs.iter().map(|r| r.track.clone()).collect())
+            .unwrap_or_default();
+        self.play_tracks(tracks, request, cx);
+    }
+
+    fn play_tracks(&mut self, tracks: Vec<Track>, request: PlayRequest, cx: &mut Context<Self>) {
         if tracks.is_empty() {
             return;
         }
@@ -395,6 +603,15 @@ impl LibraryModel {
         match self.thumbs.map.get(&key(url, size)) {
             Some(Thumb::Ready(image)) => Some(image.clone()),
             _ => None,
+        }
+    }
+
+    /// The cover as the shared card and tile pieces want it.
+    pub fn thumb(&self, url: Option<&str>, size: ArtSize) -> ThumbView {
+        match url.and_then(|u| self.thumbs.map.get(&key(u, size))) {
+            Some(Thumb::Ready(image)) => ThumbView::Image(image.clone()),
+            Some(Thumb::Missing) => ThumbView::Missing,
+            Some(Thumb::Loading) | None => ThumbView::Pending,
         }
     }
 
@@ -488,17 +705,30 @@ pub fn liked_music() -> Collection {
     }
 }
 
-/// Square-resized, BGRA, ready for GPUI.
+/// Centre square of an image of `w` x `h`: `(x, y, side)`. A wide artist banner is cropped to
+/// its middle, never squeezed.
+fn centre_square(w: u32, h: u32) -> (u32, u32, u32) {
+    let side = w.min(h);
+    ((w - side) / 2, (h - side) / 2, side)
+}
+
+/// Centre-cropped to a square, resized, BGRA, ready for GPUI.
 fn sized_render_image(art: &DecodedArt, size: ArtSize) -> Arc<RenderImage> {
     let side = match size {
         ArtSize::List => LIST_ART_PX,
         ArtSize::Header => HEADER_ART_PX,
+        ArtSize::Card => CARD_ART_PX,
     };
-    let (w, _) = art.pixels.dimensions();
-    if w <= side {
+    let (w, h) = art.pixels.dimensions();
+    if w == h && w <= side {
         return art.render_image();
     }
-    let resized = imageops::resize(&art.pixels, side, side, imageops::FilterType::Triangle);
+    let (x, y, edge) = centre_square(w, h);
+    let square = imageops::crop_imm(&art.pixels, x, y, edge, edge).to_image();
+    if edge <= side {
+        return DecodedArt::from_rgba(square).render_image();
+    }
+    let resized = imageops::resize(&square, side, side, imageops::FilterType::Triangle);
     DecodedArt::from_rgba(resized).render_image()
 }
 
@@ -540,6 +770,13 @@ mod tests {
         assert!(split.playlists[0].is_liked_music());
         assert_eq!(split.playlists[0].title, "Liked Music");
         assert!(split_collections(Vec::new()).albums.is_empty());
+    }
+
+    #[test]
+    fn a_wide_banner_is_cropped_to_its_middle_not_squeezed() {
+        assert_eq!(centre_square(1440, 600), (420, 0, 600));
+        assert_eq!(centre_square(600, 600), (0, 0, 600));
+        assert_eq!(centre_square(300, 500), (0, 100, 300));
     }
 
     #[test]

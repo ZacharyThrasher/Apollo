@@ -7,8 +7,9 @@ use std::time::Duration;
 use apollo_domain::library::{Collection, CollectionKind, LIKED_MUSIC_BROWSE_ID};
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track};
+use apollo_provider::ArtistSection;
 
-use super::source::{LibrarySource, TrackRow};
+use super::source::{ArtistContent, LibrarySource, TrackRow};
 use crate::art::{DecodedArt, SyntheticArt};
 use crate::backend::sim::{Fixture, FIXTURES};
 
@@ -23,6 +24,17 @@ pub const LONG_ID: &str = "VLPLsimlong";
 pub const EMPTY_ID: &str = "VLPLsimempty";
 pub const BROKEN_ID: &str = "VLPLsimbroken";
 const ROAD_TRIP_ID: &str = "VLPLsimroad";
+
+/// Browse ids search results carry in the simulation: an album is every fixture of that title,
+/// an artist is every fixture by that name, a single is one fixture's track.
+pub const SEARCH_ALBUM_PREFIX: &str = "MPREb_sim_";
+pub const SEARCH_ARTIST_PREFIX: &str = "UCsim_";
+const SINGLE_PREFIX: &str = "MPREb_sim_single_";
+/// Artist pages for the states: one that fails, one with nothing on it, one that answers slowly.
+pub const ARTIST_BROKEN_ID: &str = "UCsimbroken";
+pub const ARTIST_EMPTY_ID: &str = "UCsimempty";
+pub const ARTIST_SLOW_ID: &str = "UCsimslow";
+const SLOW_LATENCY: Duration = Duration::from_millis(1_500);
 
 /// Prefix of the generated track ids; the remaining five characters are the position.
 pub const GENERATED_PREFIX: &str = "simLib";
@@ -83,11 +95,7 @@ fn fixture_row(f: &Fixture, n: usize) -> TrackRow {
     TrackRow {
         track: t,
         occurrence: Some(format!("occ-{}-{n}", f.id)),
-        thumbnail: match f.art {
-            Some(SyntheticArt::Hue(h)) => Some(format!("sim://art/{h}")),
-            Some(SyntheticArt::Gray) => Some("sim://art/gray".into()),
-            None => None,
-        },
+        thumbnail: art_url(f),
         explicit: n % 4 == 3,
     }
 }
@@ -167,7 +175,96 @@ pub fn all_collections() -> Vec<Collection> {
     list
 }
 
+fn matching(f: impl Fn(&Fixture) -> bool) -> Vec<usize> {
+    FIXTURES
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| f(x))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn art_url(f: &Fixture) -> Option<String> {
+    match f.art {
+        Some(SyntheticArt::Hue(h)) => Some(format!("sim://art/{h}")),
+        Some(SyntheticArt::Gray) => Some("sim://art/gray".into()),
+        None => None,
+    }
+}
+
+/// The page the simulation answers for an artist id (`UCsim_<name>` from search).
+fn artist_content(id: &str) -> Option<ArtistContent> {
+    if id == ARTIST_EMPTY_ID {
+        return Some(ArtistContent {
+            name: "Quiet Artist".into(),
+            thumbnail: None,
+            top_songs: Vec::new(),
+            sections: Vec::new(),
+            skipped: 0,
+        });
+    }
+    let name = if id == ARTIST_SLOW_ID {
+        "Neon Arcade"
+    } else {
+        id.strip_prefix(SEARCH_ARTIST_PREFIX)?
+    };
+    let own = matching(|f| f.artist == name);
+    if own.is_empty() {
+        return None;
+    }
+    let mut albums: Vec<Collection> = Vec::new();
+    for &i in &own {
+        let f = &FIXTURES[i];
+        if albums.iter().all(|a| a.title != f.album) {
+            albums.push(Collection {
+                kind: CollectionKind::Album,
+                id: BrowseId::new(format!("{SEARCH_ALBUM_PREFIX}{}", f.album)),
+                title: f.album.into(),
+                subtitle: Some(format!("Album • {} • 2024", f.artist)),
+                thumbnail: art_url(f),
+            });
+        }
+    }
+    let singles: Vec<Collection> = own
+        .iter()
+        .map(|&i| {
+            let f = &FIXTURES[i];
+            Collection {
+                kind: CollectionKind::Album,
+                id: BrowseId::new(format!("{SINGLE_PREFIX}{}", f.id)),
+                title: f.title.into(),
+                subtitle: Some(format!("Single • {} • 2025", f.artist)),
+                thumbnail: art_url(f),
+            }
+        })
+        .collect();
+    Some(ArtistContent {
+        name: name.into(),
+        thumbnail: art_url(&FIXTURES[own[0]]),
+        top_songs: fixture_rows(&own),
+        sections: vec![
+            ArtistSection {
+                title: "Albums".into(),
+                items: albums,
+            },
+            ArtistSection {
+                title: "Singles".into(),
+                items: singles,
+            },
+        ],
+        skipped: 0,
+    })
+}
+
 fn rows_for(id: &str) -> Option<Vec<TrackRow>> {
+    if let Some(single) = id.strip_prefix(SINGLE_PREFIX) {
+        let at = matching(|f| f.id == single);
+        return (!at.is_empty()).then(|| fixture_rows(&at));
+    }
+    if let Some(album) = id.strip_prefix(SEARCH_ALBUM_PREFIX) {
+        let at = matching(|f| f.album == album);
+        return (!at.is_empty()).then(|| fixture_rows(&at));
+    }
     Some(match id {
         LIKED_MUSIC_BROWSE_ID => fixture_rows(&[0, 1, 2, 3, 4, 5]),
         ROAD_TRIP_ID => fixture_rows(&[0, 1, 5]),
@@ -205,6 +302,18 @@ impl LibrarySource for SimLibrary {
         let offset: usize = offset.parse().map_err(|_| LoadFailure::Parse)?;
         let rows = rows_for(id).ok_or(LoadFailure::Other)?;
         Ok(page_of(id, rows, offset))
+    }
+
+    fn artist(&self, id: &BrowseId) -> Result<ArtistContent, LoadFailure> {
+        self.wait(if id.as_str() == ARTIST_SLOW_ID {
+            SLOW_LATENCY
+        } else {
+            LATENCY
+        });
+        if id.as_str() == ARTIST_BROKEN_ID {
+            return Err(LoadFailure::Network);
+        }
+        artist_content(id.as_str()).ok_or(LoadFailure::Other)
     }
 
     fn artwork(&self, url: &str) -> Option<DecodedArt> {
@@ -270,6 +379,45 @@ mod tests {
         );
         let empty = lib.tracks(&find(EMPTY_ID)).unwrap();
         assert!(empty.items.is_empty() && empty.continuation.is_none());
+    }
+
+    #[test]
+    fn search_ids_open_the_albums_artists_and_singles_they_name() {
+        let lib = SimLibrary::instant();
+        let album = Collection {
+            kind: CollectionKind::Album,
+            id: BrowseId::new(format!("{SEARCH_ALBUM_PREFIX}Night Shift")),
+            title: "Night Shift".into(),
+            subtitle: None,
+            thumbnail: None,
+        };
+        let rows = lib.tracks(&album).unwrap().items;
+        assert_eq!(rows[0].track.title, "Midnight Drive");
+        let artist = lib
+            .artist(&BrowseId::new(format!("{SEARCH_ARTIST_PREFIX}Neon Arcade")))
+            .unwrap();
+        assert_eq!(artist.name, "Neon Arcade");
+        assert_eq!(artist.top_songs.len(), 1);
+        let titles: Vec<_> = artist.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Albums", "Singles"]);
+        // Every card the page offers opens something.
+        for card in artist.sections.iter().flat_map(|s| &s.items) {
+            assert!(
+                !lib.tracks(card).unwrap().items.is_empty(),
+                "{}",
+                card.title
+            );
+        }
+    }
+
+    #[test]
+    fn artist_pages_reach_every_state() {
+        let lib = SimLibrary::instant();
+        let ask = |id: &str| lib.artist(&BrowseId::new(id));
+        assert_eq!(ask(ARTIST_BROKEN_ID).unwrap_err(), LoadFailure::Network);
+        assert!(ask(ARTIST_EMPTY_ID).unwrap().is_empty());
+        assert_eq!(ask("UCsim_Nobody").unwrap_err(), LoadFailure::Other);
+        assert!(ask(ARTIST_SLOW_ID).is_ok());
     }
 
     #[test]

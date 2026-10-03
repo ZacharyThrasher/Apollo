@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use apollo_domain::library::Collection;
 use apollo_domain::listing::{LoadFailure, Page};
+use apollo_domain::model::BrowseId;
 use apollo_provider::{InnerTubeSource, ListedTrack};
 use apollo_services_common::{unix_now, SecretString, SessionProvider};
 use innertube::{Locale, Session};
 
-use super::source::{LibrarySource, TrackRow};
+use super::source::{ArtistContent, LibrarySource, TrackRow};
 use crate::art::DecodedArt;
 
 const ART_TIMEOUT: Duration = Duration::from_secs(10);
@@ -168,6 +169,21 @@ impl LibrarySource for InnerTubeLibrary {
         let source = self.source()?;
         self.rt
             .block_on(async { Ok(rows(source.continuation(token).await?)) })
+    }
+
+    fn artist(&self, id: &BrowseId) -> Result<ArtistContent, LoadFailure> {
+        let source = self.source()?;
+        let page = self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.artist(id.as_str()).await
+        })?;
+        Ok(ArtistContent {
+            name: page.name,
+            thumbnail: page.thumbnail,
+            top_songs: page.top_songs.into_iter().map(row).collect(),
+            sections: page.sections,
+            skipped: page.skipped,
+        })
     }
 
     fn artwork(&self, url: &str) -> Option<DecodedArt> {

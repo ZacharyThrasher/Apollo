@@ -1,27 +1,30 @@
 //! The Search page: a field, then results grouped as songs, albums, artists and playlists.
 //!
-//! Songs play or queue; the other groups are shown only (their pages come later). Keyboard:
+//! Songs play or queue; album, artist and playlist cards open their pages. Keyboard:
 //! Ctrl+K or Ctrl+F opens the page with the field focused; Down moves from the field into the
 //! songs, Up and Down move between them, Enter plays, Ctrl+Enter queues, Escape goes back to the
-//! field (and out of it when the field is empty).
+//! field (and out of it when the field is empty). Cards are tab stops after the list; Enter opens.
 
+use std::rc::Rc;
 use std::time::Instant;
 
+use apollo_domain::library::{Collection, CollectionKind};
 use apollo_provider::{Hit, ListedTrack, SearchResults};
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
-    actions, div, img, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, Focusable,
-    ImageSource, IntoElement, ObjectFit, ParentElement, Render, ScrollHandle, SharedString, Styled,
-    Window,
+    actions, div, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, Focusable,
+    IntoElement, ParentElement, Render, ScrollHandle, SharedString, Styled, Window,
 };
 
 use crate::assets::Icon;
+use crate::library::model::{ArtistTarget, Target};
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::search::{failure_text, SearchModel, SearchState};
 use crate::style::{self, color};
 use crate::ui::button::{focus_ring, keyboard_focused, IconButton};
+use crate::ui::card::{grid, heading, tile, Card};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{self, TextField, TextFieldEvent};
@@ -57,11 +60,13 @@ pub fn bind_keys(cx: &mut App) {
 
 const ROW_HEIGHT: f32 = 56.0;
 const ROW_ART: f32 = 40.0;
-const CARD_WIDTH: f32 = 144.0;
 const SKELETON_ROWS: usize = 6;
 const SELECTED_MARKER_WIDTH: f32 = 3.0;
 /// Scrim over a row's artwork while it is the play target.
 const ART_SCRIM: f32 = 0.6;
+
+/// What a card does when opened: show that album, artist or playlist.
+pub type OpenTarget = Rc<dyn Fn(Target, &mut Window, &mut App) + 'static>;
 
 pub struct SearchPage {
     player: Entity<PlayerModel>,
@@ -73,18 +78,23 @@ pub struct SearchPage {
     /// Tab stop of the message action (Retry, Clear).
     action_focus: FocusHandle,
     root_focus: FocusHandle,
+    /// Tab stops of the cards, grown to the most cards any result had.
+    card_focus: Vec<FocusHandle>,
+    on_open: OpenTarget,
     scroll: ScrollHandle,
     /// The keyboard-selected song, shown only while the list holds focus.
     selected: Option<usize>,
 }
 
 impl SearchPage {
-    /// `root_focus` is where focus goes when the field is left with Escape.
+    /// `root_focus` is where focus goes when the field is left with Escape; `on_open` is what a
+    /// card does.
     pub fn new(
         player: Entity<PlayerModel>,
         model: Entity<SearchModel>,
         thumbs: Entity<ThumbStore>,
         root_focus: FocusHandle,
+        on_open: impl Fn(Target, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
         // Tab order: nav (1-4), the field and its clear button (5), the list (6), the player bar.
@@ -121,8 +131,20 @@ impl SearchPage {
             results_focus,
             action_focus,
             root_focus,
+            card_focus: Vec::new(),
+            on_open: Rc::new(on_open),
             scroll: ScrollHandle::new(),
             selected: None,
+        }
+    }
+
+    /// Back from a page opened from here: focus returns to the results (or the field when
+    /// there are none), where the cards and songs are.
+    pub fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.read(cx).results().is_some() {
+            window.focus(&self.results_focus, cx);
+        } else {
+            text_field::focus(&self.field, window, cx);
         }
     }
 
@@ -243,6 +265,14 @@ impl Render for SearchPage {
         let query: SharedString = model.query().to_owned().into();
         let results = model.results().cloned();
         let confirmed_empty = model.is_confirmed_empty();
+
+        let cards = results
+            .as_ref()
+            .map_or(0, |r| r.albums.len() + r.artists.len() + r.playlists.len());
+        while self.card_focus.len() < cards {
+            self.card_focus
+                .push(cx.focus_handle().tab_index(7).tab_stop(true));
+        }
 
         let field_ring = keyboard_focused(&self.field.read(cx).focus_handle(cx), window);
         let list_focused = self.results_focus.is_focused(window);
@@ -408,36 +438,65 @@ impl SearchPage {
                 );
             }
         }
-        let groups: [(&'static str, &Vec<Hit>); 3] = [
-            ("Albums", &results.albums),
-            ("Artists", &results.artists),
-            ("Playlists", &results.playlists),
+        let groups: [(&'static str, &'static str, &Vec<Hit>); 3] = [
+            ("Albums", "album", &results.albums),
+            ("Artists", "artist", &results.artists),
+            ("Playlists", "playlist", &results.playlists),
         ];
-        for (title, hits) in groups {
+        // Cards take their tab stops in reading order across the three groups.
+        let mut stop = 0;
+        for (title, kind, hits) in groups {
             if hits.is_empty() {
                 continue;
             }
             children.push(heading(title, !children.is_empty(), cx));
-            children.push(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .gap(px(spacing::S4))
-                    .children(hits.iter().enumerate().map(|(index, hit)| Card {
-                        id: (title, index),
-                        title: hit.title.clone().into(),
-                        subtitle: hit.subtitle.clone().map(Into::into),
-                        thumb: thumb_of(&hit.thumbnail),
-                    }))
-                    .into_any_element(),
-            );
+            let cards: Vec<Card> = hits
+                .iter()
+                .enumerate()
+                .map(|(index, hit)| {
+                    let focus = &self.card_focus[stop];
+                    stop += 1;
+                    let (target, on_open) = (target_of(kind, hit), self.on_open.clone());
+                    Card::new(
+                        format!("search-{kind}-{index}"),
+                        hit.title.clone(),
+                        hit.subtitle.clone().map(Into::into),
+                        thumb_of(&hit.thumbnail),
+                        focus,
+                        accent,
+                        move |window, cx| on_open(target.clone(), window, cx),
+                    )
+                })
+                .collect();
+            children.push(grid().children(cards).into_any_element());
         }
         div()
             .flex()
             .flex_col()
             .children(children)
             .into_any_element()
+    }
+}
+
+/// The page a search card opens.
+fn target_of(kind: &str, hit: &Hit) -> Target {
+    let collection = |kind| {
+        Target::Collection(Collection {
+            kind,
+            id: hit.id.clone(),
+            title: hit.title.clone(),
+            subtitle: hit.subtitle.clone(),
+            thumbnail: hit.thumbnail.clone(),
+        })
+    };
+    match kind {
+        "album" => collection(CollectionKind::Album),
+        "playlist" => collection(CollectionKind::Playlist),
+        _ => Target::Artist(ArtistTarget {
+            id: hit.id.clone(),
+            name: hit.title.clone(),
+            thumbnail: hit.thumbnail.clone(),
+        }),
     }
 }
 
@@ -449,17 +508,6 @@ fn artists_line(song: &ListedTrack) -> SharedString {
         .collect::<Vec<_>>()
         .join(", ")
         .into()
-}
-
-/// Section heading: `section` type, with room above unless it opens the list.
-fn heading(title: &'static str, spaced: bool, cx: &App) -> AnyElement {
-    style::text_style(div(), typography::SECTION, cx)
-        .flex_none()
-        .when(spaced, |d| d.mt(px(spacing::S6)))
-        .mb(px(spacing::S2))
-        .text_color(color::text_primary())
-        .child(title)
-        .into_any_element()
 }
 
 /// Skeleton blocks at the final size of a song row, so nothing shifts when results arrive.
@@ -671,80 +719,5 @@ impl RenderOnce for SongRow {
             .child(info)
             .children(duration)
             .child(add)
-    }
-}
-
-/// Artwork or the no-art tile: bg.overlay with a quiet music note (Shell decisions 3).
-fn tile(thumb: &Thumb) -> AnyElement {
-    match thumb {
-        Thumb::Image(image) => img(ImageSource::Render(image.clone()))
-            .size_full()
-            .object_fit(ObjectFit::Cover)
-            .into_any_element(),
-        // Still downloading: the plain tile, nothing to animate.
-        Thumb::Pending => div().into_any_element(),
-        Thumb::Missing => gpui::svg()
-            .path(Icon::MusicNote.path())
-            .size(px(layout::ICON_SIZE))
-            .flex_none()
-            .text_color(color::text_tertiary())
-            .into_any_element(),
-    }
-}
-
-/// An album, artist or playlist: artwork over a title and a quiet second line. Shown only; there
-/// is nothing to open yet.
-#[derive(IntoElement)]
-struct Card {
-    id: (&'static str, usize),
-    title: SharedString,
-    subtitle: Option<SharedString>,
-    thumb: Thumb,
-}
-
-impl RenderOnce for Card {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (group, index) = self.id;
-        let title = self.title.clone();
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .gap(px(spacing::S1))
-            .w(px(CARD_WIDTH))
-            .child(
-                div()
-                    .size(px(CARD_WIDTH))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(radius::MEDIUM))
-                    .overflow_hidden()
-                    .bg(color::bg_overlay())
-                    .child(tile(&self.thumb)),
-            )
-            .child(
-                style::text_style(div(), typography::BODY_STRONG, cx)
-                    .id((group, index))
-                    .truncate()
-                    .text_color(color::text_primary())
-                    .tooltip({
-                        let full = title.clone();
-                        move |_, cx| Tooltip::view(full.clone(), cx)
-                    })
-                    .child(title),
-            )
-            .children(self.subtitle.map(|text| {
-                style::text_style(div(), typography::BODY, cx)
-                    .id((group, index + 10_000))
-                    .truncate()
-                    .text_color(color::text_secondary())
-                    .tooltip({
-                        let full = text.clone();
-                        move |_, cx| Tooltip::view(full.clone(), cx)
-                    })
-                    .child(text)
-            }))
     }
 }

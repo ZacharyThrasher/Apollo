@@ -11,6 +11,7 @@ use gpui::{
 };
 
 use crate::account::AccountModel;
+use crate::library::Target;
 use crate::motion::PanelSlide;
 use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
@@ -59,6 +60,7 @@ pub fn bind_keys(cx: &mut App) {
     ]);
     crate::ui::queue_panel::bind_keys(cx);
     crate::ui::text_field::bind_keys(cx);
+    crate::ui::card::bind_keys(cx);
     search_page::bind_keys(cx);
     library::bind_keys(cx);
 }
@@ -68,6 +70,9 @@ pub struct Shell {
     account: Entity<AccountModel>,
     account_page: Entity<AccountPage>,
     library: Entity<LibraryView>,
+    /// Where a page opened from another route (a Search card) returns to when Back closes the
+    /// last of them. `None` while the pages were opened from the Library itself.
+    detail_origin: Option<Route>,
     /// The account epoch the library was last loaded under.
     library_epoch: u64,
     /// The first time the account turns out to be signed out, the window opens on Settings.
@@ -165,6 +170,12 @@ impl Shell {
                         let _ = weak.update(cx, |s, cx| s.open_search(window, cx));
                     }
                 },
+                {
+                    let weak = weak.clone();
+                    move |window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.pages_closed(window, cx));
+                    }
+                },
                 cx,
             )
         });
@@ -181,6 +192,12 @@ impl Shell {
                 search_model.clone(),
                 thumbs.clone(),
                 root_focus.clone(),
+                {
+                    let weak = weak.clone();
+                    move |target, window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.open_target(target, window, cx));
+                    }
+                },
                 cx,
             )
         });
@@ -189,6 +206,7 @@ impl Shell {
             account,
             account_page,
             library,
+            detail_origin: None,
             library_epoch: 0,
             routed_to_sign_in: false,
             route: Route::Home,
@@ -218,6 +236,7 @@ impl Shell {
         let epoch = self.account.read(cx).service().view().epoch;
         if epoch != self.library_epoch {
             self.library_epoch = epoch;
+            self.detail_origin = None;
             self.library.update(cx, |l, cx| l.reset(cx));
         }
         if !self.routed_to_sign_in && self.account.read(cx).is_signed_out() {
@@ -254,8 +273,73 @@ impl Shell {
 
     /// Switch page (what the nav rail and the empty states' actions do).
     pub fn show_route(&mut self, route: Route, cx: &mut Context<Self>) {
+        self.leave_opened_pages(cx);
         self.route = route;
         self.now_playing_open = false;
+        cx.notify();
+    }
+
+    /// The nav item that is lit: pages opened from Search sit on the Library page but keep
+    /// Search lit.
+    pub fn nav_route(&self) -> Route {
+        match self.detail_origin {
+            Some(origin) if self.route == Route::Library => origin,
+            _ => self.route,
+        }
+    }
+
+    /// What choosing an item of the nav rail does.
+    pub fn choose_route(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        // Choosing Library while on it returns to its lists, whatever is open.
+        if route == Route::Library && self.route == Route::Library {
+            self.detail_origin = None;
+            self.library.update(cx, |l, cx| l.go_home(window, cx));
+        }
+        if route == Route::Search {
+            self.open_search(window, cx);
+        } else {
+            self.show_route(route, cx);
+        }
+    }
+
+    /// Where Back from the open pages will land when they were opened from another route.
+    pub fn detail_origin(&self) -> Option<Route> {
+        self.detail_origin
+    }
+
+    /// Show an album, artist or playlist page over the current route's place: the Library page
+    /// hosts it, the nav keeps the route it was opened from lit, and Back returns there.
+    pub fn open_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        if self.route != Route::Library {
+            self.detail_origin = Some(self.route);
+        }
+        self.route = Route::Library;
+        self.now_playing_open = false;
+        self.library
+            .update(cx, |l, cx| l.open_target(target, window, cx));
+        cx.notify();
+    }
+
+    /// Navigating away from pages that were opened from another route closes them: they have no
+    /// place of their own in the nav. Pages opened from the Library itself stay, as they always
+    /// have.
+    fn leave_opened_pages(&mut self, cx: &mut Context<Self>) {
+        if self.detail_origin.take().is_some() {
+            self.library.update(cx, |l, cx| l.close_all_pages(cx));
+        }
+    }
+
+    /// Back closed the last open page: return to the route it was opened from, if any.
+    fn pages_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(origin) = self.detail_origin.take() else {
+            return;
+        };
+        self.route = origin;
+        if origin == Route::Search {
+            self.search.update(cx, |s, cx| s.restore_focus(window, cx));
+        } else {
+            self.focus_root(window, cx);
+        }
         cx.notify();
     }
 
@@ -294,6 +378,7 @@ impl Shell {
 
     /// Show Search with the caret in its field.
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_opened_pages(cx);
         self.route = Route::Search;
         self.now_playing_open = false;
         let field = self.search.read(cx).field().clone();
@@ -322,10 +407,11 @@ impl Render for Shell {
         let accent = view.accent;
         let shell = cx.entity();
 
+        let nav_route = self.nav_route();
         let nav = NavRail::new(
             self.nav_expanded,
             self.nav_toggled,
-            self.route,
+            nav_route,
             accent,
             &self.nav_toggle,
             &self.nav_items,
@@ -344,17 +430,7 @@ impl Render for Shell {
         .on_route({
             let shell = shell.clone();
             move |route, window, cx| {
-                shell.update(cx, |s, cx| {
-                    // Choosing Library while on it returns to its lists.
-                    if route == Route::Library && s.route == Route::Library {
-                        s.library.update(cx, |l, cx| l.go_home(window, cx));
-                    }
-                    if route == Route::Search {
-                        s.open_search(window, cx);
-                    } else {
-                        s.show_route(route, cx);
-                    }
-                });
+                shell.update(cx, |s, cx| s.choose_route(route, window, cx));
             }
         });
 

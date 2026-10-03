@@ -10,6 +10,7 @@ use apollo_provider::{Hit, ListedTrack, SearchResults};
 
 use super::sim::{track_of, Fixture, FIXTURES};
 use crate::art::{DecodedArt, SyntheticArt};
+use crate::library::sim::{SEARCH_ALBUM_PREFIX, SEARCH_ARTIST_PREFIX};
 use crate::search::SearchSource;
 use crate::url_thumbs::ThumbSource;
 
@@ -81,12 +82,12 @@ impl SearchSource for SimSearch {
             ..SearchResults::default()
         };
         for f in &matching {
-            let album_id = format!("MPREb_sim_{}", f.album);
+            let album_id = format!("{}{}", SEARCH_ALBUM_PREFIX, f.album);
             if !out.albums.iter().any(|a| a.id.as_str() == album_id) {
                 out.albums
                     .push(hit(&album_id, f.album, Some(f.artist), f.art));
             }
-            let artist_id = format!("UCsim_{}", f.artist);
+            let artist_id = format!("{}{}", SEARCH_ARTIST_PREFIX, f.artist);
             if !out.artists.iter().any(|a| a.id.as_str() == artist_id) {
                 out.artists.push(hit(&artist_id, f.artist, None, f.art));
             }
