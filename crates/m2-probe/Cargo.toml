@@ -1,0 +1,19 @@
+[package]
+name = "apollo-m2-probe"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Owner-run Milestone 2 probe: real account session -> resolver -> libmpv through the runtime Driver. Prints redacted PASS/FAIL lines only."
+
+[[bin]]
+name = "apollo-m2-probe"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+apollo-account = { path = "../account" }
+apollo-domain = { path = "../domain" }
+apollo-media = { path = "../media" }
+apollo-resolver = { path = "../resolver" }
+apollo-runtime = { path = "../runtime" }
+apollo-services-common = { path = "../services-common" }

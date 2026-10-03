@@ -1,0 +1,17 @@
+[package]
+name = "apollo-login-helper"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "WebView2 sign-in helper process (ADR 0002): the owner signs in on Google's own page; cookies go to the parent over stdout only"
+
+[[bin]]
+name = "apollo-login-helper"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+wry = "=0.57.0"
+tao = "=0.37.1"
+cookie = "0.18"
+serde_json = "1"
