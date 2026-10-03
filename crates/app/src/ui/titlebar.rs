@@ -64,6 +64,16 @@ enum CaptionButton {
     Close,
 }
 
+/// Closes like the native button: through the window's close request, which Close to tray
+/// answers by hiding. Without a native window handle the window is simply removed.
+fn close(window: &mut Window) {
+    #[cfg(windows)]
+    if crate::tray_win::request_close(window) {
+        return;
+    }
+    window.remove_window();
+}
+
 impl CaptionButton {
     fn id(self) -> &'static str {
         match self {
@@ -97,7 +107,7 @@ impl CaptionButton {
         match self {
             Self::Minimize => window.minimize_window(),
             Self::Maximize | Self::Restore => window.zoom_window(),
-            Self::Close => window.remove_window(),
+            Self::Close => close(window),
         }
     }
 
