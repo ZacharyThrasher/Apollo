@@ -20,12 +20,12 @@ default = []
 # simulated backend. Windows only; needs the pinned tools under `tools/`.
 real-services = [
     "dep:ureq",
-    "dep:apollo-account",
     "dep:apollo-media",
     "dep:apollo-resolver",
 ]
 
 [dependencies]
+apollo-account = { path = "../account" }
 apollo-domain = { path = "../domain" }
 apollo-runtime = { path = "../runtime" }
 apollo-services-common = { path = "../services-common" }
@@ -38,7 +38,6 @@ tokio = { version = "1", features = ["sync"] }
 ureq = { version = "3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-apollo-account = { path = "../account", optional = true }
 apollo-media = { path = "../media", optional = true }
 apollo-resolver = { path = "../resolver", optional = true }
 
