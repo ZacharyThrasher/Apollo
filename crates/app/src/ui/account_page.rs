@@ -25,7 +25,6 @@ use crate::ui::tooltip::Tooltip;
 /// Tab position of the page's controls: after the nav rail, before the player bar. Controls
 /// share it and follow paint order.
 pub const TAB_INDEX: isize = 6;
-const MAX_WIDTH: f32 = 560.0;
 const TILE: f32 = 56.0;
 const ROW_TILE: f32 = 40.0;
 
@@ -144,9 +143,6 @@ impl Render for AccountPage {
             .flex_col()
             .gap(px(spacing::S4))
             .w_full()
-            .max_w(px(MAX_WIDTH))
-            .mt(px(spacing::S6))
-            .pb(px(spacing::S6))
             .child(
                 style::text_style(div(), typography::SECTION, cx)
                     .text_color(color::text_primary())
@@ -155,7 +151,7 @@ impl Render for AccountPage {
             .child(
                 div()
                     .p(px(spacing::S4))
-                    .rounded(px(radius::LARGE))
+                    .rounded(px(radius::MEDIUM))
                     .bg(color::bg_raised())
                     .child(body),
             )

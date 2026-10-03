@@ -15,7 +15,8 @@ use crate::lyrics::SimLyrics;
 use crate::player::PlayerModel;
 use crate::search::Unavailable;
 use crate::settings::{
-    AutoplayStore, LyricsOpenStore, NormalizeStore, QueueStore, SqliteSettings, VolumeStore,
+    AutoplayStore, LyricsOpenStore, NormalizeStore, QueueStore, SettingsBackend, SettingsModel,
+    SqliteSettings, VolumeStore,
 };
 use crate::ui::shell::{self, Quit, Shell};
 use crate::url_thumbs::NoThumbs;
@@ -96,7 +97,12 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     });
     let ports = mode.account_ports();
     let account = cx.new(|cx| AccountModel::new(ports.clone(), cx));
-    let window = open_window(cx, player.clone(), account.clone());
+    let settings = cx.new(|_| {
+        SettingsModel::new(
+            SqliteSettings::default_location().map(|s| Arc::new(s) as Arc<dyn SettingsBackend>),
+        )
+    });
+    let window = open_window(cx, player.clone(), account.clone(), settings);
     let lyrics = lyrics_service(&mode, stores.db_path.clone());
     let _ = window.update(cx, |shell, _, cx| {
         shell.install_lyrics(lyrics, stores.lyrics_open.clone(), cx)
@@ -136,6 +142,7 @@ fn open_window(
     cx: &mut App,
     player: gpui::Entity<PlayerModel>,
     account: gpui::Entity<AccountModel>,
+    settings: gpui::Entity<SettingsModel>,
 ) -> WindowHandle<Shell> {
     let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
     let window = cx
@@ -151,7 +158,7 @@ fn open_window(
                 window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| Shell::with_account(player, account, cx)),
+            |_, cx| cx.new(|cx| Shell::with_settings(player, account, settings, cx)),
         )
         .expect("open window");
     window
