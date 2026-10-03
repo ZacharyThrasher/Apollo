@@ -6,6 +6,7 @@ pub mod app;
 pub mod art;
 pub mod assets;
 pub mod backend;
+pub mod home;
 pub mod latency;
 pub mod library;
 pub mod motion;
@@ -13,9 +14,9 @@ pub mod os_media;
 pub mod platform;
 pub mod player;
 pub mod search;
+pub mod settings;
 #[cfg(windows)]
 pub mod smtc;
-pub mod settings;
 pub mod style;
 pub mod thumbs;
 pub mod ui;

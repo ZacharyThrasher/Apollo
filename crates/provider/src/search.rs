@@ -123,7 +123,7 @@ pub fn track_from_item(item: &BrowseItem) -> Option<ListedTrack> {
     })
 }
 
-fn hit_from_item(item: &BrowseItem) -> Option<Hit> {
+pub(crate) fn hit_from_item(item: &BrowseItem) -> Option<Hit> {
     if item.id.trim().is_empty() || item.title.trim().is_empty() {
         return None;
     }
@@ -141,7 +141,7 @@ fn hit_from_item(item: &BrowseItem) -> Option<Hit> {
 
 /// Drops a leading "Album" / "Artist" / "Playlist" segment: the group heading already says it.
 /// Other leading labels ("Single", "EP") carry information and stay.
-fn strip_kind_label(subtitle: &str, kind: &str) -> Option<String> {
+pub(crate) fn strip_kind_label(subtitle: &str, kind: &str) -> Option<String> {
     let mut parts = subtitle.split(" • ").map(str::trim);
     let first = parts.next()?;
     let rest: Vec<&str> = parts.collect();

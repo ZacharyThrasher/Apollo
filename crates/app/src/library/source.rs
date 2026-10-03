@@ -4,7 +4,7 @@
 use apollo_domain::library::{Collection, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{BrowseId, Track};
-use apollo_provider::ArtistSection;
+use apollo_provider::{ArtistSection, HomePage};
 
 use crate::art::DecodedArt;
 
@@ -58,6 +58,16 @@ pub trait LibrarySource: Send + Sync {
 
     /// An artist page: top songs and album rows, all in one answer.
     fn artist(&self, id: &BrowseId) -> Result<ArtistContent, LoadFailure>;
+
+    /// The account's home feed: its first batch of shelves and the token for the next batch.
+    fn home(&self) -> Result<HomePage, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
+    /// The batch of home shelves after the one a token came from.
+    fn home_more(&self, _token: &str) -> Result<HomePage, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
 
     /// Cover art for a thumbnail URL a collection or row carried.
     fn artwork(&self, url: &str) -> Option<DecodedArt>;
