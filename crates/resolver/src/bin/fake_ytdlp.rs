@@ -57,7 +57,6 @@ fn serve(args: &[String]) {
         std::process::exit(1);
     }
     log_line(format!("SERVE ENV {:?}", env::vars().collect::<Vec<_>>()));
-    let mut resolves = 0u64;
     let out = std::io::stdout();
     let mut out = out.lock();
     let stdin = std::io::stdin();
@@ -117,20 +116,12 @@ fn serve(args: &[String]) {
                 let mut v = match mode.as_str() {
                     "wrong-id" => serde_json::json!({"id": id, "ok": true, "info": doc_for("zzzzzzzzzzz", "")}),
                     "drm" => serde_json::json!({"id": id, "ok": true, "info": doc_for(&vid, r#","_has_drm":true"#)}),
-                    // The first answer of a process is the plain ~130 kbps stream, later ones Premium.
-                    "first-plain" if resolves == 0 => {
-                        let mut d = doc_for(&vid, "");
-                        d["abr"] = serde_json::json!(131.0);
-                        d["format_id"] = serde_json::json!("251");
-                        serde_json::json!({"id": id, "ok": true, "info": d})
-                    }
                     "skip-unsupported" if skipping => serde_json::json!({"id": id, "ok": false,
                         "error": format!("ERROR: [youtube] {vid}: Requested format is not available")}),
                     "fail-bot" => serde_json::json!({"id": id, "ok": false,
                         "error": format!("ERROR: [youtube] {vid}: Sign in to confirm you're not a bot")}),
                     _ => serde_json::json!({"id": id, "ok": true, "info": doc_for(&vid, "")}),
                 };
-                resolves += 1;
                 v["phases"] = phases;
                 v["ms"] = serde_json::json!(delay);
                 if mode == "rotate" {

@@ -363,6 +363,34 @@ mod imp {
             tuned.push((name.to_owned(), times, failed));
         }
 
+        // ------------------------------------------------- 7. track or worker?
+        // Every run above resolves the tracks in the same order, so "the first resolve on a fresh
+        // worker serves the plain stream" cannot be told from "track 1 has no Premium stream".
+        out.say("\n[7] is it the track or the worker? (fresh worker, yt-dlp defaults, the tracks in reverse order)");
+        {
+            let mut cfg = base.clone();
+            cfg.cache = None;
+            if let Some(w) = cfg.warm.as_mut() {
+                w.prewarm = 1;
+            }
+            let mut r = rig(cfg, &account);
+            let t0 = Instant::now();
+            while r.resolver.warm_status().map_or(true, |(_, idle, _, _)| idle < 1) && t0.elapsed() < Duration::from_secs(40) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let n = main_ids.len().min(4);
+            let reversed: Vec<String> = main_ids[..n].iter().rev().cloned().collect();
+            let order: Vec<String> = (1..=n).rev().map(|i| format!("track {i}")).collect();
+            out.say(format!("  order resolved: {}", order.join(", ")));
+            for req in mint(&reversed, 1) {
+                let (ms, res) = click(&mut r, req);
+                out.say(format!("  click -> {}", if res.is_ok() { secs(ms) } else { "failed".into() }));
+            }
+            for line in r.resolver.diagnostics().iter().filter(|l| l.contains("src=warm")).take(4) {
+                out.say(format!("    {line}"));
+            }
+        }
+
         // ------------------------------------------------------------- summary
         out.say("\n=== SUMMARY (click -> playable stream URL) ===");
         out.say(format!("BEFORE  one yt-dlp per track        median {}", secs(median(&legacy))));
