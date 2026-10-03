@@ -26,7 +26,9 @@ use std::time::{Duration, SystemTime};
 use apollo_domain::playback::{Event, Failure, LeaseId, LoadId};
 use apollo_runtime::{ResolveRequest, Resolver};
 use apollo_services_common::win::{self, PrivateDir};
-use apollo_services_common::{EventSink, LeaseStore, SecretString, SessionProvider};
+use apollo_services_common::{
+    EventSink, LeaseStore, SecretString, SessionProvider, SessionUnavailable,
+};
 use sha2::{Digest, Sha256};
 
 use crate::argv::build_args;
@@ -289,7 +291,15 @@ impl Inner {
         };
         // AUTH-02: the gate is the account's own validated session, never the resolver's success.
         let Some(snapshot) = self.session.snapshot() else {
-            return Outcome::Failed(Failure::SessionExpired, "no-session");
+            return match self.session.unavailable_reason() {
+                SessionUnavailable::NoSession => {
+                    Outcome::Failed(Failure::SessionExpired, "no-session")
+                }
+                // Cookies exist but the service has not confirmed them yet: not a re-login case.
+                SessionUnavailable::Unconfirmed => {
+                    Outcome::Failed(Failure::Network, "session-unconfirmed")
+                }
+            };
         };
         let video_id = req.track.video_id.as_str();
         let (cookies_base, scratch) = (self.cfg.run_dir.join("cookies"), self.cfg.run_dir.join("scratch"));

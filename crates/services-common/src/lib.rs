@@ -13,7 +13,7 @@ pub mod win;
 
 pub use lease_store::{unix_now, LeaseLookup, LeaseStore};
 pub use secret::SecretString;
-pub use session::{SessionProvider, SessionSnapshot};
+pub use session::{SessionProvider, SessionSnapshot, SessionUnavailable};
 
 /// How adapters feed completions back to whoever owns the coordinator. Called from
 /// adapter threads; implementations must be cheap and must not call into the UI

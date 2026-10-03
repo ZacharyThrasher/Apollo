@@ -18,6 +18,7 @@ use apollo_resolver::{PinnedTools, ResolverConfig, YtDlpResolver};
 use apollo_runtime::{ResolveRequest, Resolver};
 use apollo_services_common::{
     random_hex, unix_now, EventSink, LeaseStore, SecretString, SessionProvider, SessionSnapshot,
+    SessionUnavailable,
 };
 
 const FAKE: &str = env!("CARGO_BIN_EXE_apollo-fake-ytdlp");
@@ -32,6 +33,7 @@ struct TestSession {
     rotations: Mutex<Vec<(u64, bool)>>,
     /// Simulates a newer jar arriving while the helper is running.
     bump_epoch_on_snapshot: AtomicBool,
+    unconfirmed: AtomicBool,
 }
 
 impl TestSession {
@@ -44,6 +46,7 @@ impl TestSession {
             )),
             rotations: Mutex::new(Vec::new()),
             bump_epoch_on_snapshot: AtomicBool::new(false),
+            unconfirmed: AtomicBool::new(false),
         })
     }
 }
@@ -61,6 +64,14 @@ impl SessionProvider for TestSession {
             self.epoch.fetch_add(1, Ordering::SeqCst);
         }
         Some(snap)
+    }
+
+    fn unavailable_reason(&self) -> SessionUnavailable {
+        if self.unconfirmed.load(Ordering::SeqCst) {
+            SessionUnavailable::Unconfirmed
+        } else {
+            SessionUnavailable::NoSession
+        }
     }
 
     fn offer_rotation(&self, epoch: u64, cookies: SecretString) -> bool {
@@ -579,4 +590,81 @@ fn canary_secrets_never_leak() {
             );
         }
     }
+}
+
+/// Opt-in, needs internet: the REAL pinned yt-dlp + Deno through the real contained runner
+/// (cleared environment, Job Object, private cookie dir), with PLACEHOLDER cookie values and a
+/// public video. Proves the process machinery works with the real PyInstaller one-file exe, not
+/// only with the fake. Not an account test: yt-dlp resolves as a guest here (M0 finding).
+///   cargo test -p apollo-resolver --features test-support --test resolver -- --ignored --nocapture
+#[test]
+#[ignore = "needs internet and the real tools"]
+fn real_ytdlp_through_the_contained_runner_with_placeholder_cookies() {
+    let tools = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools");
+    if !tools.join("yt-dlp").join("yt-dlp.exe").exists() {
+        eprintln!("NOT RUN: tools not installed");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("apollo-resolver-test-{}", random_hex(6)));
+    fs::create_dir_all(&root).unwrap();
+    let cfg = ResolverConfig::production(&tools, root.join("run"));
+    let (tx, rx) = mpsc::channel();
+    let tx = Mutex::new(tx);
+    let sink: EventSink = Arc::new(move |ev| {
+        if let Event::Resolved { load, result } = ev {
+            let _ = tx.lock().unwrap().send((load, result));
+        }
+    });
+    let leases = LeaseStore::new();
+    let session = TestSession::new(true); // placeholder cookie values, not a real account
+    let mut resolver = YtDlpResolver::new(cfg, leases.clone(), sink, session as Arc<dyn SessionProvider>)
+        .expect("pinned tools verified");
+
+    let mut c = Coordinator::default();
+    let effects = c.handle(Event::PlayContext {
+        tracks: vec![Track::new("dQw4w9WgXcQ", "t"), Track::new("jNQXAC9IVRw", "t")],
+        start: 0,
+    });
+    let Effect::Resolve { load, entry, track, resume_ms } = effects
+        .iter()
+        .find(|e| matches!(e, Effect::Resolve { .. }))
+        .cloned()
+        .expect("resolve effect")
+    else {
+        unreachable!()
+    };
+    let t0 = Instant::now();
+    resolver.start(ResolveRequest { load, entry, track, resume_ms, preload: false });
+    let (_, res) = rx.recv_timeout(Duration::from_secs(60)).expect("a result within 60 s");
+    eprintln!(
+        "REAL yt-dlp via contained runner: {:?} in {:.1}s; diag: {:?}",
+        res.as_ref().map(|_| "lease"),
+        t0.elapsed().as_secs_f64(),
+        resolver.diagnostics()
+    );
+    let id = res.expect("real yt-dlp must resolve through the contained runner");
+    let lease = leases.get_fresh(id, unix_now(), MARGIN, MAXAGE).expect("fresh lease");
+    assert!(lease.url().host_str().unwrap().ends_with(".googlevideo.com"));
+    assert_eq!(lease.url().scheme(), "https");
+    assert!(lease.expires_at_unix.is_some(), "googlevideo URLs carry an expiry");
+    // Nothing left behind and no stray helper processes of the real kind.
+    drop(resolver);
+    let leftovers = fs::read_dir(root.join("run").join("cookies")).map(|r| r.count()).unwrap_or(0);
+    assert_eq!(leftovers, 0);
+    let _ = fs::remove_dir_all(&root);
+}
+
+// An unconfirmed session (cookies present, service not yet confirmed) is not a "sign in again"
+// case: report a network-class failure, and still never start a process.
+#[test]
+fn an_unconfirmed_session_fails_as_network_not_as_expired() {
+    let session = TestSession::new(false);
+    session.unconfirmed.store(true, Ordering::SeqCst);
+    let mut r = rig_with("ok", session, |_| {});
+    r.start(0);
+    let (_, res) = r.result(Duration::from_secs(5)).expect("a result");
+    assert_eq!(res.unwrap_err(), Failure::Network);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!r.log.exists(), "yt-dlp was started for an unconfirmed session");
+    assert!(r.rs().diagnostics().join("\n").contains("session-unconfirmed"));
 }

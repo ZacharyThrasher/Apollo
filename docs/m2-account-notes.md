@@ -11,10 +11,24 @@ shared primitives in `crates/services-common`.
 | Identity | None, Selected, Ambiguous, Changed | More than one channel = the owner must choose. A previously chosen identity that vanishes becomes `Changed` and blocks until re-confirmed. |
 | Premium evidence | OwnerDeclared, Undeclared | Nothing else exists: no documented entitlement endpoint. Label is "Premium assumed for this account", never "verified". |
 
-`AccountView::can_use_content()` needs all three. The resolver gets a snapshot only while the
-session is **Valid and an identity is Selected** (`SessionProvider::snapshot`). This is the answer
-to the M0 finding that yt-dlp resolves with no or fake cookies: **the gate is the account's own
-validation, never the resolver's success.**
+`AccountView::can_use_content()` needs all three. The resolver gets a snapshot only for a
+**confirmed session with a selected identity** (`SessionProvider::snapshot`): confirmed means the
+service has said yes at least once for the current jar. This is the answer to the M0 finding that
+yt-dlp resolves with no or fake cookies: **the gate is the account's own validation, never the
+resolver's success.**
+
+A confirmed session keeps working while it is being re-checked (`Validating`) and while the service
+is unreachable; only the service saying "logged out" (or logout) ends it (AUTH-04). A jar that was
+never confirmed (pending import, restored from disk but not yet validated) is not usable, and the
+resolver reports that as `Failure::Network` ("unconfirmed", try again) rather than `SessionExpired`
+("sign in again"), via `SessionProvider::unavailable_reason`. After an offline start the app must
+call `revalidate()` again when the network returns.
+
+Two counters: `epoch` changes whenever what a snapshot may contain changes (import, restore,
+logout, identity choice, **cookie rotation**) and guards snapshots and rotation merges; `generation`
+changes only when the jar is replaced or destroyed (import, restore, logout) and guards in-flight
+validations. Reason: real yt-dlp rewrites the cookie file on essentially every run (seen in the M2
+real-tool test), so rotations are frequent and must not discard a re-check that is in flight.
 
 ## Validation (AUTH-04)
 

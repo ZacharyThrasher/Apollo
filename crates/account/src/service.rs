@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use apollo_services_common::{SecretString, SessionProvider, SessionSnapshot};
+use apollo_services_common::{
+    SecretString, SessionProvider, SessionSnapshot, SessionUnavailable,
+};
 
 use crate::identity::{AccountValidator, Identity, Validation};
 use crate::jar::CookieJar;
@@ -143,10 +145,17 @@ pub struct LogoutReport {
 }
 
 struct State {
+    /// Bumped by everything that changes what a resolver snapshot may contain (import, restore,
+    /// logout, identity choice, cookie rotation). Guards snapshots and rotation merges.
     epoch: u64,
+    /// Bumped only when the jar itself is replaced or destroyed (import, restore, logout).
+    /// Guards in-flight validations: a rotation or an identity choice must not discard them.
+    generation: u64,
     session: SessionState,
     jar: Option<CookieJar>,
     identity: IdentityState,
+    /// Every identity the service listed at the last successful validation (for explicit switching).
+    known: Vec<Identity>,
     selected_key: Option<String>,
     premium: PremiumEvidence,
     storage: StorageMode,
@@ -203,9 +212,11 @@ impl AccountService {
                 store,
                 state: Mutex::new(State {
                     epoch: 0,
+                    generation: 0,
                     session: SessionState::Absent,
                     jar: None,
                     identity: IdentityState::None,
+                    known: Vec::new(),
                     selected_key: None,
                     premium: PremiumEvidence::Undeclared,
                     storage: StorageMode::Nothing,
@@ -272,6 +283,8 @@ impl AccountService {
                 {
                     let mut s = self.inner.state.lock().unwrap();
                     s.epoch += 1;
+                    s.generation += 1;
+                    s.validated_at = None; // from disk: unconfirmed until the service says so
                     s.jar = Some(acc.jar);
                     s.selected_key = acc.selected_identity;
                     s.session = SessionState::Validating;
@@ -306,22 +319,24 @@ impl AccountService {
             self.set_problem(Problem::NoAuthCookies);
             return ImportOutcome::Rejected(RejectReason::NoAuthCookies);
         }
-        let my_epoch = {
+        let my_gen = {
             let mut s = self.inner.state.lock().unwrap();
             s.epoch += 1;
+            s.generation += 1;
+            s.validated_at = None; // a new jar is unconfirmed until validated
             s.session = SessionState::Validating;
             s.problem = Problem::None;
             if declare_premium {
                 s.premium = PremiumEvidence::OwnerDeclared;
             }
-            s.epoch
+            s.generation
         };
         self.notify();
 
         let verdict = self.inner.validator.validate(&jar); // no lock held
         let outcome = {
             let mut s = self.inner.state.lock().unwrap();
-            if s.epoch != my_epoch {
+            if s.generation != my_gen {
                 return ImportOutcome::Superseded;
             }
             match verdict {
@@ -371,7 +386,15 @@ impl AccountService {
             let mut s = self.inner.state.lock().unwrap();
             let candidates: Vec<Identity> = match &s.identity {
                 IdentityState::Ambiguous(v) | IdentityState::Changed(v) => v.clone(),
-                IdentityState::Selected(i) => vec![i.clone()],
+                // Switching channels of the same login is an explicit act, among identities the
+                // service listed at the last validation.
+                IdentityState::Selected(i) => {
+                    let mut all = s.known.clone();
+                    if !all.iter().any(|k| k.key() == i.key()) {
+                        all.push(i.clone());
+                    }
+                    all
+                }
                 IdentityState::None => return false,
             };
             let Some(chosen) = candidates.into_iter().find(|i| i.key() == key) else {
@@ -413,21 +436,21 @@ impl AccountService {
     }
 
     fn revalidate_inner(&self) -> SessionState {
-        let (jar, my_epoch) = {
+        let (jar, my_gen) = {
             let mut s = self.inner.state.lock().unwrap();
             let Some(jar) = s.jar.clone() else {
                 return s.session;
             };
             s.session = SessionState::Validating;
-            (jar, s.epoch)
+            (jar, s.generation)
         };
         self.notify();
         let verdict = self.inner.validator.validate(&jar);
         let mut delete_stored = false;
         let state = {
             let mut s = self.inner.state.lock().unwrap();
-            if s.epoch != my_epoch {
-                return s.session; // superseded by logout / import / selection
+            if s.generation != my_gen {
+                return s.session; // the jar was replaced or destroyed (import / logout) meanwhile
             }
             match verdict {
                 Validation::Valid { identities } => {
@@ -478,7 +501,7 @@ impl AccountService {
                 store.delete();
             }
             let mut s = self.inner.state.lock().unwrap();
-            if s.epoch == my_epoch {
+            if s.generation == my_gen {
                 s.storage = StorageMode::Nothing;
             }
         }
@@ -502,9 +525,11 @@ impl AccountService {
         let was_logged_in = {
             let mut s = self.inner.state.lock().unwrap();
             let was = s.jar.is_some();
-            s.epoch += 1; // in-flight validations and resolver snapshots are now stale
+            s.epoch += 1; // resolver snapshots are now stale
+            s.generation += 1; // in-flight validations belong to a jar that no longer exists
             s.jar = None; // zeroed on drop
             s.identity = IdentityState::None;
+            s.known = Vec::new();
             s.selected_key = None;
             s.session = SessionState::Absent;
             s.premium = PremiumEvidence::Undeclared;
@@ -566,6 +591,7 @@ impl AccountService {
 }
 
 fn apply_identities(s: &mut State, identities: Vec<Identity>) {
+    s.known = identities.clone();
     // The owner's earlier explicit choice wins when the service still lists it.
     if let Some(key) = &s.selected_key {
         if let Some(i) = identities.iter().find(|i| i.key() == *key) {
@@ -584,12 +610,26 @@ fn apply_identities(s: &mut State, identities: Vec<Identity>) {
     };
 }
 
-/// The resolver's window onto the account: a snapshot only while the session is valid and an
-/// identity is selected (no guest fallback), and epoch-guarded rotation merging (TEST-15).
+/// A confirmed session may be used by the resolver while it is being re-checked or while the
+/// service is unreachable: only the service saying "logged out" ends it (AUTH-04). A jar the
+/// service has never confirmed (fresh import still pending, restore not yet validated) is not
+/// usable, so nothing unvalidated reaches the resolver.
+fn usable(s: &State) -> bool {
+    s.jar.is_some()
+        && s.validated_at.is_some()
+        && matches!(s.identity, IdentityState::Selected(_))
+        && matches!(
+            s.session,
+            SessionState::Valid | SessionState::Validating | SessionState::Unreachable
+        )
+}
+
+/// The resolver window onto the account: a snapshot only for a usable session (no guest
+/// fallback), and epoch-guarded rotation merging (TEST-15).
 impl SessionProvider for AccountService {
     fn snapshot(&self) -> Option<SessionSnapshot> {
         let s = self.inner.state.lock().unwrap();
-        if s.session != SessionState::Valid || !matches!(s.identity, IdentityState::Selected(_)) {
+        if !usable(&s) {
             return None;
         }
         let jar = s.jar.as_ref()?;
@@ -599,16 +639,27 @@ impl SessionProvider for AccountService {
         })
     }
 
+    fn unavailable_reason(&self) -> SessionUnavailable {
+        let s = self.inner.state.lock().unwrap();
+        if s.jar.is_some()
+            && matches!(s.session, SessionState::Validating | SessionState::Unreachable)
+        {
+            SessionUnavailable::Unconfirmed
+        } else {
+            SessionUnavailable::NoSession
+        }
+    }
+
     fn offer_rotation(&self, epoch: u64, cookies_netscape: SecretString) -> bool {
         let updated = CookieJar::from_netscape(cookies_netscape.expose());
         {
             let mut s = self.inner.state.lock().unwrap();
-            if s.epoch != epoch || s.session != SessionState::Valid {
+            if s.epoch != epoch || !usable(&s) {
                 return false; // a newer jar exists (or the session ended): the old run loses
             }
             let Some(jar) = s.jar.as_mut() else { return false };
             jar.merge_rotation(&updated);
-            s.epoch += 1;
+            s.epoch += 1; // new canonical jar; deliberately NOT a new generation
         }
         self.persist();
         true

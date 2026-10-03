@@ -18,7 +18,7 @@ use apollo_account::service::{
 };
 use apollo_account::store::EncryptedStore;
 use apollo_account::vault::{MemoryVault, UnavailableVault, Vault};
-use apollo_services_common::{random_hex, SecretString, SessionProvider};
+use apollo_services_common::{random_hex, SecretString, SessionProvider, SessionUnavailable};
 
 const CANARY: &str = "COOKIECANARY-abcdef0123456789";
 
@@ -490,4 +490,80 @@ fn restart_with_a_locked_vault_keeps_the_ciphertext_and_reports_it() {
     let svc = env.service(&Scripted::new(vec![valid(1)]));
     assert_eq!(svc.restore(), RestoreOutcome::Restored);
     assert_eq!(svc.view().session, SessionState::Valid);
+}
+
+// AUTH-04: only the service saying "logged out" ends a confirmed session. While it is being
+// re-checked, or the service is unreachable, the resolver keeps working with the same cookies.
+#[test]
+fn a_confirmed_session_rides_through_validating_and_unreachable() {
+    let env = Env::new();
+    let v = Scripted::new(vec![valid(1)]);
+    let svc = env.service(&v);
+    svc.import(jar(), true);
+    assert!(svc.snapshot().is_some());
+
+    let (entered, release) = v.arm_gate();
+    let a = svc.clone();
+    v.push(Validation::Unreachable);
+    let t = thread::spawn(move || a.revalidate());
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(svc.view().session, SessionState::Validating);
+    assert!(svc.snapshot().is_some(), "a re-check in flight must not block playback");
+    release.send(()).unwrap();
+    assert_eq!(t.join().unwrap(), SessionState::Unreachable);
+    assert!(svc.snapshot().is_some(), "one failed check is not a logout");
+    assert_eq!(svc.view().problem, Problem::Network);
+
+    // The service later says it is dead: now (and only now) work is blocked.
+    v.push(Validation::Expired);
+    assert_eq!(svc.revalidate(), SessionState::Expired);
+    assert!(svc.snapshot().is_none());
+}
+
+// yt-dlp rewrites the cookie file on essentially every run, so rotations are frequent. A rotation
+// (or an identity choice) landing during a re-check must not discard the check's result and leave
+// the session stuck in Validating.
+#[test]
+fn rotation_or_identity_choice_during_revalidation_does_not_strand_the_session() {
+    let env = Env::new();
+    let v = Scripted::new(vec![valid(2)]);
+    let svc = env.service(&v);
+    svc.import(jar(), true);
+    assert!(svc.select_identity("PAGE0"));
+
+    let (entered, release) = v.arm_gate();
+    v.push(valid(2));
+    let a = svc.clone();
+    let t = thread::spawn(move || a.revalidate());
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    // While the check is in flight: a helper rotates cookies, and the owner re-selects.
+    let snap = svc.snapshot().expect("usable during the check");
+    let mut rotated = jar();
+    rotated.cookies[0].value = "ROTATED-DURING-CHECK".into();
+    assert!(svc.offer_rotation(snap.epoch, SecretString::new(rotated.to_netscape().expose())));
+    assert!(svc.select_identity("PAGE1"));
+
+    release.send(()).unwrap();
+    assert_eq!(t.join().unwrap(), SessionState::Valid, "the check still completes");
+    let view = svc.view();
+    assert_eq!(view.session, SessionState::Valid, "not stuck in Validating");
+    assert!(matches!(view.identity, IdentityState::Selected(ref i) if i.key() == "PAGE1"));
+    assert!(svc.snapshot().unwrap().cookies_netscape.expose().contains("ROTATED-DURING-CHECK"));
+    // The older snapshot cannot overwrite it (epoch guard still works).
+    assert!(!svc.offer_rotation(snap.epoch, SecretString::new(jar().to_netscape().expose())));
+}
+
+// The resolver reports different failure classes for "sign in again" and "not confirmed yet".
+#[test]
+fn unconfirmed_and_no_session_are_distinguished_for_the_resolver() {
+    let env = Env::new();
+    let v = Scripted::new(vec![Validation::Unreachable]);
+    let svc = env.service(&v);
+    assert_eq!(svc.unavailable_reason(), SessionUnavailable::NoSession, "nothing imported yet");
+    svc.import(jar(), true);
+    assert!(svc.snapshot().is_none(), "never confirmed: not usable");
+    assert_eq!(svc.unavailable_reason(), SessionUnavailable::Unconfirmed);
+    svc.logout();
+    assert_eq!(svc.unavailable_reason(), SessionUnavailable::NoSession);
 }

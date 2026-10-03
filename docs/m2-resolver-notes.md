@@ -62,9 +62,18 @@ including a grandchild and clean up (TEST-28), epoch-guarded rotation (TEST-15),
 stdout flood, stale sweep, pins verified against the real M0 binaries, and a canary scan
 (TEST-23) over argv, environment, diagnostics, `Debug` output and leftover files.
 
+## Real tool check (no account needed)
+
+`real_ytdlp_through_the_contained_runner_with_placeholder_cookies` (opt-in, `--ignored`): the real
+pinned yt-dlp 2026.08.19 + Deno 2.9.7 through this runner (cleared environment, Job Object, private
+cookie dir), placeholder cookie values, a public video: resolved to a validated googlevideo lease in
+4.4 s; cookie dir empty afterwards. It also showed that **yt-dlp rewrites the cookie file on every
+run**, so cookie rotation is the normal case, not an edge case (see account notes: epoch vs
+generation). An unconfirmed session fails as `Network`/"session-unconfirmed" without a process.
+
 ## not_run / limits
 
-- Real yt-dlp against real YouTube through this crate: needs the owner's session (owner-run).
+- Real yt-dlp with the owner's real session through this crate: owner-run (`crates/m2-probe`).
 - Linux/macOS: only argv/parse build there; the runner is Windows-only.
 - The synchronous `Resolver` trait gives no way to report "resolver is shutting down"; `start`
   after drop is silently ignored.
