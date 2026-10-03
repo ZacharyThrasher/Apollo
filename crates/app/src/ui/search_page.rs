@@ -21,11 +21,11 @@ use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::search::{failure_text, SearchModel, SearchState};
 use crate::style::{self, color};
-use crate::thumbs::{Thumb, ThumbStore};
 use crate::ui::button::{focus_ring, keyboard_focused, IconButton};
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{self, TextField, TextFieldEvent};
 use crate::ui::tooltip::Tooltip;
+use crate::url_thumbs::{Thumb, ThumbStore};
 
 actions!(
     apollo_search,
@@ -353,6 +353,7 @@ impl SearchPage {
             )
             .child(
                 TextButton::new("search-message-action", &self.action_focus, action, accent)
+                    .strong()
                     .on_click(on_action),
             )
             .into_any_element()

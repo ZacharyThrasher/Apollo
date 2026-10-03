@@ -20,13 +20,12 @@ default = []
 # simulated backend. Windows only; needs the pinned tools under `tools/`.
 real-services = [
     "dep:ureq",
-    "dep:apollo-account",
     "dep:apollo-media",
     "dep:apollo-resolver",
 ]
 
 [dependencies]
-apollo-account = { path = "../account", optional = true }
+apollo-account = { path = "../account" }
 apollo-domain = { path = "../domain" }
 apollo-provider = { path = "../provider" }
 apollo-runtime = { path = "../runtime" }

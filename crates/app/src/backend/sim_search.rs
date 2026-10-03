@@ -11,7 +11,7 @@ use apollo_provider::{Hit, ListedTrack, SearchResults};
 use super::sim::{track_of, Fixture, FIXTURES};
 use crate::art::{DecodedArt, SyntheticArt};
 use crate::search::SearchSource;
-use crate::thumbs::ThumbSource;
+use crate::url_thumbs::ThumbSource;
 
 const LATENCY: Duration = Duration::from_millis(200);
 

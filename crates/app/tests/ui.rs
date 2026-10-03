@@ -9,9 +9,9 @@ use apollo_app::player::{PlayerModel, Status};
 use apollo_app::search::{SearchSource, SearchState, DEBOUNCE};
 use apollo_app::settings::VolumeStore;
 use apollo_app::style::Fonts;
-use apollo_app::thumbs::ThumbSource;
 use apollo_app::ui::nav::Route;
 use apollo_app::ui::shell::{self, Shell};
+use apollo_app::url_thumbs::ThumbSource;
 use apollo_domain::listing::LoadFailure;
 use apollo_domain::model::Track;
 use apollo_domain::playback::{EngineEvent, Event, Intent, LeaseId, Phase};
@@ -404,4 +404,301 @@ fn the_search_page_renders_every_state_without_panicking(cx: &mut TestAppContext
 fn the_minimum_window_fits_both_side_blocks_and_the_centre() {
     // 240 + 320 + 240 plus the bar padding and the gaps between the columns.
     assert_eq!(apollo_app::ui::player_bar::MIN_BAR_WIDTH, 864.0);
+}
+
+// ---- queue panel ---------------------------------------------------------------------------
+
+use apollo_app::ui::now_playing::art_side;
+use apollo_domain::model::QueueEntryId;
+use gpui::{Bounds, Modifiers, Pixels, Point};
+
+fn titles(player: &Entity<PlayerModel>, cx: &mut VisualTestContext) -> Vec<String> {
+    player.read_with(cx, |m, _| {
+        m.queue_view()
+            .upcoming
+            .iter()
+            .map(|r| r.title.to_string())
+            .collect()
+    })
+}
+
+fn current_title(player: &Entity<PlayerModel>, cx: &mut VisualTestContext) -> String {
+    player.read_with(cx, |m, _| m.view().title.to_string())
+}
+
+fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+    cx.debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} is on screen"))
+}
+
+fn center(b: Bounds<Pixels>) -> Point<Pixels> {
+    b.center()
+}
+
+fn click(cx: &mut VisualTestContext, selector: &'static str) {
+    let at = center(bounds(cx, selector));
+    cx.simulate_click(at, Modifiers::none());
+}
+
+/// Shell with the queue panel open. Animations off, so the panel is fully open at once.
+fn setup_with_queue(
+    cx: &mut TestAppContext,
+) -> (Entity<PlayerModel>, Entity<Shell>, &mut VisualTestContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (player, shell, vcx) = setup(cx);
+    shell.update(vcx, |s, cx| s.toggle_queue(cx));
+    vcx.run_until_parked();
+    (player, shell, vcx)
+}
+
+#[gpui::test]
+fn the_queue_button_slides_the_panel_in_at_320px(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (_player, shell, vcx) = setup(cx);
+    assert!(vcx.debug_bounds("queue-panel").is_none());
+    shell.update(vcx, |s, cx| s.toggle_queue(cx));
+    vcx.run_until_parked();
+    assert!(shell.read_with(vcx, |s, _| s.queue_open()));
+    assert_eq!(bounds(vcx, "queue-panel").size.width, gpui::px(320.0));
+    shell.update(vcx, |s, cx| s.toggle_queue(cx));
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("queue-panel").is_none(),
+        "unmounted when closed"
+    );
+}
+
+#[gpui::test]
+fn the_panel_lists_the_playing_row_and_what_is_up_next(cx: &mut TestAppContext) {
+    let (player, _shell, vcx) = setup_with_queue(cx);
+    // Items: Current, "Up next" header, two upcoming rows.
+    for ix in [0, 2, 3] {
+        let selector: &'static str = ["queue-row-0", "", "queue-row-2", "queue-row-3"][ix];
+        assert!(vcx.debug_bounds(selector).is_some(), "{selector}");
+    }
+    assert!(
+        vcx.debug_bounds("queue-row-1").is_none(),
+        "headers are not rows"
+    );
+    assert_eq!(titles(&player, vcx), ["Track 1", "Track 2"]);
+}
+
+#[gpui::test]
+fn clicking_an_up_next_row_plays_it(cx: &mut TestAppContext) {
+    let (player, _shell, vcx) = setup_with_queue(cx);
+    click(vcx, "queue-row-3");
+    assert_eq!(current_title(&player, vcx), "Track 2");
+    assert_eq!(
+        player.read_with(vcx, |m, _| m.coordinator().unwrap().intent()),
+        Intent::Playing
+    );
+    // Track 0 and 1 were skipped into history, in order.
+    let history: Vec<String> = player.read_with(vcx, |m, _| {
+        m.queue_view()
+            .history
+            .iter()
+            .map(|r| r.title.to_string())
+            .collect()
+    });
+    assert_eq!(history, ["Track 0", "Track 1"]);
+}
+
+#[gpui::test]
+fn the_remove_button_removes_the_row_and_does_not_play_it(cx: &mut TestAppContext) {
+    let (player, _shell, vcx) = setup_with_queue(cx);
+    let over = center(bounds(vcx, "queue-row-2"));
+    vcx.simulate_mouse_move(over, None, Modifiers::none());
+    click(vcx, "queue-remove-2");
+    assert_eq!(titles(&player, vcx), ["Track 2"]);
+    assert_eq!(current_title(&player, vcx), "Track 0");
+    assert_eq!(
+        player.read_with(vcx, |m, _| m.coordinator().unwrap().intent()),
+        Intent::Paused,
+        "removing is not a play"
+    );
+}
+
+#[gpui::test]
+fn the_clear_button_empties_up_next_and_keeps_the_current_track(cx: &mut TestAppContext) {
+    let (player, _shell, vcx) = setup_with_queue(cx);
+    click(vcx, "queue-clear");
+    vcx.run_until_parked();
+    assert!(titles(&player, vcx).is_empty());
+    assert_eq!(current_title(&player, vcx), "Track 0");
+    // The empty line replaces the rows.
+    assert!(vcx.debug_bounds("queue-row-2").is_none());
+}
+
+#[gpui::test]
+fn the_list_is_keyboard_driven(cx: &mut TestAppContext) {
+    let (player, shell, vcx) = setup_with_queue(cx);
+    let panel = shell.read_with(vcx, |s, _| s.queue_panel().clone());
+    vcx.update(|window, cx| {
+        let focus = gpui::Focusable::focus_handle(panel.read(cx), cx);
+        window.focus(&focus, cx);
+    });
+    let id_of = |player: &Entity<PlayerModel>, cx: &mut VisualTestContext, i: usize| {
+        player.read_with(cx, |m, _| m.queue_view().upcoming[i].id)
+    };
+    let cursor = |panel: &Entity<apollo_app::ui::queue_panel::QueuePanel>,
+                  cx: &mut VisualTestContext| {
+        panel.read_with(cx, |p, _| p.cursor())
+    };
+
+    // First Down shows the cursor on the playing row; the next one moves down.
+    vcx.simulate_keystrokes("down");
+    let current = player.read_with(vcx, |m, _| m.queue_view().current.unwrap().id);
+    assert_eq!(cursor(&panel, vcx), Some(current));
+    vcx.simulate_keystrokes("down");
+    let first = id_of(&player, vcx, 0);
+    assert_eq!(cursor(&panel, vcx), Some(first));
+
+    // Alt+Down moves that row below the next one, and the cursor follows it.
+    vcx.simulate_keystrokes("alt-down");
+    assert_eq!(titles(&player, vcx), ["Track 2", "Track 1"]);
+    assert_eq!(cursor(&panel, vcx), Some(first));
+    // Alt+Up at the top of up next does nothing more than move it back.
+    vcx.simulate_keystrokes("alt-up alt-up");
+    assert_eq!(titles(&player, vcx), ["Track 1", "Track 2"]);
+
+    // Delete removes the cursor row and the cursor takes the next one.
+    vcx.simulate_keystrokes("delete");
+    assert_eq!(titles(&player, vcx), ["Track 2"]);
+    assert_eq!(cursor(&panel, vcx), Some(id_of(&player, vcx, 0)));
+
+    // Enter plays the cursor row.
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(current_title(&player, vcx), "Track 2");
+    assert_eq!(
+        player.read_with(vcx, |m, _| m.coordinator().unwrap().intent()),
+        Intent::Playing
+    );
+}
+
+#[gpui::test]
+fn dragging_an_up_next_row_onto_another_reorders_it(cx: &mut TestAppContext) {
+    let (player, _shell, vcx) = setup_with_queue(cx);
+    let from = center(bounds(vcx, "queue-row-3"));
+    let to = center(bounds(vcx, "queue-row-2"));
+    vcx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::none());
+    for step in 1..=8 {
+        let t = step as f32 / 8.0;
+        vcx.simulate_mouse_move(
+            gpui::point(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t),
+            gpui::MouseButton::Left,
+            Modifiers::none(),
+        );
+    }
+    vcx.simulate_mouse_up(to, gpui::MouseButton::Left, Modifiers::none());
+    assert_eq!(titles(&player, vcx), ["Track 2", "Track 1"]);
+}
+
+#[gpui::test]
+fn queue_edits_through_the_model_keep_playback_and_report_the_view(cx: &mut TestAppContext) {
+    let (player, _shell, vcx) = setup(cx);
+    let ids: Vec<QueueEntryId> = player.read_with(vcx, |m, _| {
+        m.queue_view().upcoming.iter().map(|r| r.id).collect()
+    });
+    player.update(vcx, |m, cx| m.move_upcoming(ids[1], 0, cx));
+    assert_eq!(titles(&player, vcx), ["Track 2", "Track 1"]);
+    player.update(vcx, |m, cx| m.remove_entry(ids[0], cx));
+    assert_eq!(titles(&player, vcx), ["Track 2"]);
+    player.update(vcx, |m, cx| m.clear_upcoming(cx));
+    assert!(titles(&player, vcx).is_empty());
+    assert_eq!(current_title(&player, vcx), "Track 0");
+    // Shuffle and repeat state come from the queue the panel shows.
+    player.update(vcx, |m, cx| m.toggle_shuffle(cx));
+    assert!(player.read_with(vcx, |m, _| m.view().shuffle));
+}
+
+#[gpui::test]
+fn row_artwork_loads_lazily_for_rows_on_screen(cx: &mut TestAppContext) {
+    let (player, _shell, vcx) = setup_with_queue(cx);
+    vcx.run_until_parked();
+    let (a, b) = player.read_with(vcx, |m, _| {
+        let v = m.queue_view();
+        (
+            m.thumb(&v.upcoming[0].video_id).is_some(),
+            m.thumb(&v.upcoming[1].video_id).is_some(),
+        )
+    });
+    assert!(a && b, "visible rows get thumbnails");
+}
+
+// ---- Now Playing ---------------------------------------------------------------------------
+
+#[gpui::test]
+fn the_player_bar_opens_now_playing_and_escape_closes_it(cx: &mut TestAppContext) {
+    let (_player, shell, vcx) = setup(cx);
+    assert!(!shell.read_with(vcx, |s, _| s.now_playing_open()));
+    click(vcx, "now-playing-toggle");
+    vcx.run_until_parked();
+    assert!(shell.read_with(vcx, |s, _| s.now_playing_open()));
+    let art = bounds(vcx, "now-playing-art");
+    let viewport_h = vcx.update(|window, _| f32::from(window.viewport_size().height));
+    assert_eq!(f32::from(art.size.width), art_side(viewport_h));
+    assert_eq!(art.size.width, art.size.height, "square");
+
+    // The shell root keeps the keyboard, so Escape closes it.
+    vcx.simulate_keystrokes("escape");
+    assert!(!shell.read_with(vcx, |s, _| s.now_playing_open()));
+    assert!(vcx.debug_bounds("now-playing-art").is_none());
+}
+
+#[gpui::test]
+fn now_playing_has_the_ambient_art_and_its_own_working_transport(cx: &mut TestAppContext) {
+    let (player, shell, vcx) = setup(cx);
+    assert!(
+        player.read_with(vcx, |m, _| m.view().ambient.is_some()),
+        "the blurred artwork arrives with the art"
+    );
+    shell.update(vcx, |s, cx| s.set_now_playing(true, cx));
+    vcx.run_until_parked();
+    // Its play button is the same control as the bar's: clicking toggles playback.
+    vcx.simulate_keystrokes("space");
+    assert_eq!(
+        player.read_with(vcx, |m, _| m.coordinator().unwrap().intent()),
+        Intent::Playing
+    );
+}
+
+#[gpui::test]
+fn the_player_bar_block_is_inert_without_a_track(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        Fonts::install(cx);
+        shell::bind_keys(cx);
+    });
+    let player = cx.new(|_| PlayerModel::new());
+    let (shell, vcx) = cx.add_window_view({
+        let player = player.clone();
+        move |_, cx| Shell::new(player, cx)
+    });
+    vcx.run_until_parked();
+    click(vcx, "now-playing-toggle");
+    assert!(!shell.read_with(vcx, |s, _| s.now_playing_open()));
+}
+
+// ---- layout at the smallest window ------------------------------------------------------------
+
+#[gpui::test]
+fn at_the_minimum_window_now_playing_and_the_queue_do_not_overlap(cx: &mut TestAppContext) {
+    let (_player, shell, vcx) = setup_with_queue(cx);
+    vcx.simulate_resize(gpui::size(gpui::px(864.0), gpui::px(480.0)));
+    shell.update(vcx, |s, cx| s.set_now_playing(true, cx));
+    vcx.run_until_parked();
+    let art = bounds(vcx, "now-playing-art");
+    let panel = bounds(vcx, "queue-panel");
+    assert!(art.right() <= panel.left(), "art {art:?} panel {panel:?}");
+    assert!(art.left() >= gpui::px(64.0), "clear of the nav rail");
+    assert_eq!(panel.size.width, gpui::px(320.0));
+    assert_eq!(art.size.width, art.size.height);
+}
+
+#[gpui::test]
+fn queue_rows_fit_inside_the_panel(cx: &mut TestAppContext) {
+    let (_player, _shell, vcx) = setup_with_queue(cx);
+    let panel = bounds(vcx, "queue-panel");
+    let row = bounds(vcx, "queue-row-2");
+    assert!(row.left() >= panel.left() && row.right() <= panel.right());
+    assert_eq!(row.size.height, gpui::px(48.0));
 }

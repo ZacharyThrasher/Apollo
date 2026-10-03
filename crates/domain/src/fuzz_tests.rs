@@ -257,12 +257,13 @@ impl Harness {
             44..=45 => self.apply(Event::Stop),
             46 => self.apply(Event::Logout),
             47..=54 => {
-                let kind = rng.below(5);
+                let kind = rng.below(7);
                 let batch = tracks(rng, 3);
                 let target = rng.below(8);
                 let repeat = [Repeat::Off, Repeat::One, Repeat::All][rng.below(3)];
                 let shuffle = rng.chance(50);
                 let seed = rng.next();
+                let rng_index = rng.below(8);
                 let fx = self.c.edit_queue(|q| match kind {
                     0 => {
                         q.play_next(batch);
@@ -276,11 +277,26 @@ impl Harness {
                         }
                     }
                     3 => q.set_repeat(repeat),
-                    _ => q.set_shuffle(shuffle, seed),
+                    4 => q.set_shuffle(shuffle, seed),
+                    5 => {
+                        if let Some(id) = q.upcoming_ids().get(target).copied() {
+                            q.move_upcoming(id, rng_index);
+                        }
+                    }
+                    _ => q.clear_upcoming(),
                 });
                 self.process(fx);
             }
-            55..=77 if !self.loads.is_empty() => {
+            55..=57 => {
+                // Pick any entry in the queue (history or upcoming), or an unknown id.
+                let q = self.c.queue();
+                let mut ids: Vec<QueueEntryId> = q.history().iter().map(|e| e.id).collect();
+                ids.extend(q.upcoming_ids());
+                ids.push(QueueEntryId(rng.next() % 40));
+                let id = ids[rng.below(ids.len())];
+                self.apply(Event::PlayEntry { id });
+            }
+            58..=77 if !self.loads.is_empty() => {
                 let load = self.loads[rng.below(self.loads.len())];
                 let result = if rng.chance(75) {
                     Ok(LeaseId(rng.next()))

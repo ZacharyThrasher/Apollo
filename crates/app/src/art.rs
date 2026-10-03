@@ -9,11 +9,24 @@ use image::{imageops, Frame, RgbaImage};
 
 /// Longest side kept for display. The player bar shows 56px art; Now Playing needs up to 480.
 pub const MAX_SIDE: u32 = 512;
+/// Side of the queue-row thumbnails.
+pub const THUMB_SIDE: u32 = 96;
 
-/// A decoded, square artwork image and the accent taken from it.
+/// Side of the image the ambient glow is blurred at, and the side it is smoothed up to.
+const AMBIENT_BLUR_SIDE: u32 = 32;
+pub const AMBIENT_SIDE: u32 = 128;
+/// Blur sigma as a fraction of the image side. The ambient image is drawn "cover" over the Now
+/// Playing area, so on screen the radius is this fraction of the area's longer side. DIRECTION
+/// asks for at least 80px; at 0.25 that holds whenever the longer side is 320px or more (the
+/// smallest area is 324px: minimum window, expanded nav rail and open queue panel).
+pub const AMBIENT_SIGMA_FRACTION: f32 = 0.25;
+
+/// A decoded, square artwork image, the accent taken from it and the blurred ambient version
+/// for the Now Playing background.
 #[derive(Clone)]
 pub struct DecodedArt {
     pub pixels: RgbaImage,
+    pub ambient: RgbaImage,
     pub accent: Accent,
 }
 
@@ -25,7 +38,12 @@ impl DecodedArt {
             pixels.width() as usize,
             pixels.height() as usize,
         );
-        Self { pixels, accent }
+        let ambient = ambient(&pixels);
+        Self {
+            pixels,
+            ambient,
+            accent,
+        }
     }
 
     /// `None` when the bytes are not a PNG/JPEG image.
@@ -36,12 +54,48 @@ impl DecodedArt {
 
     /// GPUI draws BGRA, so swap the channels once here.
     pub fn render_image(&self) -> Arc<RenderImage> {
-        let mut bgra = self.pixels.clone();
-        for px in bgra.as_chunks_mut::<4>().0 {
-            px.swap(0, 2);
-        }
-        Arc::new(RenderImage::new(vec![Frame::new(bgra)]))
+        bgra_image(&self.pixels)
     }
+
+    pub fn ambient_image(&self) -> Arc<RenderImage> {
+        bgra_image(&self.ambient)
+    }
+
+    /// Queue-row artwork: [`THUMB_SIDE`] pixels, twice a 40px row at 2x scaling.
+    pub fn thumb_image(&self) -> Arc<RenderImage> {
+        bgra_image(&imageops::resize(
+            &self.pixels,
+            THUMB_SIDE,
+            THUMB_SIDE,
+            imageops::FilterType::Triangle,
+        ))
+    }
+}
+
+fn bgra_image(pixels: &RgbaImage) -> Arc<RenderImage> {
+    let mut bgra = pixels.clone();
+    for px in bgra.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(vec![Frame::new(bgra)]))
+}
+
+/// Heavily blurred, small copy of the artwork for the ambient glow. Blurred at a small size,
+/// then smoothed up so the GPU's bilinear stretch shows no blocks.
+pub fn ambient(pixels: &RgbaImage) -> RgbaImage {
+    let small = imageops::resize(
+        pixels,
+        AMBIENT_BLUR_SIDE,
+        AMBIENT_BLUR_SIDE,
+        imageops::FilterType::Triangle,
+    );
+    let blurred = imageops::blur(&small, AMBIENT_SIGMA_FRACTION * AMBIENT_BLUR_SIDE as f32);
+    imageops::resize(
+        &blurred,
+        AMBIENT_SIDE,
+        AMBIENT_SIDE,
+        imageops::FilterType::CatmullRom,
+    )
 }
 
 /// Centre-crop to a square (video thumbnails are 16:9 with the cover in the middle) and cap the
@@ -145,6 +199,35 @@ mod tests {
         let art = DecodedArt::from_encoded(&png).expect("png decodes");
         assert_eq!(art.pixels.dimensions(), (64, 64));
         assert!(DecodedArt::from_encoded(b"not an image").is_none());
+    }
+
+    #[test]
+    fn ambient_is_small_smooth_and_keeps_the_hue() {
+        let art = DecodedArt::from_rgba(SyntheticArt::Hue(200.0).render(128));
+        assert_eq!(art.ambient.dimensions(), (AMBIENT_SIDE, AMBIENT_SIDE));
+        // Smooth: neighbouring pixels differ by almost nothing.
+        let max_step = (0..AMBIENT_SIDE - 1)
+            .flat_map(|x| (0..AMBIENT_SIDE).map(move |y| (x, y)))
+            .map(|(x, y)| {
+                let (a, b) = (art.ambient.get_pixel(x, y), art.ambient.get_pixel(x + 1, y));
+                (0..3).map(|i| a[i].abs_diff(b[i])).max().unwrap()
+            })
+            .max()
+            .unwrap();
+        assert!(max_step <= 6, "step {max_step}");
+        // Blue-ish art stays blue-ish (blue channel beats red).
+        let mid = art.ambient.get_pixel(AMBIENT_SIDE / 2, AMBIENT_SIDE / 2);
+        assert!(mid[2] > mid[0], "{mid:?}");
+    }
+
+    #[test]
+    fn ambient_blur_meets_the_direction_minimum_on_the_smallest_area() {
+        // On-screen sigma = fraction x the longer side of the area the image covers.
+        let smallest_longer_side = 324.0_f32;
+        assert!(
+            AMBIENT_SIGMA_FRACTION * smallest_longer_side
+                >= apollo_theme::tokens::ambient::BLUR_RADIUS_MIN_PX
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Real services (Windows, cargo feature `real-services`): the M2 account session, the pinned
 //! yt-dlp resolver and the libmpv engine behind the runtime ports. The starting queue is the
-//! account's Liked Music, listed the way the M2 probe does (no sign-in UI in this slice).
+//! account's Liked Music (listed the way the M2 probe does) when someone is signed in; the
+//! sign-in screen (Settings > Account) handles everything else.
 //!
 //! Run from the repository root (the pinned tools live under `tools/`):
 //!
@@ -8,6 +9,9 @@
 //! apollo --real [--source auto|stored|firefox|login|file:<path>] [--tracks N] [--silent]
 //!               [--tools <dir>] [--select-identity K]
 //! ```
+//!
+//! `--source` (default `auto`) seeds a session at launch for dev runs; `auto` and `stored` use
+//! only the stored session, and the sign-in screen takes over when there is none.
 //!
 //! `--silent` routes audio to mpv's null output, for screenshot runs. Nothing here prints
 //! cookies, URLs, titles, ids or account names.
@@ -18,10 +22,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use apollo_account::identity::{InnerTubeValidator, UreqHttp};
-use apollo_account::import;
 use apollo_account::jar::CookieJar;
-use apollo_account::login::{run_login, LoginCancel, LoginConfig};
-use apollo_account::service::{AccountService, IdentityState, ImportOutcome, RestoreOutcome};
+use apollo_account::login::{run_login, LoginCancel, LoginConfig, LoginError};
+use apollo_account::service::{AccountService, IdentityState, ImportOutcome};
 use apollo_account::store::EncryptedStore;
 use apollo_account::vault::{Vault, WindowsCredentialVault};
 use apollo_domain::model::{ArtistRef, Track, VideoId};
@@ -32,9 +35,10 @@ use apollo_services_common::{EventSink, LeaseStore};
 
 use super::real_search::AccountSearch;
 use super::{LibraryTrack, Ports, Prepared};
+use crate::account::{AccountPorts, AvatarSource, SessionSource, SignInError};
 use crate::art::{ArtSource, DecodedArt};
 use crate::player::DEFAULT_VOLUME;
-use crate::thumbs::ThumbSource;
+use crate::url_thumbs::ThumbSource;
 
 /// Windows Credential Manager service name for the app's vault key.
 const VAULT_SERVICE: &str = "Apollo";
@@ -98,13 +102,22 @@ impl Options {
     }
 }
 
-pub fn prepare(opts: Options, sink: EventSink) -> Result<Prepared, String> {
-    let app_dir = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?)
-        .join("Apollo")
-        .join("app");
-    let account = open_account(&opts, &app_dir)?;
-    spawn_revalidation(account.clone());
+/// The app's own directory under `%LOCALAPPDATA%`.
+fn app_dir() -> Result<PathBuf, String> {
+    Ok(
+        PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?)
+            .join("Apollo")
+            .join("app"),
+    )
+}
 
+pub fn prepare(
+    opts: Options,
+    sink: EventSink,
+    account: &AccountService,
+) -> Result<Prepared, String> {
+    let app_dir = app_dir()?;
+    let account = account.clone();
     let run_dir = app_dir.join("run");
     let rcfg = ResolverConfig::production(&opts.tools, run_dir);
     let leases = LeaseStore::new();
@@ -126,8 +139,13 @@ pub fn prepare(opts: Options, sink: EventSink) -> Result<Prepared, String> {
     )
     .map_err(|e| e.to_string())?;
 
-    let listed = list_liked_music(&rcfg, &account, opts.tracks)
-        .map_err(|f| format!("Liked Music listing failed: {f:?}"))?;
+    // Nothing is listed (and nothing queued) until someone is signed in.
+    let listed = if account.view().can_use_content() {
+        list_liked_music(&rcfg, &account, opts.tracks)
+            .map_err(|f| format!("Liked Music listing failed: {f:?}"))?
+    } else {
+        Vec::new()
+    };
     let mut queue = Vec::new();
     let mut thumbs = HashMap::new();
     for item in listed {
@@ -150,7 +168,7 @@ pub fn prepare(opts: Options, sink: EventSink) -> Result<Prepared, String> {
         }
         queue.push(LibraryTrack { track });
     }
-    if queue.is_empty() {
+    if queue.is_empty() && account.view().can_use_content() {
         return Err("Liked Music has no playable tracks".into());
     }
 
@@ -170,73 +188,106 @@ pub fn prepare(opts: Options, sink: EventSink) -> Result<Prepared, String> {
     })
 }
 
-fn open_account(opts: &Options, app_dir: &std::path::Path) -> Result<AccountService, String> {
-    let vault = Arc::new(WindowsCredentialVault::new(VAULT_SERVICE));
-    let store = EncryptedStore::new(vault as Arc<dyn Vault>, &app_dir.join("store"))
-        .map_err(|e| format!("{e:?}"))?;
-    let account = AccountService::new(
-        Arc::new(InnerTubeValidator::new(Arc::new(UreqHttp::default()))),
-        Some(store),
-    );
-
-    let restored = account.restore();
-    let stored_ok =
-        matches!(restored, RestoreOutcome::Restored) && account.view().can_use_content();
-    match (&opts.source, stored_ok) {
-        (Source::Stored, true) | (Source::Auto, true) => {}
-        (Source::Stored, false) => return Err("no valid stored session".into()),
-        (source, _) => {
-            let jar = obtain_jar(source, app_dir)?;
-            match account.import(jar, true) {
-                ImportOutcome::Valid | ImportOutcome::NeedsIdentityChoice => {}
-                other => return Err(format!("session rejected: {other:?}")),
-            }
-            if let IdentityState::Ambiguous(list) = account.view().identity {
-                let chosen = opts
-                    .select_identity
-                    .and_then(|k| list.get(k))
-                    .ok_or_else(|| {
-                        format!(
-                            "the login can act as {} channels; pass --select-identity 0..{}",
-                            list.len(),
-                            list.len() - 1
-                        )
-                    })?;
-                account.select_identity(&chosen.key());
+/// The account service over the Windows credential vault, and the WebView2 sign-in helper.
+pub fn account_ports(_opts: &Options) -> AccountPorts {
+    let source = Arc::new(WindowsSource::new()) as Arc<dyn SessionSource>;
+    let validator = Arc::new(InnerTubeValidator::new(Arc::new(UreqHttp::default())));
+    let store = app_dir().map_err(|e| e.to_string()).and_then(|dir| {
+        let vault = Arc::new(WindowsCredentialVault::new(VAULT_SERVICE));
+        EncryptedStore::new(vault as Arc<dyn Vault>, &dir.join("store"))
+            .map_err(|e| format!("{e:?}"))
+    });
+    match store {
+        Ok(store) => AccountPorts {
+            service: AccountService::new(validator, Some(store)),
+            source,
+            avatars: Arc::new(HttpAvatars(HttpArt::new(HashMap::new()))),
+            startup_error: None,
+        },
+        Err(err) => {
+            eprintln!("account storage unavailable: {err}");
+            AccountPorts {
+                service: AccountService::new(validator, None),
+                source,
+                avatars: Arc::new(HttpAvatars(HttpArt::new(HashMap::new()))),
+                startup_error: Some(SignInError::Storage),
             }
         }
     }
-    if !account.view().can_use_content() {
-        return Err("session is not valid".into());
-    }
-    Ok(account)
 }
 
-fn obtain_jar(source: &Source, app_dir: &std::path::Path) -> Result<CookieJar, String> {
+/// Restores the stored session, seeds one from `--source` when asked (dev runs), and starts
+/// the periodic re-check. Never fails: when nobody ends up signed in, the sign-in screen is
+/// what the owner sees.
+pub fn start_account(opts: &Options, ports: &AccountPorts) {
+    let account = &ports.service;
+    account.restore();
+    let seeded = match &opts.source {
+        Source::Auto | Source::Stored => None,
+        source => Some(obtain_jar(source, &ports.source)),
+    };
+    if let Some(jar) = seeded {
+        match jar.map(|jar| account.import(jar, true)) {
+            Ok(ImportOutcome::Valid | ImportOutcome::NeedsIdentityChoice) => {}
+            Ok(other) => eprintln!("session rejected: {other:?}"),
+            Err(err) => eprintln!("sign-in failed: {}", err.text()),
+        }
+        if let IdentityState::Ambiguous(list) = account.view().identity {
+            match opts.select_identity.and_then(|k| list.get(k)) {
+                Some(chosen) => {
+                    account.select_identity(&chosen.key());
+                }
+                None => eprintln!(
+                    "the login can act as {} channels; pass --select-identity 0..{}",
+                    list.len(),
+                    list.len() - 1
+                ),
+            }
+        }
+    }
+    spawn_revalidation(account.clone());
+}
+
+fn obtain_jar(source: &Source, helper: &Arc<dyn SessionSource>) -> Result<CookieJar, SignInError> {
     match source {
-        Source::Auto | Source::Firefox => {
-            let firefox = PathBuf::from(std::env::var_os("APPDATA").ok_or("APPDATA is not set")?)
-                .join("Mozilla")
-                .join("Firefox");
-            let profiles = import::firefox_profiles(&firefox);
-            let profile = profiles
-                .iter()
-                .find(|p| p.is_default)
-                .or(profiles.first())
-                .ok_or("no Firefox profile")?;
-            import::firefox_profile(&profile.path).map_err(|e| e.to_string())
+        Source::Auto | Source::Firefox => helper.firefox(),
+        Source::Login => helper.browser(),
+        Source::File(path) => crate::account::file_jar(path),
+        Source::Stored => Err(SignInError::NoAuthCookies),
+    }
+}
+
+/// The sign-in window: the WebView2 helper next to the app's executable.
+struct WindowsSource {
+    cancel: std::sync::Mutex<LoginCancel>,
+}
+
+impl WindowsSource {
+    fn new() -> Self {
+        Self {
+            cancel: std::sync::Mutex::new(LoginCancel::new()),
         }
-        Source::Login => {
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let helper = exe.with_file_name("apollo-login-helper.exe");
-            run_login(
-                &LoginConfig::new(helper, app_dir.join("login")),
-                &LoginCancel::new(),
-            )
-            .map_err(|e| e.to_string())
-        }
-        Source::File(path) => import::netscape_file(path).map_err(|e| e.to_string()),
-        Source::Stored => Err("no valid stored session".into()),
+    }
+}
+
+impl SessionSource for WindowsSource {
+    fn browser(&self) -> Result<CookieJar, SignInError> {
+        let exe = std::env::current_exe().map_err(|_| SignInError::BrowserUnavailable)?;
+        let helper = exe.with_file_name("apollo-login-helper.exe");
+        let profile_base = app_dir()
+            .map_err(|_| SignInError::BrowserUnavailable)?
+            .join("login");
+        let cancel = LoginCancel::new();
+        *self.cancel.lock().unwrap() = cancel.clone();
+        run_login(&LoginConfig::new(helper, profile_base), &cancel).map_err(|e| match e {
+            LoginError::ClosedByUser | LoginError::Cancelled => SignInError::Cancelled,
+            LoginError::TimedOut => SignInError::TimedOut,
+            _ => SignInError::BrowserUnavailable,
+        })
+    }
+
+    fn cancel_browser(&self) {
+        self.cancel.lock().unwrap().cancel();
     }
 }
 
@@ -278,6 +329,15 @@ impl HttpArt {
             .read_to_vec()
             .ok()?;
         DecodedArt::from_encoded(&bytes)
+    }
+}
+
+/// Channel pictures: plain unauthenticated GETs of the image URL the service named.
+struct HttpAvatars(HttpArt);
+
+impl AvatarSource for HttpAvatars {
+    fn fetch(&self, url: &str) -> Option<DecodedArt> {
+        self.0.get(url)
     }
 }
 

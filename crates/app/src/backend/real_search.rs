@@ -187,6 +187,7 @@ mod tests {
         Identity {
             name: format!("Channel {n}"),
             handle: None,
+            avatar_url: None,
             page_id: Some(format!("PAGE{n}")),
             selected_by_service: n == 0,
         }

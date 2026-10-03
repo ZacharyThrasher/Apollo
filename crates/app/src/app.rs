@@ -7,12 +7,13 @@ use gpui::{
     WindowHandle, WindowOptions,
 };
 
+use crate::account::{AccountModel, AccountPorts};
 use crate::backend::{channel_sink, Mode};
 use crate::player::PlayerModel;
 use crate::search::Unavailable;
 use crate::settings::{SqliteVolume as SettingsVolume, VolumeStore};
-use crate::thumbs::NoThumbs;
 use crate::ui::shell::{self, Quit, Shell};
+use crate::url_thumbs::NoThumbs;
 
 /// Smallest window that still fits the player bar's three columns at their minimum widths.
 const MIN_WIDTH: f32 = crate::ui::player_bar::MIN_BAR_WIDTH;
@@ -29,8 +30,18 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
         SettingsVolume::default_location().map(|s| Arc::new(s) as Arc<dyn VolumeStore>);
     let player = cx.new(|_| PlayerModel::new());
     player.update(cx, |m, _| m.set_volume_store(volume_store.clone()));
-    let window = open_window(cx, player.clone());
-    start_services(cx, mode, player.clone(), window, volume_store);
+    let ports = mode.account_ports();
+    let account = cx.new(|cx| AccountModel::new(ports.clone(), cx));
+    let window = open_window(cx, player.clone(), account.clone());
+    start_services(
+        cx,
+        mode,
+        player.clone(),
+        window,
+        account,
+        ports,
+        volume_store,
+    );
 
     cx.on_app_quit(move |cx| {
         player.update(cx, |m, _| m.shutdown());
@@ -41,7 +52,11 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     window
 }
 
-fn open_window(cx: &mut App, player: gpui::Entity<PlayerModel>) -> WindowHandle<Shell> {
+fn open_window(
+    cx: &mut App,
+    player: gpui::Entity<PlayerModel>,
+    account: gpui::Entity<AccountModel>,
+) -> WindowHandle<Shell> {
     let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
     let window = cx
         .open_window(
@@ -56,7 +71,7 @@ fn open_window(cx: &mut App, player: gpui::Entity<PlayerModel>) -> WindowHandle<
                 window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| Shell::new(player, cx)),
+            |_, cx| cx.new(|cx| Shell::with_account(player, account, cx)),
         )
         .expect("open window");
     window
@@ -65,23 +80,38 @@ fn open_window(cx: &mut App, player: gpui::Entity<PlayerModel>) -> WindowHandle<
     window
 }
 
-/// Prepares the backend off the UI thread, installs it, then feeds adapter completions to the
-/// model until the window goes away.
+/// Restores the account, prepares the backend (both off the UI thread), installs it, then feeds
+/// adapter completions to the model until the window goes away.
 fn start_services(
     cx: &mut App,
     mode: Mode,
     player: gpui::Entity<PlayerModel>,
     window: WindowHandle<Shell>,
+    account: gpui::Entity<AccountModel>,
+    ports: AccountPorts,
     volume_store: Option<Arc<dyn VolumeStore>>,
 ) {
     let (sink, mut rx) = channel_sink();
     let weak = player.downgrade();
     cx.spawn(async move |cx| {
+        // The account first: the sign-in screen can show as soon as the stored session has
+        // been checked, without waiting for the player's backend.
+        let mode = {
+            let ports = ports.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    mode.start_account(&ports);
+                    mode
+                })
+                .await
+        };
+        account.update(cx, |m, cx| m.startup_finished(cx));
+        let service = ports.service.clone();
         let (prepared, saved_volume) = cx
             .background_executor()
             .spawn(async move {
                 let saved = volume_store.and_then(|s| s.load());
-                (mode.prepare(sink), saved)
+                (mode.prepare(sink, &service), saved)
             })
             .await;
         match prepared {

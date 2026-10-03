@@ -33,6 +33,8 @@ icons! {
     SearchFilled => "search-filled",
     LibraryRegular => "library-regular",
     LibraryFilled => "library-filled",
+    SettingsRegular => "settings-regular",
+    SettingsFilled => "settings-filled",
     Navigation => "navigation-regular",
     Previous => "previous-regular",
     Next => "next-regular",
@@ -51,9 +53,11 @@ icons! {
     QueueFilled => "queue-filled",
     MusicNote => "music-note-regular",
     Warning => "warning-regular",
+    Dismiss => "dismiss-regular",
+    Delete => "delete-regular",
+    ChevronDown => "chevron-down-regular",
     Spinner => "spinner",
     Add => "add-regular",
-    Dismiss => "dismiss-regular",
 }
 
 pub struct Assets;
