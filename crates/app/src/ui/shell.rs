@@ -90,6 +90,9 @@ pub struct Shell {
     detail_origin: Option<Route>,
     /// The account epoch the library was last loaded under.
     library_epoch: u64,
+    /// Whether the account could serve the library when it was last looked at; the library is
+    /// loaded again when it becomes able to (see [`account_usable`]).
+    library_usable: bool,
     /// The first time the account turns out to be signed out, the window opens on Settings.
     routed_to_sign_in: bool,
     /// Keeps the window-activation hook that dismisses tooltips alive.
@@ -246,6 +249,7 @@ impl Shell {
             toast: None,
             detail_origin: None,
             library_epoch: 0,
+            library_usable: false,
             routed_to_sign_in: false,
             _activation: None,
             route: Route::Home,
@@ -272,8 +276,14 @@ impl Shell {
     /// Opens Settings once if the startup check ends with nobody signed in.
     fn account_changed(&mut self, cx: &mut Context<Self>) {
         // A different login, identity or sign-out: nothing listed under the old one stays.
-        let epoch = self.account.read(cx).service().view().epoch;
-        if epoch != self.library_epoch {
+        let view = self.account.read(cx).service().view();
+        let epoch = view.epoch;
+        let usable = account_usable(&view, self.library_usable);
+        // A new login imports before the service has confirmed it, so what the library loaded
+        // then failed with "sign-in expired": it loads again once the session is confirmed.
+        let became_usable = usable && !self.library_usable;
+        self.library_usable = usable;
+        if epoch != self.library_epoch || became_usable {
             self.library_epoch = epoch;
             self.detail_origin = None;
             self.library.update(cx, |l, cx| l.reset(cx));
@@ -491,6 +501,17 @@ impl Shell {
     /// Put keyboard focus on the root so shortcuts work before anything is clicked.
     pub fn focus_root(&self, window: &mut Window, cx: &mut App) {
         window.focus(&self.root_focus, cx);
+    }
+}
+
+/// Whether the account can serve library requests: a confirmed session with a chosen identity.
+/// A re-check in progress or a network failure says nothing new, so `previous` carries over.
+fn account_usable(view: &apollo_account::service::AccountView, previous: bool) -> bool {
+    use apollo_account::service::{IdentityState, SessionState};
+    match view.session {
+        SessionState::Valid => matches!(view.identity, IdentityState::Selected(_)),
+        SessionState::Absent | SessionState::Expired => false,
+        SessionState::Validating | SessionState::Unreachable => previous,
     }
 }
 
@@ -717,5 +738,44 @@ impl Render for Shell {
             .child(bar)
             .children(toast)
             .children(picker)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apollo_account::service::{AccountView, IdentityState, SessionState};
+
+    fn view(session: SessionState, identity: IdentityState) -> AccountView {
+        AccountView {
+            session,
+            identity,
+            premium: apollo_account::service::PremiumEvidence::Undeclared,
+            storage: apollo_account::service::StorageMode::Durable,
+            problem: apollo_account::service::Problem::None,
+            epoch: 0,
+            jar_is_seed: false,
+        }
+    }
+
+    #[test]
+    fn only_a_confirmed_session_with_an_identity_can_serve_the_library() {
+        let who = apollo_account::identity::Identity {
+            name: "N".into(),
+            handle: None,
+            avatar_url: None,
+            page_id: None,
+            selected_by_service: true,
+        };
+        let selected = IdentityState::Selected(who);
+        assert!(account_usable(&view(SessionState::Valid, selected.clone()), false));
+        assert!(!account_usable(&view(SessionState::Valid, IdentityState::None), true));
+        assert!(!account_usable(&view(SessionState::Expired, selected.clone()), true));
+        assert!(!account_usable(&view(SessionState::Absent, IdentityState::None), true));
+        // A re-check or a lost connection changes nothing either way.
+        for previous in [true, false] {
+            assert_eq!(account_usable(&view(SessionState::Validating, selected.clone()), previous), previous);
+            assert_eq!(account_usable(&view(SessionState::Unreachable, selected.clone()), previous), previous);
+        }
     }
 }

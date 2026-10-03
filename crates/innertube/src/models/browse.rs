@@ -1120,7 +1120,9 @@ pub fn parse_add_to_playlist(root: &Value) -> Option<Vec<PlaylistOption>> {
         .filter_map(|node| {
             let id = node.get("playlistId").and_then(Value::as_str)?.trim().to_owned();
             let title = text_or_runs(node.get("title"))?.trim().to_owned();
-            if id.is_empty() || title.is_empty() || !seen.insert(id.clone()) {
+            // `LM` is Liked Music, listed first with a like endpoint instead of an edit one: it is
+            // the heart's job, and "adding" to it as a playlist is not what the sheet means.
+            if id.is_empty() || id == "LM" || title.is_empty() || !seen.insert(id.clone()) {
                 return None;
             }
             Some(PlaylistOption {
@@ -1893,6 +1895,26 @@ mod tests {
             parse_add_to_playlist(&json!({ "contents": [{ "addToPlaylistRenderer": { "playlists": [] } }] })),
             Some(Vec::new())
         );
+    }
+
+    #[test]
+    fn the_real_save_to_playlist_sheet_lists_playlists_but_not_liked_music() {
+        // A real answer (2026-10-03, signed in), cut to Liked Music and three playlists with
+        // names, ids and pictures replaced. Real rows carry no `containsSelectedVideos`.
+        let root: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/add_to_playlist_recorded.json"
+        ))
+        .unwrap();
+        let options = parse_add_to_playlist(&root).unwrap();
+        assert_eq!(
+            options.iter().map(|o| (o.id.as_str(), o.title.as_str())).collect::<Vec<_>>(),
+            [
+                ("PLrecorded0001", "Playlist One"),
+                ("PLrecorded0002", "Playlist Two"),
+                ("PLrecorded0003", "Playlist Three")
+            ]
+        );
+        assert!(options.iter().all(|o| !o.contains_video && o.thumbnail.is_some()));
     }
 
     #[test]
