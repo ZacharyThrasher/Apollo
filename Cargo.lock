@@ -217,6 +217,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "apollo-resolver"
+version = "0.0.0"
+dependencies = [
+ "apollo-domain",
+ "apollo-resolver",
+ "apollo-runtime",
+ "apollo-services-common",
+ "serde_json",
+ "sha2",
+ "url",
+]
+
+[[package]]
 name = "apollo-runtime"
 version = "0.0.0"
 dependencies = [
