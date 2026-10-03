@@ -42,10 +42,23 @@ pub const WIDTH: f32 = ART + 2.0 * INSET;
 /// Artwork or the no-art tile: bg.overlay with a quiet music note (Shell decisions 3). A cover
 /// still downloading is the plain tile, with nothing to animate.
 pub fn tile(thumb: &Thumb) -> AnyElement {
+    shaped_tile(thumb, false)
+}
+
+/// [`tile`] as a circle (an artist) or a rounded square. The image carries the corners itself:
+/// GPUI clips a parent's children to its rectangle, not to its rounded corners.
+pub fn shaped_tile(thumb: &Thumb, circle: bool) -> AnyElement {
     match thumb {
         Thumb::Image(image) => img(ImageSource::Render(image.clone()))
             .size_full()
             .object_fit(ObjectFit::Cover)
+            .map(|i| {
+                if circle {
+                    i.rounded_full()
+                } else {
+                    i.rounded(px(radius::MEDIUM))
+                }
+            })
             .into_any_element(),
         Thumb::Pending => div().into_any_element(),
         Thumb::Missing => gpui::svg()
@@ -192,7 +205,7 @@ impl RenderOnce for Card {
                     })
                     .overflow_hidden()
                     .bg(color::bg_overlay())
-                    .child(tile(&self.thumb)),
+                    .child(shaped_tile(&self.thumb, self.circle)),
             )
             .child(
                 style::text_style(div(), typography::BODY_STRONG, cx)

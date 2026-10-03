@@ -30,9 +30,10 @@ use crate::library::source::{ArtistContent, TrackRow};
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::style::{self, color};
-use crate::ui::art_tile::art_tile;
+use crate::ui::art_tile::art_tile_shaped;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::card::{grid, heading, Card};
+use crate::ui::playing_row;
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::tooltip::Tooltip;
@@ -82,8 +83,6 @@ const DURATION_WIDTH: f32 = spacing::S12;
 const HEADER_ART: f32 = 96.0;
 /// The album column needs room; below this window width it is dropped.
 const ALBUM_COLUMN_MIN_WINDOW: f32 = 1000.0;
-/// Width of the accent bar on the row that is playing.
-const PLAYING_BAR: f32 = 3.0;
 /// Skeleton rows drawn while loading: enough to fill a tall window.
 const SKELETON_ROWS: usize = 12;
 /// An artist page opens on its top songs, so its skeleton is about that many rows.
@@ -173,6 +172,10 @@ pub struct LibraryView {
     on_search: Rc<Handler>,
     /// Back closed the last open page: a page opened from elsewhere (Search) returns there.
     on_closed: Rc<Handler>,
+    /// Nobody is signed in: the page says so instead of listing (or failing to).
+    signed_out: bool,
+    /// The signed-out state's action: Settings > Account.
+    on_sign_in: Rc<Handler>,
     /// Rows drawn last frame: with virtualization this stays a screenful however long the list.
     rendered: Range<usize>,
 }
@@ -182,6 +185,7 @@ impl LibraryView {
         player: Entity<PlayerModel>,
         on_search: impl Fn(&mut Window, &mut App) + 'static,
         on_closed: impl Fn(&mut Window, &mut App) + 'static,
+        on_sign_in: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
         let stop = |cx: &mut Context<Self>, index: isize| {
@@ -215,6 +219,8 @@ impl LibraryView {
             hover: RowHover::default(),
             on_search: Rc::new(Box::new(on_search)),
             on_closed: Rc::new(Box::new(on_closed)),
+            signed_out: false,
+            on_sign_in: Rc::new(Box::new(on_sign_in)),
             rendered: 0..0,
         }
     }
@@ -227,6 +233,41 @@ impl LibraryView {
         self.pages.clear();
         self.hover.clear();
         cx.notify();
+    }
+
+    /// Whether nobody is signed in. Unlike an expired session, a deliberate sign-out is not an
+    /// error: the page shows one line and the way back in.
+    pub fn set_signed_out(&mut self, signed_out: bool, cx: &mut Context<Self>) {
+        if self.signed_out != signed_out {
+            self.signed_out = signed_out;
+            cx.notify();
+        }
+    }
+
+    fn render_signed_out(&mut self, accent: Accent, cx: &mut Context<Self>) -> AnyElement {
+        let on_sign_in = self.on_sign_in.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(spacing::S4))
+            .child(
+                style::text_style(div(), typography::PAGE_TITLE, cx)
+                    .text_color(color::text_primary())
+                    .child("Library"),
+            )
+            .child(
+                style::text_style(div(), typography::BODY, cx)
+                    .text_color(color::text_secondary())
+                    .child("Signed out"),
+            )
+            .child(
+                div().debug_selector(|| "library-sign-in".into()).flex().flex_row().child(
+                    TextButton::new("library-sign-in", &self.focus.retry, "Sign in", accent)
+                        .primary()
+                        .on_click(move |window, cx| on_sign_in(window, cx)),
+                ),
+            )
+            .into_any_element()
     }
 
     pub fn rendered_rows(&self) -> Range<usize> {
@@ -448,9 +489,7 @@ impl LibraryView {
         });
         // Everything but Liked Music (which has no cover) is the shell's art tile.
         if !matches!(glyph, Icon::HeartFilled) {
-            return art_tile(px_size, image)
-                .when(circle, |d| d.rounded_full())
-                .into_any_element();
+            return art_tile_shaped(px_size, image, circle).into_any_element();
         }
         // A decorative glyph: the 3:1 non-text minimum applies, not 4.5:1.
         div()
@@ -848,12 +887,13 @@ impl LibraryView {
         &self,
         frame: &RowFrame,
         height: f32,
+        playing: bool,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let (ix, animations) = (frame.ix, frame.animations);
-        let tint = if frame.selected {
-            color::state_selected()
+        let tint = if frame.selected || playing {
+            playing_row::tint()
         } else {
             color::state_hover().opacity(frame.level)
         };
@@ -917,6 +957,7 @@ impl LibraryView {
         self.row_shell(
             &frame,
             COLLECTION_ROW,
+            false,
             move |this, window, cx| this.open(open.clone(), window, cx),
             cx,
         )
@@ -1469,6 +1510,7 @@ impl LibraryView {
         self.row_shell(
             &frame,
             TRACK_ROW,
+            playing,
             move |this, _, cx| {
                 this.model
                     .update(cx, |m, cx| m.request_play(PlayRequest::row(ix), cx))
@@ -1476,18 +1518,7 @@ impl LibraryView {
             cx,
         )
         .aria_label(row.track.title.clone())
-        .when(playing, |d| {
-            d.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(spacing::S2))
-                    .bottom(px(spacing::S2))
-                    .w(px(PLAYING_BAR))
-                    .rounded_full()
-                    .bg(color::accent(accent)),
-            )
-        })
+        .when(playing, |d| d.child(playing_row::marker(color::accent(accent))))
         .child(index_cell)
         .child(art)
         .child(
@@ -1499,7 +1530,7 @@ impl LibraryView {
                 .child(Self::line(
                     ("track-title", ix),
                     row.track.title.clone().into(),
-                    typography::LIST_TITLE,
+                    playing_row::title_style(typography::LIST_TITLE, playing),
                     color::text_primary(),
                     false,
                     cx,
@@ -1662,7 +1693,9 @@ impl Render for LibraryView {
         };
         // Pages the model opened directly (not through this view) still get scroll state.
         self.pages.resize_with(depth, PageScroll::new);
-        let page = if artist_open {
+        let page = if self.signed_out {
+            self.render_signed_out(accent, cx)
+        } else if artist_open {
             self.render_artist(accent, window, cx)
         } else if detail_open {
             self.render_detail(accent, window, cx)

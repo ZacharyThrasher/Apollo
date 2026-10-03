@@ -297,7 +297,8 @@ fn tile(
         Some(image) => base.child(
             img(ImageSource::Render(image))
                 .size_full()
-                .object_fit(ObjectFit::Cover),
+                .object_fit(ObjectFit::Cover)
+                .rounded(px(radius::MEDIUM)),
         ),
         None => base.child(
             style::text_style(div(), typography::SECTION, cx)

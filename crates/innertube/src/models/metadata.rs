@@ -976,6 +976,52 @@ fn is_type_label(s: &str) -> bool {
     )
 }
 
+/// A publication date as a video or episode row writes it ("7h ago", "3 days ago", "Dec 27,
+/// 2024", "Feb 5"). Such a segment sits where a song row has its artist, and is not one.
+fn is_date_like(s: &str) -> bool {
+    let s = s.trim();
+    let lower = s.to_ascii_lowercase();
+    if lower.ends_with(" ago") || lower == "yesterday" || lower == "today" {
+        return true;
+    }
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    let digits = |t: &str, max: usize| {
+        let t = t.trim_end_matches(',');
+        !t.is_empty() && t.len() <= max && t.bytes().all(|b| b.is_ascii_digit())
+    };
+    let month = tokens.first().is_some_and(|m| {
+        let m = m.trim_end_matches('.').to_ascii_lowercase();
+        m.len() >= 3 && MONTHS.iter().any(|full| m.starts_with(full))
+    });
+    month
+        && match tokens.as_slice() {
+            [_, day] => digits(day, 2),
+            [_, day, year] => digits(day, 2) && digits(year, 4) && year.len() == 4,
+            _ => false,
+        }
+}
+
+/// A count the row prints next to (or instead of) an artist: "1.8M views", "1.3B plays", "12
+/// songs", "109M monthly audience".
+fn is_count_like(s: &str) -> bool {
+    let mut tokens = s.split_whitespace();
+    let (Some(number), Some(unit)) = (tokens.next(), tokens.next()) else {
+        return false;
+    };
+    let number = number.trim_end_matches(['K', 'M', 'B', 'k', 'm', 'b']);
+    let numeric = !number.is_empty()
+        && number.bytes().all(|b| b.is_ascii_digit() || b == b'.' || b == b',');
+    numeric
+        && matches!(
+            unit.to_ascii_lowercase().as_str(),
+            "views" | "view" | "plays" | "play" | "subscribers" | "subscriber" | "songs" | "song"
+                | "tracks" | "track" | "listeners" | "monthly" | "likes"
+        )
+}
+
 /// "3:02" / "1:04:11", and nothing else. A colon alone doesn't make a duration: an artist or album
 /// can carry one ("Jorge Rivera-Herrans & Cast of EPIC: The Musical"), and taking that as the
 /// length prints the whole title where the time goes and squeezes the rest of the row out.
@@ -1009,6 +1055,10 @@ fn split_subtitle(runs: Option<&Vec<Value>>) -> (String, Option<String>, Option<
     {
         groups.remove(0);
     }
+    // A video or episode row puts its date or view count where a song has its artist: neither
+    // is one, and neither is an album, so they are dropped (an artist that links a channel
+    // never is).
+    groups.retain(|g| g.artist_link || !(is_date_like(&g.text) || is_count_like(&g.text)));
     let groups: Vec<String> = groups.into_iter().map(|g| g.text).collect();
     // A row can carry no artist field at all: YouTube drops it when the query is the artist, so
     // every song row of a "boygenius" search reads "Song • 3:55". The length is not a name, and

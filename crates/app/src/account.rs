@@ -362,6 +362,18 @@ impl AccountModel {
         !self.checking && matches!(self.screen(), Screen::SignedOut { .. })
     }
 
+    /// Nobody is signed in and the session did not simply run out (an expired one is told apart:
+    /// the Library keeps saying "Sign-in expired" for that).
+    pub fn is_signed_out_by_choice(&self) -> bool {
+        self.is_signed_out()
+            && !matches!(
+                self.screen(),
+                Screen::SignedOut {
+                    error: Some(SignInError::Expired)
+                }
+            )
+    }
+
     pub fn startup_finished(&mut self, cx: &mut Context<Self>) {
         self.checking = false;
         self.refresh(cx);

@@ -752,6 +752,25 @@ fn at_the_minimum_window_now_playing_and_the_queue_do_not_overlap(cx: &mut TestA
 }
 
 #[gpui::test]
+fn now_playing_shows_its_progress_row_and_transport_without_scrolling(cx: &mut TestAppContext) {
+    let (_player, shell, vcx) = setup(cx);
+    shell.update(vcx, |s, cx| s.set_now_playing(true, cx));
+    for (w, h) in [(864.0_f32, 480.0_f32), (864.0, 560.0), (1100.0, 720.0), (1400.0, 900.0)] {
+        vcx.simulate_resize(gpui::size(gpui::px(w), gpui::px(h)));
+        vcx.run_until_parked();
+        let (art, controls) = (bounds(vcx, "now-playing-art"), bounds(vcx, "np-controls"));
+        let page_bottom = gpui::px(h - 80.0);
+        assert!(
+            controls.bottom() <= page_bottom,
+            "{w}x{h}: transport ends at {:?}, past the page's end {page_bottom:?}",
+            controls.bottom()
+        );
+        assert!(art.top() >= gpui::px(32.0), "{w}x{h}: art starts under the title bar");
+        assert!(art.size.width >= gpui::px(160.0));
+    }
+}
+
+#[gpui::test]
 fn queue_rows_fit_inside_the_panel(cx: &mut TestAppContext) {
     let (_player, _shell, vcx) = setup_with_queue(cx);
     let panel = bounds(vcx, "queue-panel");

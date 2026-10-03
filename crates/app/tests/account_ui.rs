@@ -193,6 +193,53 @@ fn signed_out_at_launch_opens_settings_once(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn after_a_sign_out_the_library_says_signed_out_and_signs_in_through_settings(
+    cx: &mut TestAppContext,
+) {
+    let (r, vcx) = rig(
+        cx,
+        Scripted::new(vec![], Validation::Expired),
+        FakeSource::ok(),
+        true,
+    );
+    r.shell.update(vcx, |s, cx| s.show_route(Route::Library, cx));
+    vcx.run_until_parked();
+    let button = vcx
+        .debug_bounds("library-sign-in")
+        .expect("the signed-out Library offers Sign in");
+    // The wrapper spans the row; the button is at its start.
+    let on_button = button.origin + gpui::point(gpui::px(24.0), gpui::px(16.0));
+    vcx.simulate_click(on_button, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    r.shell
+        .read_with(vcx, |s, _| assert_eq!(s.route(), Route::Settings));
+}
+
+#[gpui::test]
+fn an_expired_session_keeps_the_librarys_own_expired_message(cx: &mut TestAppContext) {
+    let (r, vcx) = rig(
+        cx,
+        Scripted::new(vec![], Validation::Expired),
+        FakeSource::ok(),
+        false,
+    );
+    r.account.update(vcx, |m, _| {
+        m.service().import(sim_jar(), true);
+    });
+    r.account.update(vcx, |m, cx| m.startup_finished(cx));
+    vcx.run_until_parked();
+    assert!(matches!(
+        screen(&r, vcx),
+        Screen::SignedOut {
+            error: Some(SignInError::Expired)
+        }
+    ));
+    r.shell.update(vcx, |s, cx| s.show_route(Route::Library, cx));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("library-sign-in").is_none());
+}
+
+#[gpui::test]
 fn signed_in_at_launch_stays_on_home(cx: &mut TestAppContext) {
     let (r, vcx) = rig(cx, Scripted::new(vec![], valid(0)), FakeSource::ok(), false);
     r.account.update(vcx, |m, _| {

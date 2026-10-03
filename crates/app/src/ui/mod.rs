@@ -6,6 +6,7 @@ pub mod library;
 pub mod nav;
 pub mod now_playing;
 pub mod player_bar;
+pub mod playing_row;
 pub mod queue_panel;
 pub mod search_page;
 pub mod shell;

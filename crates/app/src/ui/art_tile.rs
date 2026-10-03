@@ -25,19 +25,43 @@ pub fn art_tile(size: f32, image: Option<Arc<RenderImage>>) -> Div {
 /// Like [`art_tile`] but the caller sets the width (and a square aspect); `nominal` only picks
 /// the glyph size for the no-art tile.
 pub fn art_tile_fluid(nominal: f32, image: Option<Arc<RenderImage>>) -> Div {
+    art_tile_shaped(nominal, image, false)
+}
+
+/// [`art_tile`] as a circle (an artist) or a rounded square.
+pub fn art_tile_shaped(nominal: f32, image: Option<Arc<RenderImage>>, circle: bool) -> Div {
+    art_tile_fluid_shaped(nominal, image, circle).size(px(nominal)).flex_none()
+}
+
+fn art_tile_fluid_shaped(nominal: f32, image: Option<Arc<RenderImage>>, circle: bool) -> Div {
     let size = nominal;
     div()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(radius::MEDIUM))
+        .map(|d| {
+            if circle {
+                d.rounded_full()
+            } else {
+                d.rounded(px(radius::MEDIUM))
+            }
+        })
         .overflow_hidden()
         .bg(color::bg_overlay())
         .map(|d| match image {
             Some(image) => d.child(
+                // The image carries the corners itself: GPUI clips children to the parent's
+                // rectangle, not its rounded corners.
                 img(ImageSource::Render(image))
                     .size_full()
-                    .object_fit(ObjectFit::Cover),
+                    .object_fit(ObjectFit::Cover)
+                    .map(|i| {
+                        if circle {
+                            i.rounded_full()
+                        } else {
+                            i.rounded(px(radius::MEDIUM))
+                        }
+                    }),
             ),
             // A decorative glyph, not text, so text.tertiary on bg.overlay (4.19:1) clears the
             // 3:1 non-text minimum.
