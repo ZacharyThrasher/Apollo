@@ -23,5 +23,8 @@ pub mod settings;
 pub mod smtc;
 pub mod style;
 pub mod thumbs;
+pub mod tray;
+#[cfg(windows)]
+pub mod tray_win;
 pub mod ui;
 pub mod url_thumbs;

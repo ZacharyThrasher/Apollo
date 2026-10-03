@@ -195,7 +195,7 @@ fn command_for(event: MediaControlEvent) -> Option<OsCommand> {
     })
 }
 
-fn hwnd_of(window: &Window) -> Option<*mut c_void> {
+pub(crate) fn hwnd_of(window: &Window) -> Option<*mut c_void> {
     match HasWindowHandle::window_handle(window).ok()?.as_raw() {
         RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as *mut c_void),
         _ => None,
