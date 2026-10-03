@@ -3,10 +3,12 @@
 //! The mapping is pure and tested against fixtures with no network. Nothing here decides
 //! playback, touches credentials at rest or owns UI copy.
 
+mod artist;
 mod map;
 mod search;
 mod source;
 
+pub use artist::{page_from_artist, ArtistPage, ArtistSection};
 pub use map::{
     account_validation, classify, collection_from_card, collections_from_grid, page_from_album,
     page_from_continuation, page_from_playlist, track_from_song, ListedTrack,

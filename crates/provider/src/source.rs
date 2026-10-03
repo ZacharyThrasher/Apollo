@@ -6,6 +6,7 @@ use apollo_domain::listing::{LoadFailure, Page};
 use innertube::{Clients, InnerTube, Session, YouTubeClient, METADATA_CLIENT};
 use tokio::sync::Notify;
 
+use crate::artist::{page_from_artist, ArtistPage};
 use crate::map::{
     account_validation, classify, collections_from_grid, page_from_album, page_from_continuation,
     page_from_playlist, ListedTrack,
@@ -101,11 +102,12 @@ impl InnerTubeSource {
         Ok(collections_from_grid(&cards, CollectionKind::Album))
     }
 
-    /// First page of a playlist (`VL…`) or any page that lists tracks.
+    /// First page of a playlist (`VL…`) or any page that lists tracks. A bare playlist id
+    /// (`PL…`) gets the `VL` the browse endpoint wants.
     pub async fn playlist(&self, browse_id: &str) -> Result<Page<ListedTrack>, LoadFailure> {
         let page = self
             .tube
-            .playlist(&self.client, browse_id, None)
+            .playlist(&self.client, &playlist_browse_id(browse_id), None)
             .await
             .map_err(|e| classify(&e))?;
         Ok(page_from_playlist(&page))
@@ -118,6 +120,16 @@ impl InnerTubeSource {
             .await
             .map_err(|e| classify(&e))?;
         Ok(page_from_album(&page))
+    }
+
+    /// An artist page by channel browse id (`UC…`): top songs and the album rows.
+    pub async fn artist(&self, browse_id: &str) -> Result<ArtistPage, LoadFailure> {
+        let page = self
+            .tube
+            .artist(&self.client, browse_id)
+            .await
+            .map_err(|e| classify(&e))?;
+        page_from_artist(&page, browse_id)
     }
 
     pub async fn continuation(&self, token: &str) -> Result<Page<ListedTrack>, LoadFailure> {
@@ -180,9 +192,31 @@ impl InnerTubeSource {
     }
 }
 
+/// The browse id a playlist page is fetched by: the playlist id with a `VL` prefix. Library and
+/// search cards already carry it; a bare id (a pasted link, a radio id) gets it here.
+pub(crate) fn playlist_browse_id(id: &str) -> String {
+    if id.starts_with("VL") {
+        id.to_owned()
+    } else {
+        format!("VL{id}")
+    }
+}
+
 fn to_validation_error(err: innertube::Error) -> ValidationError {
     match classify(&err) {
         LoadFailure::Session => ValidationError::Expired,
         _ => ValidationError::Unreachable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::playlist_browse_id;
+
+    #[test]
+    fn a_bare_playlist_id_gets_the_browse_prefix_once() {
+        assert_eq!(playlist_browse_id("PLabc"), "VLPLabc");
+        assert_eq!(playlist_browse_id("VLPLabc"), "VLPLabc");
+        assert_eq!(playlist_browse_id("OLAK5uy_x"), "VLOLAK5uy_x");
     }
 }

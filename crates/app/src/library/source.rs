@@ -3,7 +3,8 @@
 
 use apollo_domain::library::Collection;
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
-use apollo_domain::model::Track;
+use apollo_domain::model::{BrowseId, Track};
+use apollo_provider::ArtistSection;
 
 use crate::art::DecodedArt;
 
@@ -23,6 +24,25 @@ impl ListItem for TrackRow {
     }
 }
 
+/// What an artist page shows: the top songs and the rows of albums, singles and playlists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtistContent {
+    pub name: String,
+    /// The service's header picture (often wide); the card the page was opened from usually
+    /// carries a squarer one, which the page prefers.
+    pub thumbnail: Option<String>,
+    pub top_songs: Vec<TrackRow>,
+    pub sections: Vec<ArtistSection>,
+    /// Songs or cards the page carried that could not be shown.
+    pub skipped: u32,
+}
+
+impl ArtistContent {
+    pub fn is_empty(&self) -> bool {
+        self.top_songs.is_empty() && self.sections.is_empty()
+    }
+}
+
 pub trait LibrarySource: Send + Sync {
     /// Every library playlist, then every saved album, each in the service's order. Liked Music
     /// may or may not be among the playlists; the screen guarantees it appears exactly once.
@@ -33,6 +53,9 @@ pub trait LibrarySource: Send + Sync {
 
     /// A following page, by the continuation token the previous page carried.
     fn more_tracks(&self, token: &str) -> Result<Page<TrackRow>, LoadFailure>;
+
+    /// An artist page: top songs and album rows, all in one answer.
+    fn artist(&self, id: &BrowseId) -> Result<ArtistContent, LoadFailure>;
 
     /// Cover art for a thumbnail URL a collection or row carried.
     fn artwork(&self, url: &str) -> Option<DecodedArt>;

@@ -9,5 +9,5 @@ pub mod source;
 #[cfg(feature = "provider")]
 pub mod live;
 
-pub use model::{Detail, Load, PlayRequest, Tab};
-pub use source::{LibrarySource, TrackRow};
+pub use model::{ArtistDetail, Detail, Load, PlayRequest, Tab, Target};
+pub use source::{ArtistContent, LibrarySource, TrackRow};

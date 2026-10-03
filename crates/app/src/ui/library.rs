@@ -1,4 +1,6 @@
-//! The Library page: Playlists and Albums lists, and a collection's track list.
+//! The Library page: Playlists and Albums lists, and the pages opened from them and from
+//! Search: an album or playlist's track list and an artist's top songs and album rows. Pages
+//! stack, and Back unwinds one at a time.
 //!
 //! Lists are virtualized (`uniform_list`: only the visible rows exist), with one keyboard
 //! selection per list rather than a focus handle per row. Everything visual comes from
@@ -16,18 +18,21 @@ use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
     actions, div, prelude::*, px, uniform_list, AnyElement, App, Context, ElementId, Entity,
-    FocusHandle, Focusable, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
-    UniformListScrollHandle, Window,
+    FocusHandle, Focusable, IntoElement, KeyBinding, ParentElement, Render, ScrollHandle,
+    SharedString, Styled, UniformListScrollHandle, Window,
 };
 
 use crate::assets::Icon;
-use crate::library::model::{ArtSize, Detail, LibraryModel, Load, PlayRequest, Tab};
-use crate::library::source::TrackRow;
+use crate::library::model::{
+    ArtSize, ArtistDetail, ArtistTarget, Detail, LibraryModel, Load, PlayRequest, Tab, Target,
+};
+use crate::library::source::{ArtistContent, TrackRow};
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
+use crate::ui::card::{grid, heading, Card};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::tooltip::Tooltip;
@@ -81,6 +86,8 @@ const ALBUM_COLUMN_MIN_WINDOW: f32 = 1000.0;
 const PLAYING_BAR: f32 = 3.0;
 /// Skeleton rows drawn while loading: enough to fill a tall window.
 const SKELETON_ROWS: usize = 12;
+/// An artist page opens on its top songs, so its skeleton is about that many rows.
+const ARTIST_SKELETON_ROWS: usize = 5;
 
 #[derive(Clone)]
 struct Focus {
@@ -130,20 +137,42 @@ impl RowHover {
     }
 }
 
+/// Scroll positions of one open page (kept while another page is open over it).
+struct PageScroll {
+    /// A collection's virtualized track list.
+    list: UniformListScrollHandle,
+    /// An artist page's scrolling column.
+    column: ScrollHandle,
+}
+
+impl PageScroll {
+    fn new() -> Self {
+        Self {
+            list: UniformListScrollHandle::new(),
+            column: ScrollHandle::new(),
+        }
+    }
+}
+
 pub struct LibraryView {
     model: Entity<LibraryModel>,
     player: Entity<PlayerModel>,
     focus: Focus,
     playlists_scroll: UniformListScrollHandle,
     albums_scroll: UniformListScrollHandle,
-    detail_scroll: UniformListScrollHandle,
+    /// One per open page, in the model's stack order.
+    pages: Vec<PageScroll>,
     /// Keyboard selection in the list on screen.
     selected: usize,
-    /// Where the overview's selection was when a collection was opened.
-    overview_selected: usize,
+    /// The selection in each list beneath the page on screen (the overview's first).
+    selected_below: Vec<usize>,
+    /// Tab stops of an artist page's cards, grown to the most cards a page had.
+    card_focus: Vec<FocusHandle>,
     hover: RowHover,
     /// The empty state's action: go find music.
     on_search: Rc<Handler>,
+    /// Back closed the last open page: a page opened from elsewhere (Search) returns there.
+    on_closed: Rc<Handler>,
     /// Rows drawn last frame: with virtualization this stays a screenful however long the list.
     rendered: Range<usize>,
 }
@@ -152,6 +181,7 @@ impl LibraryView {
     pub fn new(
         player: Entity<PlayerModel>,
         on_search: impl Fn(&mut Window, &mut App) + 'static,
+        on_closed: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
         let stop = |cx: &mut Context<Self>, index: isize| {
@@ -178,11 +208,13 @@ impl LibraryView {
             focus,
             playlists_scroll: UniformListScrollHandle::new(),
             albums_scroll: UniformListScrollHandle::new(),
-            detail_scroll: UniformListScrollHandle::new(),
+            pages: Vec::new(),
             selected: 0,
-            overview_selected: 0,
+            selected_below: Vec::new(),
+            card_focus: Vec::new(),
             hover: RowHover::default(),
             on_search: Rc::new(Box::new(on_search)),
+            on_closed: Rc::new(Box::new(on_closed)),
             rendered: 0..0,
         }
     }
@@ -191,7 +223,8 @@ impl LibraryView {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.model.update(cx, |m, cx| m.reset(cx));
         self.selected = 0;
-        self.overview_selected = 0;
+        self.selected_below.clear();
+        self.pages.clear();
         self.hover.clear();
         cx.notify();
     }
@@ -208,34 +241,76 @@ impl LibraryView {
         self.selected
     }
 
-    /// Back to the Playlists/Albums lists (also what clicking Library in the nav does).
-    pub fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.read(cx).detail().is_some() {
-            self.back(window, cx);
+    /// Closes every open page without moving focus (the host is leaving the page).
+    pub fn close_all_pages(&mut self, cx: &mut Context<Self>) {
+        if self.model.read(cx).depth() == 0 {
+            return;
         }
+        self.model.update(cx, |m, cx| m.close_all(cx));
+        self.selected = self.selected_below.first().copied().unwrap_or(0);
+        self.selected_below.clear();
+        self.pages.clear();
+        self.hover.clear();
+        cx.notify();
+    }
+
+    /// Back to the Playlists/Albums lists, closing every open page (also what clicking Library
+    /// in the nav does). Does not tell the host: it is the host asking.
+    pub fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.read(cx).depth() == 0 {
+            return;
+        }
+        self.model.update(cx, |m, cx| m.close_all(cx));
+        self.selected = self.selected_below.first().copied().unwrap_or(0);
+        self.selected_below.clear();
+        self.pages.clear();
+        self.hover.clear();
+        window.focus(&self.focus.list, cx);
+        cx.notify();
     }
 
     // ---- navigation ----------------------------------------------------------------------
 
     pub fn open(&mut self, collection: Collection, window: &mut Window, cx: &mut Context<Self>) {
-        self.overview_selected = self.selected;
+        self.open_target(Target::Collection(collection), window, cx);
+    }
+
+    pub fn open_artist(
+        &mut self,
+        artist: ArtistTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_target(Target::Artist(artist), window, cx);
+    }
+
+    /// Opens an album, playlist or artist over whatever is showing.
+    pub fn open_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_below.push(self.selected);
         self.selected = 0;
-        self.detail_scroll = UniformListScrollHandle::new();
+        self.pages.push(PageScroll::new());
         self.hover.clear();
-        self.model.update(cx, |m, cx| m.open(collection, cx));
+        self.model.update(cx, |m, cx| m.open_target(target, cx));
         window.focus(&self.focus.list, cx);
         cx.notify();
     }
 
+    /// Closes the page on screen, back to the one beneath it or the lists. Closing the last
+    /// one tells the host.
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.read(cx).detail().is_none() {
+        if self.model.read(cx).depth() == 0 {
             return;
         }
-        self.model.update(cx, |m, cx| m.close(cx));
-        self.selected = self.overview_selected;
+        let left = self.model.update(cx, |m, cx| m.close(cx));
+        self.pages.pop();
+        self.selected = self.selected_below.pop().unwrap_or(0);
         self.hover.clear();
         window.focus(&self.focus.list, cx);
         cx.notify();
+        if left == 0 {
+            let on_closed = self.on_closed.clone();
+            on_closed(window, cx);
+        }
     }
 
     fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
@@ -249,7 +324,9 @@ impl LibraryView {
     fn scroll_handle(&self, cx: &App) -> &UniformListScrollHandle {
         let model = self.model.read(cx);
         if model.detail().is_some() {
-            &self.detail_scroll
+            self.pages
+                .last()
+                .map_or(&self.playlists_scroll, |page| &page.list)
         } else if model.tab() == Tab::Playlists {
             &self.playlists_scroll
         } else {
@@ -260,6 +337,9 @@ impl LibraryView {
     /// Rows the keyboard can select in the list on screen.
     fn selectable_rows(&self, cx: &App) -> usize {
         let model = self.model.read(cx);
+        if let Some(artist) = model.artist() {
+            return artist.content().map_or(0, |c| c.top_songs.len());
+        }
         match model.detail() {
             Some(d) => d.listing.items().len(),
             None => model.list(model.tab()).len(),
@@ -272,30 +352,50 @@ impl LibraryView {
             return;
         }
         self.selected = target.clamp(0, rows as isize - 1) as usize;
-        self.scroll_handle(cx)
-            .scroll_to_item(self.selected, gpui::ScrollStrategy::Nearest);
+        if self.model.read(cx).artist().is_some() {
+            // The top songs follow the artist page's "Top songs" heading (child 0).
+            if let Some(page) = self.pages.last() {
+                page.column.scroll_to_item(self.selected + 1);
+            }
+        } else {
+            self.scroll_handle(cx)
+                .scroll_to_item(self.selected, gpui::ScrollStrategy::Nearest);
+        }
         cx.notify();
     }
 
     fn page_rows(&self, cx: &App) -> isize {
-        let row = if self.model.read(cx).detail().is_some() {
+        let model = self.model.read(cx);
+        let row = if model.depth() > 0 {
             TRACK_ROW
         } else {
             COLLECTION_ROW
         };
-        let height = self
-            .scroll_handle(cx)
-            .0
-            .borrow()
-            .base_handle
-            .bounds()
-            .size
-            .height;
+        let height = if model.artist().is_some() {
+            self.pages
+                .last()
+                .map_or(px(0.0), |p| p.column.bounds().size.height)
+        } else {
+            self.scroll_handle(cx)
+                .0
+                .borrow()
+                .base_handle
+                .bounds()
+                .size
+                .height
+        };
         ((f32::from(height) / row) as isize - 1).max(1)
     }
 
     fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let model = self.model.read(cx);
+        if model.artist().is_some() {
+            if index < self.selectable_rows(cx) {
+                self.model
+                    .update(cx, |m, cx| m.request_play(PlayRequest::row(index), cx));
+            }
+            return;
+        }
         match model.detail() {
             Some(d) => {
                 if index < d.listing.items().len() {
@@ -640,33 +740,14 @@ impl LibraryView {
         let handle = self.scroll_handle(cx).clone();
         // The element the list sits in has to be tall (a bounded flex child), so the list only
         // draws the rows in view.
-        div()
+        let list = div()
             .id(id)
             .key_context(LIST_CONTEXT)
             .track_focus(&self.focus.list)
             .role(gpui::Role::List)
             .size_full()
-            .min_h_0()
-            .on_action(cx.listener(|this, _: &ListUp, _, cx| {
-                this.move_selection(this.selected as isize - 1, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ListDown, _, cx| {
-                this.move_selection(this.selected as isize + 1, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ListPageUp, _, cx| {
-                let step = this.page_rows(cx);
-                this.move_selection(this.selected as isize - step, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ListPageDown, _, cx| {
-                let step = this.page_rows(cx);
-                this.move_selection(this.selected as isize + step, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ListFirst, _, cx| this.move_selection(0, cx)))
-            .on_action(cx.listener(|this, _: &ListLast, _, cx| this.move_selection(isize::MAX, cx)))
-            .on_action(cx.listener(|this, _: &ListActivate, window, cx| {
-                let i = this.selected;
-                this.activate(i, window, cx)
-            }))
+            .min_h_0();
+        Self::list_actions(list, cx)
             .child(
                 uniform_list(
                     id,
@@ -679,6 +760,33 @@ impl LibraryView {
                 .size_full(),
             )
             .into_any_element()
+    }
+
+    /// Arrow, paging, Home/End and Enter handling, for whichever list holds focus.
+    fn list_actions(
+        el: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        el.on_action(cx.listener(|this, _: &ListUp, _, cx| {
+            this.move_selection(this.selected as isize - 1, cx)
+        }))
+        .on_action(cx.listener(|this, _: &ListDown, _, cx| {
+            this.move_selection(this.selected as isize + 1, cx)
+        }))
+        .on_action(cx.listener(|this, _: &ListPageUp, _, cx| {
+            let step = this.page_rows(cx);
+            this.move_selection(this.selected as isize - step, cx)
+        }))
+        .on_action(cx.listener(|this, _: &ListPageDown, _, cx| {
+            let step = this.page_rows(cx);
+            this.move_selection(this.selected as isize + step, cx)
+        }))
+        .on_action(cx.listener(|this, _: &ListFirst, _, cx| this.move_selection(0, cx)))
+        .on_action(cx.listener(|this, _: &ListLast, _, cx| this.move_selection(isize::MAX, cx)))
+        .on_action(cx.listener(|this, _: &ListActivate, window, cx| {
+            let i = this.selected;
+            this.activate(i, window, cx)
+        }))
     }
 
     fn render_rows(
@@ -866,6 +974,11 @@ impl LibraryView {
             cx,
         );
         let can_play = items > 0;
+        // The count shows once every page has arrived; until then its line is held open, so the
+        // header does not shift.
+        let count = (!loading && failure.is_none())
+            .then(|| track_count_text(collection.subtitle.as_deref(), items))
+            .flatten();
         let play_busy = pending.is_some_and(|p| p.shuffle != Some(true));
         let shuffle_busy = pending.is_some_and(|p| p.shuffle == Some(true));
         let model = self.model.clone();
@@ -916,6 +1029,13 @@ impl LibraryView {
                             cx,
                         )
                     }))
+                    .child(
+                        style::text_style(div(), typography::BODY, cx)
+                            .id("detail-count")
+                            .text_color(color::text_tertiary())
+                            // A non-breaking space keeps the line's height while it is empty.
+                            .child(count.unwrap_or_else(|| "\u{a0}".into())),
+                    )
                     .child(
                         div()
                             .flex()
@@ -988,6 +1108,264 @@ impl LibraryView {
             .into_any_element()
     }
 
+    // ---- artist --------------------------------------------------------------------------
+
+    fn render_artist(
+        &mut self,
+        accent: Accent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let animations = !cx.reduce_motion();
+        let (name, thumbnail, state, pending) = {
+            let a: &ArtistDetail = self.model.read(cx).artist().expect("artist page is open");
+            (
+                SharedString::from(a.name().to_owned()),
+                a.thumbnail().map(str::to_owned),
+                a.state.clone(),
+                a.pending,
+            )
+        };
+        let (can_play, loading) = match &state {
+            Load::Idle | Load::Loading => (false, true),
+            Load::Ready(c) => (!c.top_songs.is_empty(), false),
+            Load::Failed(_) => (false, false),
+        };
+        let art = self.art_tile(
+            thumbnail.as_deref(),
+            ArtSize::Header,
+            HEADER_ART,
+            Icon::MusicNote,
+            color::text_tertiary(),
+            cx,
+        );
+        let play_busy = pending.is_some_and(|p| p.shuffle != Some(true));
+        let shuffle_busy = pending.is_some_and(|p| p.shuffle == Some(true));
+        let model = self.model.clone();
+        let model2 = self.model.clone();
+        let this = cx.entity();
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap(px(spacing::S4))
+            .child(
+                IconButton::new(
+                    "library-back",
+                    &self.focus.back,
+                    Icon::ArrowLeft,
+                    "Back",
+                    accent,
+                )
+                .on_click({
+                    let this = this.clone();
+                    move |window, cx| this.update(cx, |t, cx| t.back(window, cx))
+                }),
+            )
+            .child(art)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(spacing::S1))
+                    .child(Self::line(
+                        "artist-name",
+                        name,
+                        typography::PAGE_TITLE,
+                        color::text_primary(),
+                        false,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(spacing::S2))
+                            .mt(px(spacing::S2))
+                            .child(
+                                TextButton::new("library-play", &self.focus.play, "Play", accent)
+                                    .primary()
+                                    .enabled(can_play || loading)
+                                    .busy(play_busy)
+                                    .on_click(move |_, cx| {
+                                        model.update(cx, |m, cx| {
+                                            m.request_play(PlayRequest::PLAY_ALL, cx)
+                                        })
+                                    }),
+                            )
+                            .child(
+                                TextButton::new(
+                                    "library-shuffle",
+                                    &self.focus.shuffle,
+                                    "Shuffle",
+                                    accent,
+                                )
+                                .enabled(can_play || loading)
+                                .busy(shuffle_busy)
+                                .on_click(move |_, cx| {
+                                    model2.update(cx, |m, cx| {
+                                        m.request_play(PlayRequest::SHUFFLE, cx)
+                                    })
+                                }),
+                            ),
+                    ),
+            );
+
+        let body: AnyElement = match state {
+            Load::Idle | Load::Loading => {
+                Self::skeleton_rows(ARTIST_SKELETON_ROWS, TRACK_ROW, TRACK_ART, animations)
+            }
+            Load::Failed(failure) => {
+                let model = self.model.clone();
+                self.notice(
+                    Self::failure_line(failure, "this artist"),
+                    true,
+                    "Retry",
+                    accent,
+                    move |_, cx| model.update(cx, |m, cx| m.reload_artist(cx)),
+                    cx,
+                )
+            }
+            Load::Ready(content) if content.is_empty() => self.notice(
+                "Nothing to show",
+                false,
+                "Back",
+                accent,
+                move |window, cx| this.update(cx, |t, cx| t.back(window, cx)),
+                cx,
+            ),
+            Load::Ready(content) => self.artist_columns(&content, accent, window, cx),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_h_0()
+            .child(header)
+            .child(div().flex_1().min_h_0().mt(px(spacing::S4)).child(body))
+            .into_any_element()
+    }
+
+    /// The artist's scrolling body: top songs as rows, then each album/single/playlist section
+    /// as a wrapping grid of cards.
+    fn artist_columns(
+        &mut self,
+        content: &ArtistContent,
+        accent: Accent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let animations = !cx.reduce_motion();
+        let cards: usize = content.sections.iter().map(|s| s.items.len()).sum();
+        while self.card_focus.len() < cards {
+            self.card_focus
+                .push(cx.focus_handle().tab_index(10).tab_stop(true));
+        }
+        let column = self
+            .pages
+            .last()
+            .map(|p| p.column.clone())
+            .unwrap_or_default();
+
+        // Direct children of the scroll container are what keyboard selection scrolls to: the
+        // "Top songs" heading is child 0, then one child per song.
+        let mut children: Vec<AnyElement> = Vec::new();
+        let songs = content.top_songs.len();
+        if songs > 0 {
+            children.push(heading("Top songs", false, cx));
+            let list_focused = keyboard_focused(&self.focus.list, window);
+            self.hover.prune();
+            let mut moving = false;
+            for ix in 0..songs {
+                let frame = RowFrame {
+                    ix,
+                    level: self.hover.level(ix, &mut moving),
+                    selected: list_focused && ix == self.selected,
+                    accent,
+                    animations,
+                };
+                children.push(self.track_row(frame, window, cx));
+            }
+            if moving {
+                window.request_animation_frame();
+            }
+            self.rendered = 0..songs;
+        }
+
+        let this = cx.entity();
+        let mut stop = 0;
+        for (section_ix, section) in content.sections.iter().enumerate() {
+            children.push(heading(section.title.clone(), !children.is_empty(), cx));
+            let mut cards = Vec::with_capacity(section.items.len());
+            for (ix, item) in section.items.iter().enumerate() {
+                if let Some(url) = item.thumbnail.as_deref() {
+                    if !self.model.read(cx).art_requested(url, ArtSize::Card) {
+                        let url = url.to_owned();
+                        self.model
+                            .update(cx, |m, cx| m.want_art(&url, ArtSize::Card, cx));
+                    }
+                }
+                let thumb = self
+                    .model
+                    .read(cx)
+                    .thumb(item.thumbnail.as_deref(), ArtSize::Card);
+                let (this, item_open) = (this.clone(), item.clone());
+                cards.push(Card::new(
+                    format!("artist-card-{section_ix}-{ix}"),
+                    item.title.clone(),
+                    item.subtitle.clone().map(Into::into),
+                    thumb,
+                    &self.card_focus[stop],
+                    accent,
+                    move |window, cx| {
+                        this.update(cx, |t, cx| t.open(item_open.clone(), window, cx))
+                    },
+                ));
+                stop += 1;
+            }
+            children.push(grid().children(cards).into_any_element());
+        }
+        if content.skipped > 0 {
+            children.push(
+                style::text_style(div(), typography::BODY, cx)
+                    .mt(px(spacing::S4))
+                    .text_color(color::text_secondary())
+                    .child(if content.skipped == 1 {
+                        SharedString::from("1 item can't be shown")
+                    } else {
+                        format!("{} items can't be shown", content.skipped).into()
+                    })
+                    .into_any_element(),
+            );
+        }
+
+        let list = div()
+            .id("artist-page")
+            .key_context(LIST_CONTEXT)
+            .track_focus(&self.focus.list)
+            .role(gpui::Role::List)
+            .size_full()
+            .min_h_0();
+        Self::list_actions(list, cx)
+            .child(
+                div()
+                    .id("artist-scroll")
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&column)
+                    .pb(px(spacing::S6))
+                    .children(children),
+            )
+            .into_any_element()
+    }
+
     fn track_row(
         &mut self,
         frame: RowFrame,
@@ -1002,14 +1380,21 @@ impl LibraryView {
             Option<LoadFailure>,
             u32,
         ) = {
-            let d = self.model.read(cx).detail().expect("detail is open");
-            (
-                d.listing.items().get(ix).cloned(),
-                d.collection.kind == CollectionKind::Album,
-                d.is_loading(),
-                d.failure(),
-                d.listing.skipped(),
-            )
+            let model = self.model.read(cx);
+            if let Some(artist) = model.artist() {
+                // Top songs: a plain list with no footer.
+                let row = artist.content().and_then(|c| c.top_songs.get(ix).cloned());
+                (row, false, false, None, 0)
+            } else {
+                let d = model.detail().expect("a page is open");
+                (
+                    d.listing.items().get(ix).cloned(),
+                    d.collection.kind == CollectionKind::Album,
+                    d.is_loading(),
+                    d.failure(),
+                    d.listing.skipped(),
+                )
+            }
         };
         let Some(row) = row else {
             return self.track_footer(ix, loading, failure, skipped, frame.accent, cx);
@@ -1205,6 +1590,23 @@ impl LibraryView {
     }
 }
 
+/// "12 songs", for a collection whose own second line does not already say it. `None` for an
+/// empty list.
+fn track_count_text(subtitle: Option<&str>, loaded: usize) -> Option<SharedString> {
+    let says_count = subtitle.is_some_and(|s| {
+        let s = s.to_lowercase();
+        s.contains("song") || s.contains("track")
+    });
+    if loaded == 0 || says_count {
+        return None;
+    }
+    Some(if loaded == 1 {
+        "1 song".into()
+    } else {
+        format!("{loaded} songs").into()
+    })
+}
+
 #[derive(Clone, Copy)]
 enum ListKind {
     Collections,
@@ -1232,8 +1634,19 @@ impl Render for LibraryView {
         if moving {
             window.request_animation_frame();
         }
-        let detail_open = self.model.read(cx).detail().is_some();
-        let page = if detail_open {
+        let (artist_open, detail_open, depth) = {
+            let model = self.model.read(cx);
+            (
+                model.artist().is_some(),
+                model.detail().is_some(),
+                model.depth(),
+            )
+        };
+        // Pages the model opened directly (not through this view) still get scroll state.
+        self.pages.resize_with(depth, PageScroll::new);
+        let page = if artist_open {
+            self.render_artist(accent, window, cx)
+        } else if detail_open {
             self.render_detail(accent, window, cx)
         } else {
             self.render_overview(accent, window, cx)
@@ -1245,5 +1658,26 @@ impl Render for LibraryView {
             .size_full()
             .min_h_0()
             .child(page)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_count_is_ours_only_when_the_second_line_does_not_say_it() {
+        assert_eq!(
+            track_count_text(Some("Neon Arcade • 2024"), 12).as_deref(),
+            Some("12 songs")
+        );
+        assert_eq!(track_count_text(None, 1).as_deref(), Some("1 song"));
+        assert_eq!(track_count_text(Some("Playlist • 3 songs"), 3), None);
+        assert_eq!(track_count_text(Some("Album • 14 tracks"), 14), None);
+        assert_eq!(
+            track_count_text(Some("Someone"), 0),
+            None,
+            "nothing to count"
+        );
     }
 }

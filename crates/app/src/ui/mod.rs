@@ -1,6 +1,7 @@
 pub mod account_page;
 pub mod art_tile;
 pub mod button;
+pub mod card;
 pub mod library;
 pub mod nav;
 pub mod now_playing;
