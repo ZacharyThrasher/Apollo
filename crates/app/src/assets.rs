@@ -51,6 +51,9 @@ icons! {
     QueueFilled => "queue-filled",
     MusicNote => "music-note-regular",
     Warning => "warning-regular",
+    Dismiss => "dismiss-regular",
+    Delete => "delete-regular",
+    ChevronDown => "chevron-down-regular",
     Spinner => "spinner",
 }
 

@@ -1,7 +1,11 @@
+pub mod art_tile;
 pub mod button;
 pub mod nav;
+pub mod now_playing;
 pub mod player_bar;
+pub mod queue_panel;
 pub mod shell;
 pub mod slider;
 pub mod titlebar;
 pub mod tooltip;
+pub mod transport;
