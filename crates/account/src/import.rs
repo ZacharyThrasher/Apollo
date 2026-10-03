@@ -88,7 +88,7 @@ pub fn firefox_profiles(firefox_dir: &Path) -> Vec<FirefoxProfile> {
     let flush = |cur: &mut Option<(String, String, bool, bool)>, out: &mut Vec<FirefoxProfile>| {
         if let Some((name, path, rel, def)) = cur.take() {
             if !path.is_empty() {
-                let p = PathBuf::from(path.replace('/', "\\"));
+                let p = PathBuf::from(native_separators(&path));
                 out.push(FirefoxProfile {
                     name,
                     path: if rel { firefox_dir.join(p) } else { p },
@@ -111,7 +111,7 @@ pub fn firefox_profiles(firefox_dir: &Path) -> Vec<FirefoxProfile> {
         }
         let Some((k, v)) = line.split_once('=') else { continue };
         if in_install && k == "Default" {
-            install_default = Some(v.replace('/', "\\"));
+            install_default = Some(native_separators(v));
         }
         if let Some(c) = cur.as_mut() {
             match k {
@@ -207,6 +207,11 @@ pub fn firefox_profile_with_temp(profile_dir: &Path, tmp_base: &Path) -> Result<
     })();
     let _ = fs::remove_dir_all(tmp.path());
     result
+}
+
+/// `profiles.ini` always uses `/`; paths are built with the platform's separator.
+fn native_separators(p: &str) -> String {
+    p.replace('/', std::path::MAIN_SEPARATOR_STR)
 }
 
 #[cfg(test)]
