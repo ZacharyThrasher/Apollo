@@ -6,6 +6,8 @@ pub mod argv;
 pub mod config;
 pub mod parse;
 #[cfg(windows)]
+pub mod diag;
+#[cfg(windows)]
 mod resolver;
 #[cfg(windows)]
 mod runner;

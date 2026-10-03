@@ -243,6 +243,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "apollo-m2-probe"
+version = "0.0.0"
+dependencies = [
+ "apollo-account",
+ "apollo-domain",
+ "apollo-media",
+ "apollo-resolver",
+ "apollo-runtime",
+ "apollo-services-common",
+]
+
+[[package]]
 name = "apollo-media"
 version = "0.0.0"
 dependencies = [
