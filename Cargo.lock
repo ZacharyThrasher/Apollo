@@ -206,6 +206,7 @@ dependencies = [
  "apollo-account",
  "apollo-domain",
  "apollo-media",
+ "apollo-provider",
  "apollo-resolver",
  "apollo-runtime",
  "apollo-services-common",
@@ -216,6 +217,7 @@ dependencies = [
  "image",
  "tempfile",
  "tokio",
+ "unicode-segmentation",
  "ureq",
 ]
 

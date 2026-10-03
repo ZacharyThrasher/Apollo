@@ -193,6 +193,56 @@ impl CookieJar {
         }
     }
 
+    /// What a client that sent this jar's cookies for `host` changed, from the `Cookie:` header
+    /// it now holds: a jar of just the changed cookies, ready for [`Self::merge_rotation`].
+    ///
+    /// A changed value keeps the original cookie's domain, path and flags (the header carries
+    /// none). A name the jar does not have for `host` is new and becomes a `.youtube.com`
+    /// session-scope cookie. Names missing from the header are ignored: dropping a cookie is
+    /// never a rotation. `None` when nothing changed.
+    pub fn rotated_from_header(&self, host: &str, header: &str) -> Option<CookieJar> {
+        let mut changed = Vec::new();
+        for (name, value) in header.split(';').filter_map(|p| p.split_once('=')) {
+            let (name, value) = (name.trim(), value.trim());
+            if name.is_empty() || value.is_empty() {
+                continue;
+            }
+            let known: Vec<&Cookie> = self
+                .cookies
+                .iter()
+                .filter(|c| c.name == name && crate::identity::domain_matches(&c.domain, host))
+                .collect();
+            if known.is_empty() {
+                changed.push(Cookie {
+                    name: name.to_owned(),
+                    value: value.to_owned(),
+                    domain: ".youtube.com".into(),
+                    path: "/".into(),
+                    secure: true,
+                    http_only: false,
+                    expires_unix: None,
+                });
+            } else {
+                for c in known.into_iter().filter(|c| c.value != value) {
+                    // `Cookie` zeroizes on drop, so it cannot be built with `..` update syntax.
+                    changed.push(Cookie {
+                        name: c.name.clone(),
+                        value: value.to_owned(),
+                        domain: c.domain.clone(),
+                        path: c.path.clone(),
+                        secure: c.secure,
+                        http_only: c.http_only,
+                        expires_unix: c.expires_unix,
+                    });
+                }
+            }
+        }
+        (!changed.is_empty()).then_some(CookieJar {
+            cookies: changed,
+            ephemeral_seed: false,
+        })
+    }
+
     /// Merge cookies a helper rewrote (rotation). Only in-scope cookies already known by
     /// (name, domain, path) are updated; new in-scope ones are added; nothing is ever removed
     /// (a helper that dropped a cookie must not log us out).
@@ -225,6 +275,52 @@ mod tests {
             http_only: true,
             expires_unix: Some(4_102_444_800),
         }
+    }
+
+    #[test]
+    fn a_rotated_header_gives_back_only_what_changed_with_its_original_scope() {
+        let jar = CookieJar {
+            cookies: vec![
+                c("__Secure-3PSIDTS", ".youtube.com", "old"),
+                c("SAPISID", ".youtube.com", "same"),
+                c("SID", ".google.com", "other-host"),
+            ],
+            ephemeral_seed: false,
+        };
+        let header = "__Secure-3PSIDTS=new; SAPISID=same; SID=ignored; SIDCC=fresh";
+        let r = jar.rotated_from_header("music.youtube.com", header).unwrap();
+        let by_name = |n: &str| r.cookies.iter().find(|c| c.name == n);
+        assert_eq!(r.cookies.len(), 3, "unchanged cookies stay out");
+        let rotated = by_name("__Secure-3PSIDTS").unwrap();
+        assert_eq!(rotated.value, "new");
+        assert_eq!(rotated.domain, ".youtube.com");
+        assert!(rotated.http_only, "flags come from the original, not the header");
+        assert_eq!(by_name("SIDCC").unwrap().domain, ".youtube.com", "a new name is added");
+        // `SID` is only known for google.com, so the youtube header's `SID` is a new cookie.
+        assert_eq!(by_name("SID").unwrap().domain, ".youtube.com");
+        // Merging the result leaves the google.com cookie alone.
+        let mut merged = jar.clone();
+        merged.merge_rotation(&r);
+        assert_eq!(merged.get("__Secure-3PSIDTS").unwrap().value, "new");
+        assert!(merged
+            .cookies
+            .iter()
+            .any(|c| c.name == "SID" && c.domain == ".google.com" && c.value == "other-host"));
+        assert!(merged.get("SIDCC").is_some());
+    }
+
+    #[test]
+    fn an_unchanged_or_shorter_header_rotates_nothing() {
+        let jar = CookieJar {
+            cookies: vec![c("A", ".youtube.com", "1"), c("B", ".youtube.com", "2")],
+            ephemeral_seed: false,
+        };
+        assert!(jar.rotated_from_header("music.youtube.com", "A=1; B=2").is_none());
+        assert!(
+            jar.rotated_from_header("music.youtube.com", "A=1").is_none(),
+            "a dropped cookie is not a rotation"
+        );
+        assert!(jar.rotated_from_header("music.youtube.com", "").is_none());
     }
 
     #[test]

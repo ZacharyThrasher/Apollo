@@ -156,7 +156,7 @@ pub fn authorization_header(jar: &CookieJar, now_unix: u64) -> Option<String> {
 /// Does a cookie with this `domain` attribute get sent to `host`? Standard domain matching: the
 /// host equals the domain or is a subdomain of it. A `.google.com` cookie is NOT sent to
 /// music.youtube.com.
-fn domain_matches(cookie_domain: &str, host: &str) -> bool {
+pub(crate) fn domain_matches(cookie_domain: &str, host: &str) -> bool {
     let d = cookie_domain.trim_start_matches('.').to_ascii_lowercase();
     let h = host.to_ascii_lowercase();
     h == d || h.ends_with(&format!(".{d}"))
@@ -166,7 +166,7 @@ fn domain_matches(cookie_domain: &str, host: &str) -> bool {
 /// cookies. The jar legitimately holds the same name under several domains (for example
 /// SAPISID under both .google.com and .youtube.com); sending them all makes the service pick
 /// the wrong ones and report a logged-out session.
-fn cookie_header_for(jar: &CookieJar, host: &str, now_unix: u64) -> String {
+pub fn cookie_header_for(jar: &CookieJar, host: &str, now_unix: u64) -> String {
     jar.cookies
         .iter()
         .filter(|c| domain_matches(&c.domain, host))

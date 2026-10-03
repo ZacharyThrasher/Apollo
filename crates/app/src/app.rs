@@ -9,7 +9,9 @@ use gpui::{
 
 use crate::backend::{channel_sink, Mode};
 use crate::player::PlayerModel;
+use crate::search::Unavailable;
 use crate::settings::{SqliteVolume as SettingsVolume, VolumeStore};
+use crate::thumbs::NoThumbs;
 use crate::ui::shell::{self, Quit, Shell};
 
 /// Smallest window that still fits the player bar's three columns at their minimum widths.
@@ -28,7 +30,7 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     let player = cx.new(|_| PlayerModel::new());
     player.update(cx, |m, _| m.set_volume_store(volume_store.clone()));
     let window = open_window(cx, player.clone());
-    start_services(cx, mode, player.clone(), volume_store);
+    start_services(cx, mode, player.clone(), window, volume_store);
 
     cx.on_app_quit(move |cx| {
         player.update(cx, |m, _| m.shutdown());
@@ -69,6 +71,7 @@ fn start_services(
     cx: &mut App,
     mode: Mode,
     player: gpui::Entity<PlayerModel>,
+    window: WindowHandle<Shell>,
     volume_store: Option<Arc<dyn VolumeStore>>,
 ) {
     let (sink, mut rx) = channel_sink();
@@ -83,13 +86,19 @@ fn start_services(
             .await;
         match prepared {
             Ok(prepared) => {
+                let (search, thumbs) = (prepared.search.clone(), prepared.thumbs.clone());
                 let _ = weak.update(cx, |m, cx| {
                     m.restore_volume(saved_volume);
                     m.install(prepared, cx);
                 });
+                let _ = window.update(cx, |shell, _, cx| shell.install_search(search, thumbs, cx));
             }
             Err(err) => {
                 let _ = weak.update(cx, |m, cx| m.fail(&err, cx));
+                // Search shows its own short error instead of waiting for a backend that is not coming.
+                let _ = window.update(cx, |shell, _, cx| {
+                    shell.install_search(Arc::new(Unavailable), Arc::new(NoThumbs), cx)
+                });
                 return;
             }
         }

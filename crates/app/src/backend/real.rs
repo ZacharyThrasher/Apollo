@@ -30,9 +30,11 @@ use apollo_resolver::diag::list_liked_music;
 use apollo_resolver::{ResolverConfig, YtDlpResolver};
 use apollo_services_common::{EventSink, LeaseStore};
 
+use super::real_search::AccountSearch;
 use super::{LibraryTrack, Ports, Prepared};
 use crate::art::{ArtSource, DecodedArt};
 use crate::player::DEFAULT_VOLUME;
+use crate::thumbs::ThumbSource;
 
 /// Windows Credential Manager service name for the app's vault key.
 const VAULT_SERVICE: &str = "Apollo";
@@ -152,6 +154,9 @@ pub fn prepare(opts: Options, sink: EventSink) -> Result<Prepared, String> {
         return Err("Liked Music has no playable tracks".into());
     }
 
+    let search = AccountSearch::new(account.clone())?;
+    let art = Arc::new(HttpArt::new(thumbs));
+
     Ok(Prepared {
         label: "real services",
         ports: Ports {
@@ -159,7 +164,9 @@ pub fn prepare(opts: Options, sink: EventSink) -> Result<Prepared, String> {
             engine: Box::new(engine),
         },
         queue,
-        art: Arc::new(HttpArt::new(thumbs)),
+        art: art.clone(),
+        search: Arc::new(search),
+        thumbs: art,
     })
 }
 
@@ -280,5 +287,12 @@ impl ArtSource for HttpArt {
             .get(video_id)
             .and_then(|url| self.get(url))
             .or_else(|| self.get(&format!("https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")))
+    }
+}
+
+/// List rows ask by URL alone; the same plain GET serves them.
+impl ThumbSource for HttpArt {
+    fn fetch(&self, url: &str) -> Option<DecodedArt> {
+        self.get(url)
     }
 }

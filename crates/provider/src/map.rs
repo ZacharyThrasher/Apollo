@@ -24,7 +24,7 @@ impl ListItem for ListedTrack {
 }
 
 /// `"3:47"` -> 227 s, `"1:02:03"` -> 3723 s. Anything else is unknown, never zero.
-fn parse_duration(text: &str) -> Option<Duration> {
+pub(crate) fn parse_duration(text: &str) -> Option<Duration> {
     let mut secs: u64 = 0;
     let mut parts = 0;
     for part in text.trim().split(':') {

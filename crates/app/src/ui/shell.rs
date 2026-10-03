@@ -1,6 +1,7 @@
 //! The window's root view: title bar, nav rail, page and player bar.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use apollo_theme::tokens::{spacing, typography};
 use gpui::{
@@ -9,9 +10,12 @@ use gpui::{
 };
 
 use crate::player::PlayerModel;
+use crate::search::{SearchModel, SearchSource};
 use crate::style::{self, color};
+use crate::thumbs::{ThumbSource, ThumbStore};
 use crate::ui::nav::{NavRail, Route};
 use crate::ui::player_bar::{BarFocus, PlayerBar};
+use crate::ui::search_page::{self, SearchPage};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
 use crate::ui::titlebar::TitleBar;
 
@@ -23,6 +27,7 @@ actions!(
         PreviousTrack,
         FocusNextControl,
         FocusPreviousControl,
+        FocusSearch,
         Quit
     ]
 );
@@ -38,9 +43,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-left", PreviousTrack, Some(KEY_CONTEXT)),
         KeyBinding::new("tab", FocusNextControl, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-tab", FocusPreviousControl, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-k", FocusSearch, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-f", FocusSearch, Some(KEY_CONTEXT)),
         KeyBinding::new("left", StepBack, Some(crate::ui::slider::KEY_CONTEXT)),
         KeyBinding::new("right", StepForward, Some(crate::ui::slider::KEY_CONTEXT)),
     ]);
+    crate::ui::text_field::bind_keys(cx);
+    search_page::bind_keys(cx);
 }
 
 pub struct Shell {
@@ -50,6 +59,9 @@ pub struct Shell {
     nav_toggled: bool,
     queue_open: bool,
     root_focus: FocusHandle,
+    search: Entity<SearchPage>,
+    search_model: Entity<SearchModel>,
+    thumbs: Entity<ThumbStore>,
     nav_toggle: FocusHandle,
     nav_items: [FocusHandle; 3],
     bar: BarFocus,
@@ -82,13 +94,28 @@ impl Shell {
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&progress, |_, _, cx| cx.notify()).detach();
         cx.observe(&volume, |_, _, cx| cx.notify()).detach();
+        let root_focus = cx.focus_handle();
+        let search_model = cx.new(|_| SearchModel::new());
+        let thumbs = cx.new(|_| ThumbStore::new());
+        let search = cx.new(|cx| {
+            SearchPage::new(
+                player.clone(),
+                search_model.clone(),
+                thumbs.clone(),
+                root_focus.clone(),
+                cx,
+            )
+        });
         Self {
             player,
             route: Route::Home,
             nav_expanded: false,
             nav_toggled: false,
             queue_open: false,
-            root_focus: cx.focus_handle(),
+            root_focus,
+            search,
+            search_model,
+            thumbs,
             nav_toggle,
             nav_items,
             bar,
@@ -107,6 +134,33 @@ impl Shell {
 
     pub fn queue_open(&self) -> bool {
         self.queue_open
+    }
+
+    /// The backend is ready: search and artwork start answering (a query typed earlier goes out).
+    pub fn install_search(
+        &mut self,
+        search: Arc<dyn SearchSource>,
+        thumbs: Arc<dyn ThumbSource>,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_model.update(cx, |m, cx| m.install(search, cx));
+        self.thumbs.update(cx, |t, cx| t.install(thumbs, cx));
+    }
+
+    pub fn search_page(&self) -> &Entity<SearchPage> {
+        &self.search
+    }
+
+    pub fn search_model(&self) -> &Entity<SearchModel> {
+        &self.search_model
+    }
+
+    /// Show Search with the caret in its field.
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.route = Route::Search;
+        let field = self.search.read(cx).field().clone();
+        crate::ui::text_field::focus(&field, window, cx);
+        cx.notify();
     }
 
     /// Put keyboard focus on the root so shortcuts work before anything is clicked.
@@ -150,15 +204,19 @@ impl Render for Shell {
         })
         .on_route({
             let shell = shell.clone();
-            move |route, _, cx| {
+            move |route, window, cx| {
                 shell.update(cx, |s, cx| {
-                    s.route = route;
-                    cx.notify();
+                    if route == Route::Search {
+                        s.open_search(window, cx);
+                    } else {
+                        s.route = route;
+                        cx.notify();
+                    }
                 });
             }
         });
 
-        let page = div()
+        let generic_page = div()
             .id("page")
             .flex_1()
             .min_w_0()
@@ -171,6 +229,11 @@ impl Render for Shell {
                     .text_color(color::text_primary())
                     .child(self.route.title()),
             );
+
+        let page = match self.route {
+            Route::Search => self.search.clone().into_any_element(),
+            _ => generic_page.into_any_element(),
+        };
 
         let bar = PlayerBar {
             player: self.player.clone(),
@@ -203,6 +266,9 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|_, _: &FocusNextControl, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &FocusPreviousControl, window, cx| window.focus_prev(cx)))
+            .on_action(
+                cx.listener(|this, _: &FocusSearch, window, cx| this.open_search(window, cx)),
+            )
             .size_full()
             .flex()
             .flex_col()

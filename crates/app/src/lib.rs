@@ -8,6 +8,8 @@ pub mod backend;
 pub mod motion;
 pub mod platform;
 pub mod player;
+pub mod search;
 pub mod settings;
 pub mod style;
+pub mod thumbs;
 pub mod ui;

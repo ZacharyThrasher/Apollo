@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use apollo_domain::model::Track;
 use apollo_domain::playback::{Event, Failure, Intent, Phase};
 use apollo_domain::queue::Repeat;
 use apollo_runtime::Driver;
@@ -165,6 +166,27 @@ impl PlayerModel {
 
     pub fn retry(&mut self, cx: &mut Context<Self>) {
         self.handle(Event::Play, cx);
+    }
+
+    /// Play `track` now and carry on with the existing queue after it: the track goes in front of
+    /// the up-next list and playback moves to it. Nothing already queued is lost.
+    pub fn play_now(&mut self, track: Track, cx: &mut Context<Self>) {
+        if let Some(d) = self.driver.as_mut() {
+            d.edit_queue(|q| {
+                q.play_next(vec![track]);
+            });
+        }
+        self.handle(Event::Next, cx);
+    }
+
+    /// Add `track` to the end of the up-next list, ahead of the rest of the context.
+    pub fn add_to_queue(&mut self, track: Track, cx: &mut Context<Self>) {
+        if let Some(d) = self.driver.as_mut() {
+            d.edit_queue(|q| {
+                q.add_to_queue(vec![track]);
+            });
+        }
+        self.sync(cx);
     }
 
     pub fn seek(&mut self, position_ms: u64, cx: &mut Context<Self>) {

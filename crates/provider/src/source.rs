@@ -9,6 +9,7 @@ use crate::map::{
     account_validation, classify, page_from_album, page_from_continuation, page_from_playlist,
     ListedTrack,
 };
+use crate::search::{search_results, SearchResults};
 
 /// Network-backed metadata source. Every call is authenticated: there is no guest mode, and a
 /// rejected session is reported to the caller instead of being retried or healed here.
@@ -19,6 +20,22 @@ pub struct InnerTubeSource {
 }
 
 impl InnerTubeSource {
+    /// A signed-in source from the cookie header for `music.youtube.com` and, for a non-default
+    /// channel, its delegation id. The cookie is a credential: it is never logged here.
+    pub fn signed_in(
+        cookie_header: String,
+        data_sync_id: Option<String>,
+    ) -> Result<Self, innertube::Error> {
+        Self::new(
+            Session {
+                cookie: Some(cookie_header),
+                data_sync_id,
+                ..Session::default()
+            },
+            None,
+        )
+    }
+
     pub fn new(session: Session, proxy: Option<&str>) -> Result<Self, innertube::Error> {
         let client = Clients::bundled()
             .get(METADATA_CLIENT)
@@ -44,6 +61,13 @@ impl InnerTubeSource {
 
     pub fn cookie(&self) -> Option<String> {
         self.tube.cookie()
+    }
+
+    /// Point the session at a different cookie header (the account's jar changed) and
+    /// delegation id, keeping the connection pool.
+    pub fn set_session(&self, cookie_header: String, data_sync_id: Option<String>) {
+        self.tube.set_cookie(Some(cookie_header));
+        self.tube.set_data_sync_id(data_sync_id);
     }
 
     /// First page of a playlist (`VL…`) or any page that lists tracks.
@@ -72,6 +96,38 @@ impl InnerTubeSource {
             .await
             .map_err(|e| classify(&e))?;
         Ok(page_from_continuation(&page))
+    }
+
+    /// Unfiltered search, grouped by kind. Carries the account.
+    ///
+    /// Checked against the live service (2026-10-03): an anonymous search answers a different
+    /// mix (videos, episodes, channels, no albums) and an anonymous song or album search answers
+    /// "No results", so a usable search needs the session. The service writes a signed-in search
+    /// to the account's search history, which is why callers debounce typing and skip very
+    /// short queries. Rows that came back but could not be read, with nothing readable beside
+    /// them, are a `Parse` failure, not an empty result.
+    pub async fn search(&self, query: &str) -> Result<SearchResults, LoadFailure> {
+        let parsed = self
+            .tube
+            .search_all(&self.client, query, true)
+            .await
+            .map_err(|e| classify(&e))?;
+        let results = search_results(&parsed);
+        if results.is_empty() && results.skipped > 0 {
+            return Err(LoadFailure::Parse);
+        }
+        Ok(results)
+    }
+
+    /// Best-effort `visitorData`, which the service expects alongside the cookie. A failure
+    /// leaves the session without one; requests then report whatever the service says about it.
+    pub async fn bootstrap_visitor_data(&self) {
+        if self.tube.visitor_data().is_some() {
+            return;
+        }
+        if let Ok(vd) = self.tube.fetch_visitor_data().await {
+            self.tube.set_visitor_data(Some(vd));
+        }
     }
 
     /// The account's own validation: the gate for playback access. Resolver success proves

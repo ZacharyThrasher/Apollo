@@ -1,7 +1,10 @@
 pub mod button;
 pub mod nav;
 pub mod player_bar;
+pub mod search_page;
 pub mod shell;
 pub mod slider;
+pub mod text_button;
+pub mod text_field;
 pub mod titlebar;
 pub mod tooltip;

@@ -87,7 +87,7 @@ pub const FIXTURES: &[Fixture] = &[
     },
 ];
 
-fn track_of(f: &Fixture) -> Track {
+pub(super) fn track_of(f: &Fixture) -> Track {
     let mut t = Track::new(f.id, f.title);
     t.artists = vec![ArtistRef {
         name: f.artist.into(),
@@ -123,6 +123,8 @@ pub fn prepare(sink: EventSink) -> Prepared {
             .map(|f| LibraryTrack { track: track_of(f) })
             .collect(),
         art: Arc::new(SimArt),
+        search: Arc::new(super::sim_search::SimSearch),
+        thumbs: Arc::new(super::sim_search::SimThumbs),
     }
 }
 

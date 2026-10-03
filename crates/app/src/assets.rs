@@ -52,6 +52,8 @@ icons! {
     MusicNote => "music-note-regular",
     Warning => "warning-regular",
     Spinner => "spinner",
+    Add => "add-regular",
+    Dismiss => "dismiss-regular",
 }
 
 pub struct Assets;
