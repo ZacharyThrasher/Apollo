@@ -129,9 +129,9 @@ watch page is the time.
 
 Open observations:
 - The first resolve of a bench run served itag 251 from WEB_CREATOR in every variant that used the
-  page, even with the defaults, and later requests got 774. PR #33 assumed that is "a fresh worker
-  gives the plain stream" and asked again once. Measured on the PC: it did not help (the retry took
-  ~3 s more and returned 251 again). Reverted. The bench resolves the same tracks in the same order
-  every time, so the cause is probably that track 1 has no Premium stream; bench section [7]
-  (reverse order on a fresh worker) tells the two apart.
+  page, even with the defaults, and later requests got 774. PR #33 assumed a fresh worker was the
+  cause and asked again once; that did not help and was reverted (#34). Bench section [7] (tracks in
+  reverse order on a fresh worker) settled it: the first resolve, a different track, got 774, and
+  track 1, resolved last on a warmed worker, still got 251/133 kbps. It is the track (that video
+  only offers the plain stream through yt-dlp), not the worker. Nothing to fix.
 - One cold click took 8.6 s with about 6.7 s after the last diagnostic phase. Cause unknown (one sample).
