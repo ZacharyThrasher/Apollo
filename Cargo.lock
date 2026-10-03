@@ -214,6 +214,7 @@ dependencies = [
  "apollo-services-common",
  "apollo-store",
  "apollo-theme",
+ "embed-resource",
  "gpui",
  "gpui_platform",
  "image",

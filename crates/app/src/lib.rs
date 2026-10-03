@@ -20,6 +20,8 @@ pub mod player;
 pub mod search;
 pub mod settings;
 #[cfg(windows)]
+pub mod single_instance;
+#[cfg(windows)]
 pub mod smtc;
 pub mod style;
 pub mod thumbs;
