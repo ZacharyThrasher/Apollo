@@ -42,6 +42,10 @@ const SLOW_LATENCY: Duration = Duration::from_millis(1_500);
 /// Prefix of the generated track ids; the remaining five characters are the position.
 pub const GENERATED_PREFIX: &str = "simLib";
 
+/// Where the simulated radio's tracks start numbering, and how many one answer holds.
+const RADIO_BASE: usize = 5_000;
+const RADIO_BATCH: usize = 10;
+
 /// Token of the home feed's second and third batches.
 pub const HOME_SECOND: &str = "sim-home@2";
 pub const HOME_THIRD: &str = "sim-home@3";
@@ -108,6 +112,10 @@ struct SimState {
     home: HomeBehaviour,
     /// Home requests the simulation received: `""` for the first batch, else the token.
     home_log: Vec<String>,
+    /// Makes `radio` fail (autoplay's error path).
+    radio: Option<LoadFailure>,
+    /// The seeds `radio` was asked about, in order.
+    radio_seeds: Vec<String>,
 }
 
 impl SimState {
@@ -120,6 +128,8 @@ impl SimState {
             log: Vec::new(),
             home: HomeBehaviour::default(),
             home_log: Vec::new(),
+            radio: None,
+            radio_seeds: Vec::new(),
         }
     }
 }
@@ -169,6 +179,16 @@ impl SimLibrary {
     /// The home requests received, `""` for a first batch and the token for a following one.
     pub fn home_log(&self) -> Vec<String> {
         self.state().home_log.clone()
+    }
+
+    /// Makes the radio fail (tests).
+    pub fn set_radio_failure(&self, failure: Option<LoadFailure>) {
+        self.state().radio = failure;
+    }
+
+    /// The seeds the radio was asked for, in order.
+    pub fn radio_seeds(&self) -> Vec<String> {
+        self.state().radio_seeds.clone()
     }
 
     /// Makes the playlist list fail (tests).
@@ -662,6 +682,18 @@ impl LibrarySource for SimLibrary {
             HomeBehaviour::Fail(f) | HomeBehaviour::FailMore(f) => Err(f),
             _ => home_batch(Some(token)).ok_or(LoadFailure::Parse),
         }
+    }
+
+    fn radio(&self, video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        let mut state = self.state();
+        state.radio_seeds.push(video_id.to_owned());
+        if let Some(f) = state.radio {
+            return Err(f);
+        }
+        // Fresh tracks every call, far past the library's generated ones.
+        let first = RADIO_BASE + (state.radio_seeds.len() - 1) * RADIO_BATCH;
+        Ok((first..first + RADIO_BATCH).map(generated_row).collect())
     }
 
     fn set_liked(&self, video_id: &str, liked: bool) -> Result<(), WriteFailure> {

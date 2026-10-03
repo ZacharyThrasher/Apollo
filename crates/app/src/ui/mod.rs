@@ -18,6 +18,7 @@ pub mod settings_row;
 pub mod shell;
 pub mod skeleton;
 pub mod slider;
+pub mod switch;
 pub mod text_button;
 pub mod text_field;
 pub mod titlebar;
