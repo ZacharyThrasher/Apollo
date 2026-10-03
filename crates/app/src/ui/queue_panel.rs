@@ -493,23 +493,21 @@ impl QueuePanel {
             .flex()
             .items_center()
             .text_color(color::text_tertiary())
-            .when(!is_current, |d| {
+            .when(!at_cursor, |d| {
                 d.group_hover(group.clone(), |s| s.opacity(0.0))
             })
+            .when(at_cursor, |d| d.opacity(0.0))
             .child(row.duration_ms.map(format_time).unwrap_or_default());
         let remove = div()
             .id(("queue-remove", ix))
             .debug_selector(|| format!("queue-remove-{ix}"))
-            .absolute()
-            .right_0()
+            .flex_none()
             .size(px(layout::MIN_HIT_TARGET))
             .flex()
             .items_center()
             .justify_center()
             .rounded(px(radius::SMALL))
             .cursor_pointer()
-            .opacity(0.0)
-            .group_hover(group.clone(), |s| s.opacity(1.0))
             .hover(|s| s.bg(color::state_hover()))
             .role(gpui::Role::Button)
             .aria_label("Remove")
@@ -542,19 +540,39 @@ impl QueuePanel {
                 move |_, cx| writes.update(cx, |w, cx| w.toggle_like(&video, cx))
             }));
 
-        // More: like the heart, its room is reserved and it shows on hover or under the cursor.
-        // The playing row has no remove, so its menu has none either.
+        // More (and Remove) take the place of the duration while the pointer is on the row or
+        // the cursor is on it, so the title keeps its full width at rest. The playing row has
+        // no remove, so its menu has none either.
         let menu = if is_current {
             Subject::track(row.track.clone(), None)
         } else {
             Subject::queued(row.track.clone(), id)
         };
-        let more = div()
-            .flex_none()
+        let row_tint = if selected {
+            playing_row::tint()
+        } else {
+            color::state_hover()
+        };
+        let actions = div()
+            .absolute()
+            .right_0()
+            .flex()
+            .flex_row()
+            .rounded(px(radius::SMALL))
+            // Opaque, so the title never shows through the buttons.
+            .bg(color::bg_raised())
             .when(!at_cursor, |d| {
                 d.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
             })
-            .child(more_slot(format!("queue-more-{ix}"), true, menu.clone()));
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .rounded(px(radius::SMALL))
+                    .bg(row_tint)
+                    .child(more_slot(format!("queue-more-{ix}"), true, menu.clone()))
+                    .when(!is_current, |d| d.child(remove)),
+            );
 
         let surface = div()
             .id(("queue-row", ix))
@@ -621,7 +639,6 @@ impl QueuePanel {
                     )),
             )
             .child(heart)
-            .child(more)
             .child(
                 div()
                     .relative()
@@ -629,7 +646,7 @@ impl QueuePanel {
                     .w(px(DURATION_WIDTH))
                     .h(px(layout::MIN_HIT_TARGET))
                     .child(duration)
-                    .when(!is_current, |d| d.child(remove)),
+                    .child(actions),
             )
             .when(ring, |d| d.child(focus_ring(accent, radius::SMALL)))
             .when_some(upcoming_ix, |d, _| {
