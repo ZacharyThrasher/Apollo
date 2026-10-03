@@ -592,6 +592,22 @@ fn a_fast_resolve_that_gives_no_stream_is_retried_once_with_the_full_arguments()
 }
 
 #[test]
+fn a_plain_stream_from_a_fresh_worker_is_asked_for_again_once() {
+    let mut r = rig(Opts::new("first-plain"));
+    r.start(0);
+    r.result(WAIT).expect("result").1.expect("playable");
+    assert_eq!(r.count("SERVE RESOLVE START"), 2, "asked again on the same worker");
+    assert_eq!(r.count("SERVE START"), 1);
+    let d = r.diag();
+    assert!(d.contains("asking again once"), "{d}");
+    assert!(d.contains("fmt=774") && !d.contains("fmt=251"), "the better answer was kept: {d}");
+    // Later resolves on that worker are not doubled.
+    r.start(1);
+    r.result(WAIT).expect("result").1.expect("playable");
+    assert_eq!(r.count("SERVE RESOLVE START"), 3);
+}
+
+#[test]
 fn prewarmed_workers_are_ready_before_the_first_request() {
     let mut o = Opts::new("ok");
     o.warm.prewarm = 2;
