@@ -75,6 +75,7 @@ Applied to the queue panel (`ui/queue_panel.rs`) and Now Playing (`ui/now_playin
 5. **Clear:** clears up next only, with no confirmation; the playing track keeps playing.
 6. **No-art glyph:** 20px on tiles up to 56px; a quarter of the tile size above that.
 7. **Now Playing:** opened from the player bar's art/title block, closed with Esc, the chevron, or navigating. Art `min(50vh, 480px)`, title in the 40px style, then one line of artist name(s) and album separated by " · " at 18px regular in text.secondary, 8px below the title, truncating with an ellipsis. The progress row and transport sit below, shared with the player bar. Ambient art is blurred at 15% opacity (inside the 12-18% range) and sits only behind this view.
+8. **Autoplay switch:** right-aligned in the queue header, after shuffle, repeat and clear: a compact 28x16 switch (accent track when on, `border.strong` when off, 12px knob) with the label "Autoplay" in body text.secondary. On by default and remembered. When up next is down to one track (or none) while something plays, a song radio seeded by the last track is appended; repeat-all takes priority. Radio rows look like any other queue row.
 
 ## Library decisions (coordinator, 2026-10-03)
 Applied to the Library page (`ui/library.rs`).

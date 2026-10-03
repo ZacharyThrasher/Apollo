@@ -69,6 +69,12 @@ pub trait LibrarySource: Send + Sync {
         Err(LoadFailure::Other)
     }
 
+    /// What plays after `video_id` when the queue runs out: the song's radio, without the seed
+    /// itself. Autoplay appends these to the queue.
+    fn radio(&self, _video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
     /// Cover art for a thumbnail URL a collection or row carried.
     fn artwork(&self, url: &str) -> Option<DecodedArt>;
 
@@ -84,11 +90,6 @@ pub trait LibrarySource: Send + Sync {
     /// Whether the account has liked a track; `None` when the service did not say.
     fn liked(&self, _video_id: &str) -> Result<Option<bool>, LoadFailure> {
         Ok(None)
-    }
-
-    /// The tracks that follow a track in its radio, the track itself left out.
-    fn radio(&self, _video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
-        Err(LoadFailure::Other)
     }
 
     /// The playlists the account can add a track to, each flagged when it already holds it.

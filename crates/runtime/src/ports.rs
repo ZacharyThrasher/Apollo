@@ -92,6 +92,16 @@ impl<R: Resolver, M: MediaEngine> Driver<R, M> {
         }
     }
 
+    /// A driver whose coordinator starts on a restored queue: paused, nothing audible, and
+    /// the first Play resolves a fresh stream and resumes near `position_ms`.
+    pub fn restored(resolver: R, engine: M, queue: Queue, position_ms: u64) -> Self {
+        Self {
+            coordinator: Coordinator::restored(queue, position_ms),
+            resolver,
+            engine,
+        }
+    }
+
     pub fn coordinator(&self) -> &Coordinator {
         &self.coordinator
     }

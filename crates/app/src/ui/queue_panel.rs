@@ -27,6 +27,7 @@ use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::player_bar::text_line;
 use crate::ui::playing_row;
 use crate::ui::row_actions::{heart_action, more_slot, ACTION_SIZE};
+use crate::ui::switch::LabeledSwitch;
 use crate::ui::track_menu::{self, Subject};
 use crate::ui::transport::on_off;
 
@@ -58,8 +59,9 @@ const DURATION_WIDTH: f32 = spacing::S12;
 const TAB_SHUFFLE: isize = 13;
 const TAB_REPEAT: isize = 14;
 const TAB_CLEAR: isize = 15;
-const TAB_LIST: isize = 16;
-const TAB_SEARCH: isize = 17;
+const TAB_AUTOPLAY: isize = 16;
+const TAB_LIST: isize = 17;
+const TAB_SEARCH: isize = 18;
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -204,6 +206,7 @@ pub struct QueuePanel {
     focus_shuffle: FocusHandle,
     focus_repeat: FocusHandle,
     focus_clear: FocusHandle,
+    focus_autoplay: FocusHandle,
     focus_list: FocusHandle,
     focus_search: FocusHandle,
     scroll: UniformListScrollHandle,
@@ -232,6 +235,7 @@ impl QueuePanel {
             focus_shuffle: stop(cx, TAB_SHUFFLE),
             focus_repeat: stop(cx, TAB_REPEAT),
             focus_clear: stop(cx, TAB_CLEAR),
+            focus_autoplay: stop(cx, TAB_AUTOPLAY),
             focus_list: stop(cx, TAB_LIST),
             focus_search: stop(cx, TAB_SEARCH),
             player,
@@ -779,6 +783,32 @@ impl Render for QueuePanel {
                                 }
                             }),
                         ),
+                    )
+                    // Right-aligned after the list controls: a radio keeps playing when the
+                    // queue would end.
+                    .child(
+                        div()
+                            .debug_selector(|| "queue-autoplay".into())
+                            .ml(px(spacing::S2))
+                            .child(
+                                LabeledSwitch::new(
+                                    "queue-autoplay",
+                                    &self.focus_autoplay,
+                                    "Autoplay",
+                                    player_view.autoplay,
+                                    accent,
+                                )
+                                .enabled(ready)
+                                .on_toggle({
+                                    let p = player.clone();
+                                    move |_, cx| {
+                                        p.update(cx, |m, cx| {
+                                            let on = !m.autoplay();
+                                            m.set_autoplay(on, cx)
+                                        });
+                                    }
+                                }),
+                            ),
                     ),
             );
 

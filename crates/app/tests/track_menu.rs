@@ -352,7 +352,7 @@ fn start_radio_plays_the_song_and_the_radio_replaces_what_was_up_next(cx: &mut T
     open_on_first_song(&page, vcx);
     choose(&page, vcx, Command::StartRadio);
     assert_eq!(current(&page, vcx), "Found One");
-    assert_eq!(page.sim.radio_log(), [FOUND]);
+    assert_eq!(page.sim.radio_seeds(), [FOUND]);
     let up = upcoming(&page, vcx);
     assert!(!up.is_empty(), "the radio is up next");
     assert!(!up.contains(&"Queued One".to_owned()), "the old up-next is gone");

@@ -42,6 +42,10 @@ const SLOW_LATENCY: Duration = Duration::from_millis(1_500);
 /// Prefix of the generated track ids; the remaining five characters are the position.
 pub const GENERATED_PREFIX: &str = "simLib";
 
+/// Where the simulated radio's tracks start numbering, and how many one answer holds.
+const RADIO_BASE: usize = 5_000;
+const RADIO_BATCH: usize = 10;
+
 /// Token of the home feed's second and third batches.
 pub const HOME_SECOND: &str = "sim-home@2";
 pub const HOME_THIRD: &str = "sim-home@3";
@@ -103,15 +107,15 @@ struct SimState {
     writes: WriteBehaviour,
     /// Makes `playlists_for` fail (the picker's error state).
     playlists: Option<LoadFailure>,
-    /// Makes `radio` fail (the menu's Start radio error).
-    radio: Option<LoadFailure>,
-    /// Radios the simulation was asked for, by seed video id, for tests.
-    radio_log: Vec<String>,
     /// Writes the simulation received, `(what, video id)`, for tests.
     log: Vec<(String, String)>,
     home: HomeBehaviour,
     /// Home requests the simulation received: `""` for the first batch, else the token.
     home_log: Vec<String>,
+    /// Makes `radio` fail (autoplay's error path).
+    radio: Option<LoadFailure>,
+    /// The seeds `radio` was asked about, in order.
+    radio_seeds: Vec<String>,
 }
 
 impl SimState {
@@ -121,11 +125,11 @@ impl SimState {
             added: Vec::new(),
             writes: WriteBehaviour::default(),
             playlists: None,
-            radio: None,
-            radio_log: Vec::new(),
             log: Vec::new(),
             home: HomeBehaviour::default(),
             home_log: Vec::new(),
+            radio: None,
+            radio_seeds: Vec::new(),
         }
     }
 }
@@ -177,19 +181,19 @@ impl SimLibrary {
         self.state().home_log.clone()
     }
 
-    /// Makes the playlist list fail (tests).
-    pub fn set_playlists_failure(&self, failure: Option<LoadFailure>) {
-        self.state().playlists = failure;
-    }
-
-    /// Makes radio requests fail (tests).
+    /// Makes the radio fail (tests).
     pub fn set_radio_failure(&self, failure: Option<LoadFailure>) {
         self.state().radio = failure;
     }
 
-    /// The seed of every radio asked for, in order (tests).
-    pub fn radio_log(&self) -> Vec<String> {
-        self.state().radio_log.clone()
+    /// The seeds the radio was asked for, in order.
+    pub fn radio_seeds(&self) -> Vec<String> {
+        self.state().radio_seeds.clone()
+    }
+
+    /// Makes the playlist list fail (tests).
+    pub fn set_playlists_failure(&self, failure: Option<LoadFailure>) {
+        self.state().playlists = failure;
     }
 
     /// Video ids in Liked Music, most recently liked first.
@@ -680,6 +684,18 @@ impl LibrarySource for SimLibrary {
         }
     }
 
+    fn radio(&self, video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        let mut state = self.state();
+        state.radio_seeds.push(video_id.to_owned());
+        if let Some(f) = state.radio {
+            return Err(f);
+        }
+        // Fresh tracks every call, far past the library's generated ones.
+        let first = RADIO_BASE + (state.radio_seeds.len() - 1) * RADIO_BATCH;
+        Ok((first..first + RADIO_BATCH).map(generated_row).collect())
+    }
+
     fn set_liked(&self, video_id: &str, liked: bool) -> Result<(), WriteFailure> {
         self.wait(PAGE_LATENCY);
         let lands = self.write_answer(if liked { "like" } else { "unlike" }.to_owned(), video_id);
@@ -697,23 +713,6 @@ impl LibrarySource for SimLibrary {
     fn liked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
         self.wait(PAGE_LATENCY);
         Ok(Some(self.state().liked.iter().any(|id| id == video_id)))
-    }
-
-    fn radio(&self, video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
-        self.wait(PAGE_LATENCY);
-        {
-            let mut state = self.state();
-            state.radio_log.push(video_id.to_owned());
-            if let Some(f) = state.radio {
-                return Err(f);
-            }
-        }
-        // Every other fixture, the seed left out.
-        let all: Vec<usize> = (0..FIXTURES.len()).collect();
-        Ok(fixture_rows(&all)
-            .into_iter()
-            .filter(|r| r.track.video_id.as_str() != video_id)
-            .collect())
     }
 
     fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
