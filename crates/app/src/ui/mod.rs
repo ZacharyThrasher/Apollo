@@ -1,3 +1,4 @@
+pub mod account_page;
 pub mod art_tile;
 pub mod button;
 pub mod nav;
@@ -6,6 +7,7 @@ pub mod player_bar;
 pub mod queue_panel;
 pub mod shell;
 pub mod slider;
+pub mod text_button;
 pub mod titlebar;
 pub mod tooltip;
 pub mod transport;

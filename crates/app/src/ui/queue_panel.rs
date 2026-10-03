@@ -49,11 +49,11 @@ const ART: f32 = 40.0;
 const DURATION_WIDTH: f32 = spacing::S12;
 
 /// Tab order: after the page, before the player bar.
-const TAB_SHUFFLE: isize = 12;
-const TAB_REPEAT: isize = 13;
-const TAB_CLEAR: isize = 14;
-const TAB_LIST: isize = 15;
-const TAB_SEARCH: isize = 16;
+const TAB_SHUFFLE: isize = 13;
+const TAB_REPEAT: isize = 14;
+const TAB_CLEAR: isize = 15;
+const TAB_LIST: isize = 16;
+const TAB_SEARCH: isize = 17;
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([

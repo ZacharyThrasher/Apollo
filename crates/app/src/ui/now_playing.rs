@@ -20,8 +20,8 @@ use crate::ui::slider::SliderState;
 use crate::ui::transport::{self, TransportFocus};
 
 /// Tab order: after the nav rail, before the queue panel and the player bar.
-const TAB_CLOSE: isize = 5;
-const TAB_TRANSPORT: isize = 6;
+const TAB_CLOSE: isize = 6;
+const TAB_TRANSPORT: isize = 7;
 
 /// The glow sits in the middle of the direction's 12-18% range.
 pub const AMBIENT_OPACITY: f32 = (ambient::OPACITY_MIN + ambient::OPACITY_MAX) / 2.0;
