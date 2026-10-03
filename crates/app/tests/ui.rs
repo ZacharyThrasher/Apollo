@@ -407,6 +407,33 @@ fn the_minimum_window_fits_both_side_blocks_and_the_centre() {
     assert_eq!(apollo_app::ui::player_bar::MIN_BAR_WIDTH, 864.0);
 }
 
+#[gpui::test]
+fn the_player_bar_columns_fit_the_window_and_the_transport_stays_centred(cx: &mut TestAppContext) {
+    let (_player, _shell, vcx) = setup(cx);
+    for width in [864.0_f32, 1100.0, 1600.0] {
+        vcx.simulate_resize(gpui::size(gpui::px(width), gpui::px(720.0)));
+        vcx.run_until_parked();
+        let (left, centre, right) = (
+            bounds(vcx, "now-playing-toggle"),
+            bounds(vcx, "player-bar-center"),
+            bounds(vcx, "player-bar-right"),
+        );
+        let (left_edge, right_edge) = (f32::from(left.left()), f32::from(right.right()));
+        assert!(left_edge >= 15.5, "{width}: left block starts inside the bar padding");
+        assert!(
+            right_edge <= width - 15.5,
+            "{width}: the right block ends at {right_edge}, past the bar padding"
+        );
+        assert!(centre.left() >= left.right() && centre.right() <= right.left());
+        let mid = f32::from(centre.left() + centre.size.width / 2.0);
+        assert!(
+            (mid - width / 2.0).abs() < 1.0,
+            "{width}: transport centre {mid} is off the window centre"
+        );
+        assert_eq!(left.size.width, right.size.width, "{width}: side blocks are equal");
+    }
+}
+
 // ---- queue panel ---------------------------------------------------------------------------
 
 use apollo_app::ui::now_playing::art_side;

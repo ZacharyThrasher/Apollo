@@ -19,7 +19,8 @@ use crate::ui::tooltip::Tooltip;
 use crate::ui::transport::{self, TransportFocus};
 
 const VOLUME_WIDTH: f32 = 96.0;
-/// The centre column takes 40% of the bar, between these bounds.
+/// The centre column takes what the side blocks leave, between these bounds. (A fixed 40% plus
+/// two 30% sides plus the gaps overflowed the bar by the gaps' width.)
 const CENTER_MAX: f32 = 640.0;
 const CENTER_MIN: f32 = 320.0;
 /// Smallest window width at which both side blocks keep their minimum and the centre fits:
@@ -109,7 +110,6 @@ impl RenderOnce for PlayerBar {
             .flex_row()
             .items_center()
             .gap(px(spacing::S3))
-            .flex_none()
             .w(relative(layout::PLAYER_BAR_SIDE_FRACTION))
             .min_w(px(layout::PLAYER_BAR_SIDE_MIN))
             .max_w(px(layout::PLAYER_BAR_SIDE_MAX))
@@ -221,11 +221,11 @@ impl RenderOnce for PlayerBar {
             transport::progress("", &player, &v, &self.focus.progress, &self.progress, cx);
 
         let center = div()
+            .debug_selector(|| "player-bar-center".into())
             .flex()
             .flex_col()
             .items_center()
-            .flex_none()
-            .w(relative(0.4))
+            .flex_1()
             .min_w(px(CENTER_MIN))
             .max_w(px(CENTER_MAX))
             .child(transport_row)
@@ -245,12 +245,12 @@ impl RenderOnce for PlayerBar {
             f32::from(v.volume) / 100.0
         };
         let right = div()
+            .debug_selector(|| "player-bar-right".into())
             .flex()
             .flex_row()
             .items_center()
             .justify_end()
             .gap(px(spacing::S2))
-            .flex_none()
             .w(relative(layout::PLAYER_BAR_SIDE_FRACTION))
             .min_w(px(layout::PLAYER_BAR_SIDE_MIN))
             .max_w(px(layout::PLAYER_BAR_SIDE_MAX))
