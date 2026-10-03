@@ -283,6 +283,43 @@ pub fn menu_position(placed: Placed, size: Size<Pixels>, window: Size<Pixels>) -
 
 // ---- opening it ------------------------------------------------------------------------------
 
+/// How much of a collection a card command loads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pages {
+    /// Just the first page (Start radio only needs a seed).
+    First,
+    /// Every page, up to [`MAX_PAGES`] (Play, Shuffle and Add to queue).
+    All,
+}
+
+/// The most pages one command follows; a collection longer than this is cut short.
+const MAX_PAGES: usize = 30;
+
+/// A collection's songs: the first page, and with [`Pages::All`] the ones after it. A later page
+/// that fails ends the list there; only a failing first page is an error.
+fn load_tracks(
+    source: &dyn crate::library::LibrarySource,
+    collection: &Collection,
+    pages: Pages,
+) -> Result<Vec<crate::library::source::TrackRow>, apollo_domain::listing::LoadFailure> {
+    let first = source.tracks(collection)?;
+    let mut rows = first.items;
+    let mut next = first.continuation;
+    let mut followed = 1;
+    while let (Pages::All, Some(token)) = (pages, next.take()) {
+        if followed >= MAX_PAGES {
+            break;
+        }
+        let Ok(page) = source.more_tracks(&token) else {
+            break;
+        };
+        followed += 1;
+        rows.extend(page.items);
+        next = page.continuation;
+    }
+    Ok(rows)
+}
+
 /// The shell's menu, reachable from any row.
 #[derive(Clone)]
 pub struct MenuHandle(pub Entity<TrackMenu>);
@@ -497,20 +534,20 @@ impl TrackMenu {
                 });
             }
             (Command::AddToQueue, Subject::Collection(c)) => {
-                self.with_tracks(c, |menu, rows, cx| {
+                self.with_tracks(c, Pages::All, |menu, rows, cx| {
                     let tracks = menu.hinted(rows, cx);
                     menu.player.update(cx, |p, cx| p.add_tracks_to_queue(tracks, cx));
                 }, cx);
             }
             (Command::Play, Subject::Collection(c)) => {
-                self.with_tracks(c, |menu, rows, cx| {
+                self.with_tracks(c, Pages::All, |menu, rows, cx| {
                     let tracks = menu.hinted(rows, cx);
                     menu.player
                         .update(cx, |p, cx| p.play_tracks(tracks, Some(0), None, cx));
                 }, cx);
             }
             (Command::Shuffle, Subject::Collection(c)) => {
-                self.with_tracks(c, |menu, rows, cx| {
+                self.with_tracks(c, Pages::All, |menu, rows, cx| {
                     let tracks = menu.hinted(rows, cx);
                     menu.player
                         .update(cx, |p, cx| p.play_tracks(tracks, None, Some(true), cx));
@@ -521,7 +558,7 @@ impl TrackMenu {
             }
             (Command::StartRadio, Subject::Collection(c)) => {
                 // A collection's radio is seeded from its first song.
-                self.with_tracks(c, |menu, rows, cx| {
+                self.with_tracks(c, Pages::First, |menu, rows, cx| {
                     if let Some(first) = rows.into_iter().next() {
                         menu.start_radio(first.track, first.thumbnail, cx);
                     }
@@ -599,6 +636,7 @@ impl TrackMenu {
     fn with_tracks(
         &mut self,
         collection: Collection,
+        pages: Pages,
         then: impl FnOnce(&mut Self, Vec<crate::library::source::TrackRow>, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) {
@@ -607,13 +645,13 @@ impl TrackMenu {
             let result = match source {
                 Some(source) => {
                     cx.background_executor()
-                        .spawn(async move { source.tracks(&collection) })
+                        .spawn(async move { load_tracks(&*source, &collection, pages) })
                         .await
                 }
                 None => Err(apollo_domain::listing::LoadFailure::Other),
             };
             let _ = this.update(cx, |menu, cx| match result {
-                Ok(page) if !page.items.is_empty() => then(menu, page.items, cx),
+                Ok(rows) if !rows.is_empty() => then(menu, rows, cx),
                 _ => menu.writes.update(cx, |w, cx| w.raise(LOAD_FAILED, cx)),
             });
         })
@@ -884,6 +922,23 @@ mod tests {
                 vec![CopyLink],
             ]
         );
+    }
+
+    #[test]
+    fn play_and_queue_follow_every_page_but_a_radio_needs_only_the_first() {
+        use crate::library::sim::{SimLibrary, LONG_ID, LONG_LEN};
+        let sim = SimLibrary::instant();
+        let long = Collection {
+            kind: CollectionKind::Playlist,
+            id: BrowseId::new(LONG_ID),
+            title: "Long Haul".into(),
+            subtitle: None,
+            thumbnail: None,
+        };
+        let all = load_tracks(&sim, &long, Pages::All).unwrap();
+        assert_eq!(all.len(), LONG_LEN);
+        let first = load_tracks(&sim, &long, Pages::First).unwrap();
+        assert!(!first.is_empty() && first.len() < LONG_LEN);
     }
 
     #[test]

@@ -580,3 +580,22 @@ fn queue_rows_offer_remove_from_queue(cx: &mut TestAppContext) {
     assert!(is_open(&page, vcx));
     assert!(!commands(&page, vcx).contains(&Command::RemoveFromQueue));
 }
+
+#[gpui::test]
+fn a_queue_rows_more_button_replaces_the_duration_on_hover_and_opens_the_menu(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    page.shell.update(vcx, |s, cx| s.toggle_queue(cx));
+    vcx.run_until_parked();
+    let row = bounds(vcx, "queue-row-2");
+    hover(vcx, row.center());
+    // More and Remove sit at the row's right end, over where the duration is.
+    let more = bounds(vcx, "queue-more-2");
+    let remove = bounds(vcx, "queue-remove-2");
+    assert!(more.origin.x < remove.origin.x);
+    assert_eq!(remove.origin.x + remove.size.width, row.origin.x + row.size.width - gpui::px(8.0));
+    click(vcx, "queue-more-2");
+    assert!(is_open(&page, vcx));
+    assert_eq!(upcoming(&page, vcx).len(), 2, "More did not remove or play anything");
+}
