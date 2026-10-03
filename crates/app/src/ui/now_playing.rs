@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use apollo_theme::tokens::{ambient, layout, spacing, typography};
+use apollo_theme::tokens::{ambient, layout, lyrics, spacing, typography};
 use gpui::{
     div, img, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, ImageSource,
     IntoElement, ObjectFit, ParentElement, Render, Styled, Window,
@@ -14,10 +14,11 @@ use crate::assets::Icon;
 use crate::library::writes::LibraryWrites;
 use crate::player::PlayerModel;
 use crate::style::color;
+use crate::ui::anchor;
 use crate::ui::art_tile::art_tile_fluid;
 use crate::ui::button::{Handler, IconButton};
+use crate::ui::lyrics_pane::LyricsPane;
 use crate::ui::player_bar::text_line;
-use crate::ui::anchor;
 use crate::ui::playlist_picker::PlaylistPicker;
 use crate::ui::row_actions::{heart_icon, heart_label};
 use crate::ui::slider::SliderState;
@@ -59,6 +60,8 @@ pub struct NowPlaying {
     player: Entity<PlayerModel>,
     writes: Entity<LibraryWrites>,
     picker: Entity<PlaylistPicker>,
+    /// Takes the right side of the page when it is open.
+    lyrics: Entity<LyricsPane>,
     focus_close: FocusHandle,
     focus_like: FocusHandle,
     focus_playlist: FocusHandle,
@@ -72,6 +75,7 @@ impl NowPlaying {
         player: Entity<PlayerModel>,
         writes: Entity<LibraryWrites>,
         picker: Entity<PlaylistPicker>,
+        lyrics: Entity<LyricsPane>,
         on_close: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -82,6 +86,7 @@ impl NowPlaying {
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         cx.observe(&progress, |_, _, cx| cx.notify()).detach();
+        cx.observe(&lyrics, |_, _, cx| cx.notify()).detach();
         Self {
             focus_close: stop(cx, TAB_CLOSE),
             // Same slot as the transport: they sit above it, so they come first.
@@ -98,6 +103,7 @@ impl NowPlaying {
             player,
             writes,
             picker,
+            lyrics,
             progress,
             on_close: Rc::new(Box::new(on_close)),
         }
@@ -250,40 +256,61 @@ impl Render for NowPlaying {
             .on_click(move |window, cx| on_close(window, cx))
         };
 
+        // The cover, title and controls, centred in their column.
+        let column = div()
+            .id("now-playing-scroll")
+            .size_full()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .min_h_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(spacing::S4))
+                    .px(px(spacing::S8))
+                    .py(px(spacing::S2))
+                    .child(art)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(spacing::S2))
+                            .w_full()
+                            .max_w(px(side.max(MIN_COLUMN)))
+                            .child(text)
+                            .child(controls),
+                    ),
+            );
+        // With lyrics open the page is two halves: the column on the left, the lyrics where the
+        // queue would be on the right.
+        let page = if self.lyrics.read(cx).is_open() {
+            div()
+                .size_full()
+                .flex()
+                .flex_row()
+                .child(div().flex_1().min_w_0().h_full().child(column))
+                .child(
+                    div()
+                        .debug_selector(|| "np-lyrics".into())
+                        .flex_1()
+                        .min_w(px(lyrics::MIN_PANE_WIDTH))
+                        .h_full()
+                        .child(self.lyrics.clone()),
+                )
+                .into_any_element()
+        } else {
+            column.into_any_element()
+        };
+
         div()
             .id("now-playing")
             .relative()
             .size_full()
             .overflow_hidden()
             .children(glow)
-            .child(
-                div()
-                    .id("now-playing-scroll")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .child(
-                        div()
-                            .min_h_full()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(spacing::S4))
-                            .px(px(spacing::S8))
-                            .py(px(spacing::S2))
-                            .child(art)
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(spacing::S2))
-                                    .w_full()
-                                    .max_w(px(side.max(MIN_COLUMN)))
-                                    .child(text)
-                                    .child(controls),
-                            ),
-                    ),
-            )
+            .child(page)
             .child(
                 div()
                     .absolute()

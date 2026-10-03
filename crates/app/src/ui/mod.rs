@@ -5,6 +5,7 @@ pub mod button;
 pub mod card;
 pub mod home_page;
 pub mod library;
+pub mod lyrics_pane;
 pub mod nav;
 pub mod now_playing;
 pub mod player_bar;

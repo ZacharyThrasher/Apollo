@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use apollo_lyrics::{Lrclib, LyricsCache, LyricsService, SqliteCache};
 use gpui::{
     px, size, App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
     WindowHandle, WindowOptions,
@@ -10,9 +11,12 @@ use gpui::{
 
 use crate::account::{AccountModel, AccountPorts};
 use crate::backend::{channel_sink, Mode};
+use crate::lyrics::SimLyrics;
 use crate::player::PlayerModel;
 use crate::search::Unavailable;
-use crate::settings::{AutoplayStore, NormalizeStore, QueueStore, SqliteSettings, VolumeStore};
+use crate::settings::{
+    AutoplayStore, LyricsOpenStore, NormalizeStore, QueueStore, SqliteSettings, VolumeStore,
+};
 use crate::ui::shell::{self, Quit, Shell};
 use crate::url_thumbs::NoThumbs;
 
@@ -45,6 +49,9 @@ struct Stores {
     autoplay: Option<Arc<dyn AutoplayStore>>,
     normalize: Option<Arc<dyn NormalizeStore>>,
     queue: Option<Arc<dyn QueueStore>>,
+    lyrics_open: Option<Arc<dyn LyricsOpenStore>>,
+    /// The store's file, where the lyrics cache keeps its rows too.
+    db_path: Option<std::path::PathBuf>,
 }
 
 impl Stores {
@@ -54,6 +61,8 @@ impl Stores {
                 volume: Some(db.clone()),
                 autoplay: Some(db.clone()),
                 normalize: Some(db.clone()),
+                lyrics_open: Some(db.clone()),
+                db_path: Some(db.path().to_path_buf()),
                 queue: Some(db),
             },
             None => Self::default(),
@@ -88,6 +97,10 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     let ports = mode.account_ports();
     let account = cx.new(|cx| AccountModel::new(ports.clone(), cx));
     let window = open_window(cx, player.clone(), account.clone());
+    let lyrics = lyrics_service(&mode, stores.db_path.clone());
+    let _ = window.update(cx, |shell, _, cx| {
+        shell.install_lyrics(lyrics, stores.lyrics_open.clone(), cx)
+    });
     // Media keys and the SMTC overlay, on the window just opened.
     #[cfg(windows)]
     crate::smtc::install(cx, window, player.clone());
@@ -108,6 +121,15 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     .detach();
     cx.activate(true);
     window
+}
+
+/// Where lyrics come from: LRCLIB with the SQLite cache, or the fixtures under the simulation.
+fn lyrics_service(mode: &Mode, db_path: Option<std::path::PathBuf>) -> Arc<LyricsService> {
+    if matches!(mode, Mode::Sim | Mode::SimSignedOut) {
+        return Arc::new(LyricsService::new(vec![Arc::new(SimLyrics)], None));
+    }
+    let cache = db_path.map(|path| Arc::new(SqliteCache::at(path)) as Arc<dyn LyricsCache>);
+    Arc::new(LyricsService::new(vec![Arc::new(Lrclib::new())], cache))
 }
 
 fn open_window(

@@ -1,5 +1,6 @@
 //! What lives between runs, in the app's SQLite store (non-secret state only): the volume, the
-//! autoplay and volume-normalization switches (all in the `settings` table) and the queue with its position.
+//! autoplay, volume-normalization and lyrics switches (all in the `settings` table) and the queue
+//! with its position.
 
 use std::path::PathBuf;
 
@@ -9,6 +10,7 @@ use apollo_store::Store;
 const KEY_VOLUME: &str = "volume_percent";
 const KEY_AUTOPLAY: &str = "autoplay";
 const KEY_NORMALIZE: &str = "normalize_volume";
+const KEY_LYRICS_OPEN: &str = "lyrics_open";
 
 /// Where the volume is kept. Blocking: call off the UI thread.
 pub trait VolumeStore: Send + Sync {
@@ -24,6 +26,12 @@ pub trait AutoplayStore: Send + Sync {
 
 /// Whether volume normalization is on. Blocking: call off the UI thread.
 pub trait NormalizeStore: Send + Sync {
+    fn load(&self) -> Option<bool>;
+    fn save(&self, on: bool);
+}
+
+/// Whether Now Playing shows lyrics where the queue would be. Blocking: call off the UI thread.
+pub trait LyricsOpenStore: Send + Sync {
     fn load(&self) -> Option<bool>;
     fn save(&self, on: bool);
 }
@@ -59,6 +67,11 @@ impl SqliteSettings {
                 .join("app")
                 .join("apollo.db"),
         ))
+    }
+
+    /// The database file (the lyrics cache lives in the same store).
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
     }
 
     fn open(&self) -> Option<Store> {
@@ -121,6 +134,24 @@ impl NormalizeStore for SqliteSettings {
         if let Some(store) = self.open() {
             if let Err(err) = store.set_setting(KEY_NORMALIZE, if on { "on" } else { "off" }) {
                 eprintln!("could not save volume normalization: {err}");
+            }
+        }
+    }
+}
+
+impl LyricsOpenStore for SqliteSettings {
+    fn load(&self) -> Option<bool> {
+        match self.open()?.get_setting(KEY_LYRICS_OPEN).ok()??.trim() {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => None,
+        }
+    }
+
+    fn save(&self, on: bool) {
+        if let Some(store) = self.open() {
+            if let Err(err) = store.set_setting(KEY_LYRICS_OPEN, if on { "on" } else { "off" }) {
+                eprintln!("could not save the lyrics choice: {err}");
             }
         }
     }
@@ -223,6 +254,23 @@ mod tests {
             .set_setting(KEY_NORMALIZE, "maybe")
             .unwrap();
         assert_eq!(NormalizeStore::load(&store), None);
+    }
+
+    #[test]
+    fn the_lyrics_choice_round_trips_and_garbage_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apollo.db");
+        let store = SqliteSettings::at(path.clone());
+        assert_eq!(LyricsOpenStore::load(&store), None);
+        LyricsOpenStore::save(&store, true);
+        assert_eq!(LyricsOpenStore::load(&store), Some(true));
+        LyricsOpenStore::save(&store, false);
+        assert_eq!(LyricsOpenStore::load(&store), Some(false));
+        Store::open(&path)
+            .unwrap()
+            .set_setting(KEY_LYRICS_OPEN, "maybe")
+            .unwrap();
+        assert_eq!(LyricsOpenStore::load(&store), None);
     }
 
     #[test]
