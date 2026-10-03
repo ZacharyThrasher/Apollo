@@ -2,11 +2,11 @@
 //!
 //! A shelf of nothing but songs ("Quick picks") is a grid of compact song rows, four tall and
 //! paging by column; every other shelf is a row of cards. Hovering a row shows previous/next
-//! chevrons at its edges; the keyboard walks the items with Tab or Left and Right, and the row
-//! and page scroll the focused item into view. A card opens its album, artist or playlist
+//! chevrons at its edges; each shelf is one Tab stop and Left and Right walk its items (roving
+//! focus), and the row and page scroll the focused item into view. A card opens its album, artist or playlist
 //! page; a song plays with its shelf as the queue.
 //!
-//! Tab order: the page's stops all sit at index 6, after the nav rail, in reading order.
+//! Tab order: one stop per shelf, at index 6 after the nav rail, in reading order.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -121,6 +121,8 @@ struct Slide {
 struct Row {
     scroll: ScrollHandle,
     slide: Option<Slide>,
+    /// The one item of the shelf that Tab stops on: the one last focused (roving focus).
+    tab: usize,
 }
 
 impl Row {
@@ -128,6 +130,7 @@ impl Row {
         Self {
             scroll: ScrollHandle::new(),
             slide: None,
+            tab: 0,
         }
     }
 }
@@ -189,6 +192,25 @@ impl HomeView {
     /// The Retry / Sign in stop (tests).
     pub fn action_stop(&self) -> &FocusHandle {
         &self.action_focus
+    }
+
+    /// Left / Right: move focus to the next or previous item of the shelf whose items are stops
+    /// `first..first + count`, staying inside it.
+    fn step_focus(
+        &mut self,
+        first: usize,
+        count: usize,
+        by: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(at) = (0..count).find(|k| self.stops[first + k].is_focused(window)) else {
+            return;
+        };
+        let to = at as isize + by;
+        if (0..count as isize).contains(&to) {
+            window.focus(&self.stops[first + to as usize], cx);
+        }
     }
 
     /// Back to the top, every row at its first column (a different account's feed).
@@ -510,6 +532,9 @@ impl HomeView {
         let mut stop = 0;
         for (i, plan) in plans.iter().enumerate() {
             for j in 0..plan.shelf.items.len() {
+                if self.stops[stop].is_focused(window) {
+                    self.rows[i].tab = j;
+                }
                 if keyboard_focused(&self.stops[stop], window) {
                     focused = Some((stop, i, if plan.songs { j / COLUMN_ROWS } else { j }));
                 }
@@ -548,7 +573,13 @@ impl HomeView {
         let mut stop = 0;
         for (i, plan) in plans.into_iter().enumerate() {
             let count = plan.shelf.items.len();
-            let handles: Vec<FocusHandle> = self.stops[stop..stop + count].to_vec();
+            let tab = self.rows[i].tab.min(count.saturating_sub(1));
+            let handles: Vec<FocusHandle> = self.stops[stop..stop + count]
+                .iter()
+                .enumerate()
+                .map(|(j, h)| h.clone().tab_stop(j == tab))
+                .collect();
+            let first = stop;
             stop += count;
             let thumb_of = |item: &HomeItem| -> Thumb {
                 match item.thumbnail() {
@@ -604,12 +635,12 @@ impl HomeView {
                         .role(gpui::Role::List)
                         .aria_label(SharedString::from(plan.shelf.title.clone()))
                         .key_context(SHELF_CONTEXT)
-                        .on_action(
-                            cx.listener(|_, _: &ShelfNext, window, cx| window.focus_next(cx)),
-                        )
-                        .on_action(
-                            cx.listener(|_, _: &ShelfPrevious, window, cx| window.focus_prev(cx)),
-                        )
+                        .on_action(cx.listener(move |this, _: &ShelfNext, window, cx| {
+                            this.step_focus(first, count, 1, window, cx)
+                        }))
+                        .on_action(cx.listener(move |this, _: &ShelfPrevious, window, cx| {
+                            this.step_focus(first, count, -1, window, cx)
+                        }))
                         .flex()
                         .flex_row()
                         .gap(px(GAP))
