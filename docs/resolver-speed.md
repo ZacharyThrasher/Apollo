@@ -128,8 +128,10 @@ so production stays on the defaults. Premium needs the web music client, and tha
 watch page is the time.
 
 Open observations:
-- The first resolve on a fresh worker (the first click after launch, or the first track of a
-  prefetch) served itag 251 from WEB_CREATOR in every variant that used the page, even with the
-  defaults. Later requests on the same worker got 774. So "always best" is not yet true for the first
-  track after launch.
+- The first resolve of a bench run served itag 251 from WEB_CREATOR in every variant that used the
+  page, even with the defaults, and later requests got 774. PR #33 assumed that is "a fresh worker
+  gives the plain stream" and asked again once. Measured on the PC: it did not help (the retry took
+  ~3 s more and returned 251 again). Reverted. The bench resolves the same tracks in the same order
+  every time, so the cause is probably that track 1 has no Premium stream; bench section [7]
+  (reverse order on a fresh worker) tells the two apart.
 - One cold click took 8.6 s with about 6.7 s after the last diagnostic phase. Cause unknown (one sample).
