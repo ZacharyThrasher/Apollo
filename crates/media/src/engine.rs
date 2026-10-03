@@ -10,10 +10,9 @@ use std::time::{Duration, Instant};
 use apollo_domain::playback::{EngineEvent, Event, Failure, LeaseId, LoadId};
 use apollo_runtime::MediaEngine;
 use apollo_services_common::{unix_now, EventSink, LeaseLookup, LeaseStore};
-use libmpv2::events::Event as MpvEvent;
-use libmpv2::{mpv_end_file_reason, Mpv};
+use libmpv2::Mpv;
 
-use crate::classify::{classify_failed_load, classify_log};
+use crate::classify::{classify_end_file_error, classify_log};
 use crate::coalesce::PositionCoalescer;
 use crate::config::{core_options, MediaConfig};
 
@@ -157,24 +156,46 @@ enum OwnedEvent {
     FileLoaded,
     Seek,
     PlaybackRestart,
-    EndFile(libmpv2::EndFileReason),
+    EndFile { reason: u32, error: i32 },
     Other,
 }
 
-impl From<MpvEvent<'_>> for OwnedEvent {
-    fn from(ev: MpvEvent<'_>) -> Self {
-        match ev {
-            MpvEvent::LogMessage { level, text, .. } => OwnedEvent::Log {
-                level: level.to_string(),
-                text: text.to_string(),
-            },
-            MpvEvent::StartFile => OwnedEvent::StartFile,
-            MpvEvent::FileLoaded => OwnedEvent::FileLoaded,
-            MpvEvent::Seek => OwnedEvent::Seek,
-            MpvEvent::PlaybackRestart => OwnedEvent::PlaybackRestart,
-            MpvEvent::EndFile(r) => OwnedEvent::EndFile(r),
+/// Reads the next event straight from the C API. libmpv2's `wait_event` turns an end-of-file
+/// *error* into `Err(..)` and drops both the reason and the error code, so failed loads would be
+/// invisible. `None` = timeout/no event.
+fn next_event(mpv: &Mpv, timeout: f64) -> Option<OwnedEvent> {
+    use libmpv2_sys as sys;
+    unsafe {
+        let ev = &*sys::mpv_wait_event(mpv.ctx.as_ptr(), timeout);
+        let cstr = |p: *const std::os::raw::c_char| {
+            if p.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+            }
+        };
+        Some(match ev.event_id {
+            sys::mpv_event_id_MPV_EVENT_NONE => return None,
+            sys::mpv_event_id_MPV_EVENT_LOG_MESSAGE => {
+                let m = &*(ev.data as *const sys::mpv_event_log_message);
+                OwnedEvent::Log {
+                    level: cstr(m.level),
+                    text: cstr(m.text),
+                }
+            }
+            sys::mpv_event_id_MPV_EVENT_START_FILE => OwnedEvent::StartFile,
+            sys::mpv_event_id_MPV_EVENT_FILE_LOADED => OwnedEvent::FileLoaded,
+            sys::mpv_event_id_MPV_EVENT_SEEK => OwnedEvent::Seek,
+            sys::mpv_event_id_MPV_EVENT_PLAYBACK_RESTART => OwnedEvent::PlaybackRestart,
+            sys::mpv_event_id_MPV_EVENT_END_FILE => {
+                let e = &*(ev.data as *const sys::mpv_event_end_file);
+                OwnedEvent::EndFile {
+                    reason: e.reason as u32,
+                    error: e.error,
+                }
+            }
             _ => OwnedEvent::Other,
-        }
+        })
     }
 }
 
@@ -242,14 +263,9 @@ impl Pump {
             }
             // Drain every queued mpv event, then wait briefly for the next.
             let mut timeout = 0.05;
-            while let Some(ev) = self.mpv.wait_event(timeout) {
+            while let Some(ev) = next_event(&self.mpv, timeout) {
                 timeout = 0.0;
-                // Own the event first: it borrows from the mpv handle we are about to use.
-                let owned = match ev {
-                    Ok(ev) => OwnedEvent::from(ev),
-                    Err(_) => continue,
-                };
-                self.on_mpv_event(owned);
+                self.on_mpv_event(ev);
             }
             self.poll();
         }
@@ -467,7 +483,7 @@ impl Pump {
                 }
             }
             OwnedEvent::PlaybackRestart => self.on_playback_restart(),
-            OwnedEvent::EndFile(reason) => self.on_end_file(reason),
+            OwnedEvent::EndFile { reason, error } => self.on_end_file(reason, error),
             OwnedEvent::Other => {}
         }
     }
@@ -504,13 +520,17 @@ impl Pump {
         }
     }
 
-    fn on_end_file(&mut self, reason: libmpv2::EndFileReason) {
+    fn on_end_file(&mut self, reason: u32, error: i32) {
+        use libmpv2_sys::{
+            mpv_end_file_reason_MPV_END_FILE_REASON_EOF as EOF,
+            mpv_end_file_reason_MPV_END_FILE_REASON_ERROR as ERROR,
+        };
         let Some(a) = self.active.as_ref() else { return };
         if !a.started {
             return; // end of the file this load replaced
         }
         let load = a.load;
-        if reason == mpv_end_file_reason::Eof {
+        if reason == EOF as u32 {
             let loaded = a.loaded;
             self.active = None;
             self.clear_request_headers();
@@ -522,8 +542,8 @@ impl Pump {
                     EngineEvent::Error(Failure::Media)
                 },
             );
-        } else if reason == mpv_end_file_reason::Error {
-            let failure = classify_failed_load(a.logs.iter().map(String::as_str));
+        } else if reason == ERROR as u32 {
+            let failure = classify_end_file_error(error, a.logs.iter().map(String::as_str));
             self.active = None;
             self.clear_request_headers();
             self.emit(load, EngineEvent::Error(failure));

@@ -125,6 +125,12 @@ fn respond(conn: &mut TcpStream, status: &str, extra: &[(&str, String)], body: &
     head.push_str("\r\n");
     let _ = conn.write_all(head.as_bytes());
     let _ = conn.write_all(body);
+    let _ = conn.flush();
+    // Close politely (FIN, then drain) so the client never sees a connection reset.
+    let _ = conn.shutdown(std::net::Shutdown::Write);
+    let _ = conn.set_read_timeout(Some(Duration::from_millis(300)));
+    let mut sink = [0u8; 256];
+    while matches!(conn.read(&mut sink), Ok(n) if n > 0) {}
 }
 
 fn handle(
@@ -148,11 +154,21 @@ fn handle(
 
     if let Some(code) = path.strip_prefix("/status/") {
         let code: u16 = code.parse().ok()?;
-        respond(&mut conn, &format!("{code} X"), &[], b"nope");
+        respond(
+            &mut conn,
+            &format!("{code} X"),
+            &[("Content-Length", "4".into()), ("Content-Type", "text/plain".into())],
+            b"nope",
+        );
         return Some(());
     }
     if let Some(to) = path.strip_prefix("/redirect?to=") {
-        respond(&mut conn, "302 Found", &[("Location", to.to_string())], b"");
+        respond(
+            &mut conn,
+            "302 Found",
+            &[("Location", to.to_string()), ("Content-Length", "0".into())],
+            b"",
+        );
         return Some(());
     }
     if path == "/garbage" {
@@ -197,7 +213,7 @@ fn handle(
     let data = match std::fs::read(fixtures_dir().join(&file)) {
         Ok(d) => d,
         Err(_) => {
-            respond(&mut conn, "404 Not Found", &[], b"");
+            respond(&mut conn, "404 Not Found", &[("Content-Length", "0".into())], b"");
             return Some(());
         }
     };

@@ -60,6 +60,11 @@ pub fn classify_log(text: &str) -> Option<Failure> {
         return Some(Failure::Device);
     }
     if has(&[
+        "partial file", // body cut off by the server
+        "could not connect",
+        "couldn't connect",
+        "failure when receiving data",
+        "failure when sending data",
         "connection refused",
         "connection reset",
         "timed out",
@@ -96,6 +101,26 @@ pub fn classify_failed_load<'a>(logs: impl IntoIterator<Item = &'a str>) -> Fail
         .unwrap_or(Failure::Media)
 }
 
+/// mpv error codes that matter (client.h): AO_INIT_FAILED, NOTHING_TO_PLAY, UNKNOWN_FORMAT.
+const ERR_AO_INIT_FAILED: i32 = -14;
+const ERR_NOTHING_TO_PLAY: i32 = -16;
+const ERR_UNKNOWN_FORMAT: i32 = -17;
+
+/// Failure class for an END_FILE event with an error: the code first (output device), then the
+/// diagnostics seen while the file ran, then what the code alone tells us.
+pub fn classify_end_file_error<'a>(code: i32, logs: impl IntoIterator<Item = &'a str>) -> Failure {
+    if code == ERR_AO_INIT_FAILED {
+        return Failure::Device;
+    }
+    match classify_failed_load(logs) {
+        Failure::Media => match code {
+            ERR_UNKNOWN_FORMAT | ERR_NOTHING_TO_PLAY => Failure::Unsupported,
+            _ => Failure::Media,
+        },
+        specific => specific,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,11 +150,24 @@ mod tests {
             Some(Failure::Device)
         );
         assert_eq!(classify_log("tcp: Connection refused"), Some(Failure::Network));
+        assert_eq!(classify_log("error: Could not connect to server"), Some(Failure::Network));
+        assert_eq!(
+            classify_log("transfer failed: Transferred a partial file"),
+            Some(Failure::Network)
+        );
         assert_eq!(
             classify_log("Failed to recognize file format."),
             Some(Failure::Unsupported)
         );
         assert_eq!(classify_log("everything is fine"), None);
+    }
+
+    #[test]
+    fn end_file_codes() {
+        assert_eq!(classify_end_file_error(-14, ["whatever"]), Failure::Device);
+        assert_eq!(classify_end_file_error(-17, ["noise"]), Failure::Unsupported);
+        assert_eq!(classify_end_file_error(-13, ["HTTP error 403 Forbidden"]), Failure::LeaseExpired);
+        assert_eq!(classify_end_file_error(-13, ["noise"]), Failure::Media);
     }
 
     #[test]

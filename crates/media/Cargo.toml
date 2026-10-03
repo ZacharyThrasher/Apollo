@@ -16,5 +16,9 @@ apollo-services-common = { path = "../services-common" }
 libmpv2 = "=6.0.0"
 libmpv2-sys = "=4.0.1"
 
+[target.'cfg(windows)'.dev-dependencies]
+libmpv2 = "=6.0.0"
+libmpv2-sys = "=4.0.1"
+
 [dev-dependencies]
 apollo-domain = { path = "../domain", features = ["test-support"] }
