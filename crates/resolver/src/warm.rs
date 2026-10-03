@@ -92,6 +92,9 @@ pub struct Worker {
     pub startup_ms: u64,
     /// Requests served (diagnostics).
     pub served: u64,
+    /// Resolve requests answered so far. The first one on a fresh worker can come back with the
+    /// plain stream; see `Resolver::warm_once`.
+    pub resolved: u64,
 }
 
 impl Worker {
@@ -184,6 +187,7 @@ impl Worker {
             loaded_epoch: None,
             startup_ms: 0,
             served: 0,
+            resolved: 0,
         };
         let mut init = json!({"op": "init", "deno": spec.deno.to_string_lossy()});
         if !spec.youtube_args.is_empty() {
