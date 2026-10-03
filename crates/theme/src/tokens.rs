@@ -92,6 +92,8 @@ pub mod typography {
     pub const SECTION: TextStyle = TextStyle::new(20.0, 600);
     pub const PAGE_TITLE: TextStyle = TextStyle::new(28.0, 600);
     pub const NOW_PLAYING_TITLE: TextStyle = TextStyle::new(40.0, 600);
+    /// Artist and album under the Now Playing title.
+    pub const NOW_PLAYING_ARTIST: TextStyle = TextStyle::new(18.0, 400);
 }
 
 /// 4px grid, in logical pixels.
