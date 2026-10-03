@@ -1,5 +1,6 @@
 //! Bottom player bar (80px, bg.raised). Left: art and title/artist. Centre: shuffle, previous,
-//! play/pause, next, repeat over the progress bar. Right: volume and the queue toggle.
+//! play/pause, next, repeat over the progress bar. Right: volume, the lyrics toggle and the queue
+//! toggle.
 
 use std::rc::Rc;
 
@@ -20,6 +21,9 @@ use crate::ui::tooltip::Tooltip;
 use crate::ui::transport::{self, TransportFocus};
 
 const VOLUME_WIDTH: f32 = 96.0;
+/// The slider narrows to this when the right block is at its minimum width and holds four
+/// buttons beside it (volume, lyrics, queue, heart and mute at 32px, with their gaps).
+const VOLUME_MIN_WIDTH: f32 = 64.0;
 /// The centre column takes what the side blocks leave, between these bounds. (A fixed 40% plus
 /// two 30% sides plus the gaps overflowed the bar by the gaps' width.)
 const CENTER_MAX: f32 = 640.0;
@@ -38,6 +42,7 @@ pub struct BarFocus {
     pub repeat: FocusHandle,
     pub mute: FocusHandle,
     pub queue: FocusHandle,
+    pub lyrics: FocusHandle,
     pub like: FocusHandle,
     pub progress: FocusHandle,
     pub volume: FocusHandle,
@@ -69,6 +74,9 @@ pub struct PlayerBar {
     pub volume: Entity<SliderState>,
     pub queue_open: bool,
     pub on_queue_toggle: Rc<Handler>,
+    /// Lyrics are on screen (Now Playing is open with lyrics chosen).
+    pub lyrics_open: bool,
+    pub on_lyrics_toggle: Rc<Handler>,
     pub now_playing_open: bool,
     pub on_now_playing_toggle: Rc<Handler>,
     /// The playing track is liked (what the heart shows).
@@ -293,7 +301,8 @@ impl RenderOnce for PlayerBar {
                 }),
             )
             .child(
-                div().w(px(VOLUME_WIDTH)).flex_none().child(
+                // Gives up to 32px to the buttons when the block is at its minimum width.
+                div().w(px(VOLUME_WIDTH)).min_w(px(VOLUME_MIN_WIDTH)).flex_shrink_1().child(
                     Slider::new("volume", &self.volume, &self.focus.volume, "Volume", accent)
                         .value(volume_value)
                         .value_text(format!("{}%", (volume_value * 100.0).round() as u32))
@@ -312,6 +321,25 @@ impl RenderOnce for PlayerBar {
                             }
                         }),
                 ),
+            )
+            .child(
+                button(
+                    "lyrics",
+                    &self.focus.lyrics,
+                    if self.lyrics_open {
+                        Icon::LyricsFilled
+                    } else {
+                        Icon::LyricsRegular
+                    },
+                    "Lyrics",
+                    ready,
+                )
+                .icon_color(transport::on_off(self.lyrics_open))
+                .toggled(self.lyrics_open)
+                .on_click({
+                    let f = self.on_lyrics_toggle.clone();
+                    move |w, cx| f(w, cx)
+                }),
             )
             .child(
                 button(

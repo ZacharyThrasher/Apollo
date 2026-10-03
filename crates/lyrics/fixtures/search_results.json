@@ -1,0 +1,38 @@
+[
+ {
+  "id": 37015057,
+  "name": "Blinding Lights",
+  "trackName": "Blinding Lights",
+  "artistName": "The Weeknd",
+  "albumName": "The Com-Bil-ation",
+  "duration": 202.0,
+  "instrumental": false,
+  "hasWordSync": false,
+  "plainLyrics": "Yeah\n\nI've been tryna call\n",
+  "syncedLyrics": "[00:13.42] Yeah\n[00:14.81] \n[00:26.95] I've been tryna call\n[00:28.56] "
+ },
+ {
+  "id": 36936735,
+  "name": "Blinding Lights",
+  "trackName": "Blinding Lights",
+  "artistName": "The Weeknd",
+  "albumName": "Get Lucky (Radio Edit - feat. Pharrell Williams and Nile Rodgers)",
+  "duration": 248.0,
+  "instrumental": false,
+  "hasWordSync": false,
+  "plainLyrics": "Yeah\n\nI've been tryna call\n",
+  "syncedLyrics": "[00:13.42] Yeah\n[00:14.81] \n[00:26.95] I've been tryna call\n[00:28.56] "
+ },
+ {
+  "id": 900001,
+  "name": "Blinding Lights",
+  "trackName": "Blinding Lights",
+  "artistName": "The Weeknd",
+  "albumName": "All",
+  "duration": 201.0,
+  "instrumental": false,
+  "hasWordSync": false,
+  "plainLyrics": "Yeah\n\nI've been tryna call\n",
+  "syncedLyrics": null
+ }
+]

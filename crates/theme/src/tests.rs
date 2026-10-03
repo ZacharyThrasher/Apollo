@@ -388,3 +388,14 @@ fn motion() {
     assert!(ease_out_cubic(0.5) > 0.5);
     assert_eq!(ease_out_cubic(2.0), 1.0);
 }
+
+#[test]
+fn dimmed_lyric_lines_still_pass_aa_on_the_surfaces_they_sit_on() {
+    use crate::tokens::lyrics::DIM_OPACITY_PCT;
+    let dim = TEXT_SECONDARY.with_alpha_pct(DIM_OPACITY_PCT);
+    for bg in [BG_BASE, BG_RAISED] {
+        assert!(contrast_ratio(dim, bg) >= AA, "{bg:?}");
+    }
+    // ... and stay visibly apart from the current line (text.primary).
+    assert!(contrast_ratio(TEXT_PRIMARY, BG_BASE) > contrast_ratio(dim, BG_BASE) + 2.0);
+}

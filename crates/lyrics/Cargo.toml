@@ -1,0 +1,16 @@
+[package]
+name = "apollo-lyrics"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Lyrics: LRC parsing, the LRCLIB source, and a SQLite-cached lookup service"
+
+[dependencies]
+apollo-store = { path = "../store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "3"
+
+[dev-dependencies]
+tempfile = "3"

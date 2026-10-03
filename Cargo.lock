@@ -206,6 +206,7 @@ dependencies = [
  "apollo-account",
  "apollo-domain",
  "apollo-innertube",
+ "apollo-lyrics",
  "apollo-media",
  "apollo-provider",
  "apollo-resolver",
@@ -254,6 +255,17 @@ dependencies = [
  "serde_json",
  "tao",
  "wry",
+]
+
+[[package]]
+name = "apollo-lyrics"
+version = "0.0.0"
+dependencies = [
+ "apollo-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
 ]
 
 [[package]]
