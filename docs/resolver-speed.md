@@ -78,3 +78,28 @@ above roughly 1.5 s after the trim; if built, keep the workers as the fallback.
 Production now uses the skip setting for clicks only and the defaults for everything resolved
 ahead (`WarmConfig::fast_clicks`). A click whose fast resolve fails is retried once with the
 defaults. The remaining cold-click time is mostly the web music player API call (0.9 to 1.4 s).
+
+## Round 3 results (bench section [6], owner's PC): the web music call was the cost
+With a music.youtube.com URL yt-dlp always adds the web music client, a 0.9 to 1.5 s call, even
+when another client's stream is the one used. Resolving the plain watch URL instead removes it.
+
+| Setting (all skip page + initial data) | Cold click | Stream |
+|---|---|---|
+| yt-dlp defaults (reference) | 4.1 s | Premium opus 774, ~256 kbps |
+| music URL | 2.6 s | opus 251, ~130 kbps |
+| watch URL | 1.05 s | opus 251, ~130 kbps |
+| watch URL, embedded + tv clients | 0.81 s | opus 251, ~130 kbps |
+| watch URL, embedded client only | 0.63 s | opus 251, ~130 kbps |
+
+Production clicks use "watch URL, embedded + tv clients" (tv covers some embedding-restricted
+tracks for 0.2 s); a click with no stream is retried with the defaults. Anything resolved ahead
+keeps the defaults (Premium stream). The remaining time is one embedded player-API call (about
+0.15 s), the tv call and the JS solve (about 0.15 s).
+
+## Swapping to the Premium stream after a fast start (considered, not built)
+A reopen in libmpv takes 25 to 70 ms to open and the first audio shows within one 250 ms position
+tick (about 0.3 s measured), plus a connect to googlevideo, so a mid-song swap would drop out
+audibly for roughly 0.1 to 0.4 s; loadfile/start= cannot crossfade. A seamless swap needs a
+second engine with a crossfade (or an EDL timeline) and a coordinator effect so it does not look
+like a track change. It would only help the one cold-clicked track per start. Not measured on the
+PC; revisit if the ~130 kbps stream bothers the owner.

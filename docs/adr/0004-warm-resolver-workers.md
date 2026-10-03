@@ -63,3 +63,9 @@ fallback keep the defaults. A click that gets no usable stream with the fast arg
 example an embedding-restricted track) is retried once with the defaults. The arguments travel
 with each resolve request, so one worker serves both kinds. Skipping client configs, or limiting
 the clients, gave no playable format in the measurements and is not used.
+
+Update the same day: the web music client call (0.9 to 1.5 s) was the largest remaining cost on
+the fast path, and it only runs because the music URL adds that client. Clicks now resolve the
+plain watch URL with the embedded and tv clients only: about 0.8 s cold, measured. Requests
+carry `site` (`www` or `music`) and the arguments; the defaults (music URL, all clients) remain
+for background work and for the retry.
