@@ -1,5 +1,10 @@
-/target
+target/
+tools/
 *.log
-# never commit credentials, cookies or raw authenticated responses
+# user's Obsidian vault config, not part of the repo
+.obsidian/
+# secrets / local probe artifacts must never be committed
 *.cookies
-cookies.txt
+cookies*.txt
+*.sqlite
+.probe-local/

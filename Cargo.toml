@@ -1,8 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/domain"]
+members = ["crates/domain", "spikes/m0-gpui", "spikes/m0-media", "spikes/m0-login", "spikes/m0-resolve"]
 
 [workspace.package]
 edition = "2021"
 license = "GPL-3.0-or-later"
 publish = false
+
+# gpui is consumed as a git dependency of the Zed workspace and does NOT inherit
+# Zed's [patch.crates-io]. Mirrored here from zed @ f37989fbdf84 (only what the
+# gpui/Windows graph needs).
+[patch.crates-io]
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }

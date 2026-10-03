@@ -1,0 +1,140 @@
+{
+  "research_date": "2026-10-02",
+  "status": "observations_and_candidate_choices_only_not_a_tested_lockfile",
+  "primary_os": null,
+  "rust_toolchain": null,
+  "live_premium_account_tested": false,
+  "application_compiled": false,
+  "observed_sources": [
+    {
+      "name": "Limusic",
+      "repository": "https://github.com/SimoHypers/limusic",
+      "observed_ref": "75e55dc8cf9d34660a6816d7be533ddf52af6dd0",
+      "observed_manifest_version": "1.1.0-rc.7",
+      "license_field": "GPL-3.0-or-later",
+      "role": "metadata reuse seed and playback reference"
+    },
+    {
+      "name": "Zuno",
+      "repository": "https://github.com/noFAYZ/zuno",
+      "observed_ref": "09b4acbbae8ed14b9c8f9daaaca041bbb6aa9c1b",
+      "observed_manifest_version": "1.4.0",
+      "observed_architecture_doc_version": "1.2.1",
+      "license_file": "Apache-2.0",
+      "role": "state, queue and integration reference"
+    },
+    {
+      "name": "Zed GPUI",
+      "repository": "https://github.com/zed-industries/zed",
+      "observed_main_ref": "f37989fbdf840b308892af66516c2b9c3ef3853a",
+      "observed_gpui_manifest_version": "0.2.2",
+      "gpui_license_field": "Apache-2.0",
+      "role": "framework candidate; gpui and gpui_platform from matching source",
+      "note": "Observed main manifest/API is not proof of an equivalent published crate or tested app graph"
+    },
+    {
+      "name": "GPUI Kit",
+      "repository": "https://github.com/longbridge/gpui-kit",
+      "observed_ref": "main",
+      "observed_manifest_version": "0.7.0",
+      "observed_website_version": "0.6.0",
+      "observed_snapshot_packages": "gpui-pre and gpui-pre-platform =0.3.7",
+      "role": "optional coordinated component graph, not default mixed dependency"
+    },
+    {
+      "name": "Sonora",
+      "repository": "https://github.com/sonorahq/sonora",
+      "observed_ref": "main",
+      "observed_manifest_version": "0.42.0",
+      "license_field": "GPL-3.0-or-later",
+      "role": "additional native GPUI music-player reference"
+    },
+    {
+      "name": "Sonora ytmusic-rs",
+      "repository": "https://github.com/sonorahq/ytmusic-rs",
+      "observed_ref": "f213c0b",
+      "observed_manifest_version": "0.1.0",
+      "license_field": "GPL-3.0-or-later",
+      "role": "later native resolver/provider candidate; not primary"
+    },
+    {
+      "name": "Tono",
+      "repository": "https://codeberg.org/tono-fm/client",
+      "observed_ref": null,
+      "license": null,
+      "source_retrieved": false,
+      "role": "unverified source reference; author product description only"
+    }
+  ],
+  "to_pin_and_test": [
+    {
+      "component": "gpui + gpui_platform",
+      "choice": "matching upstream revision graph",
+      "tested_version": null
+    },
+    {
+      "component": "yt-dlp",
+      "choice": "controlled resolution-only executable; no user config/plugins",
+      "tested_version": null,
+      "sha256": null
+    },
+    {
+      "component": "yt-dlp EJS",
+      "choice": "compatible local component packaging for selected yt-dlp",
+      "tested_version": null
+    },
+    {
+      "component": "Deno",
+      "choice": "supported upstream-recommended runtime",
+      "tested_version": null,
+      "sha256": null
+    },
+    {
+      "component": "libmpv + libmpv2",
+      "choice": "native playback binding/library pair",
+      "tested_version": null,
+      "required_codecs": [
+        "AAC",
+        "Opus"
+      ]
+    },
+    {
+      "component": "Tokio",
+      "choice": "explicit service runtime",
+      "tested_version": null
+    },
+    {
+      "component": "SQLite Rust binding",
+      "choice": "off-main-thread store with transactional migrations",
+      "tested_version": null
+    },
+    {
+      "component": "keyring / platform vault",
+      "choice": "encrypted credentials; memory-only fallback",
+      "tested_version": null
+    },
+    {
+      "component": "Souvlaki / native desktop adapter",
+      "choice": "GPUI-compatible media integration",
+      "tested_version": null
+    }
+  ],
+  "required_build_evidence": [
+    "OS and architecture",
+    "Rust toolchain",
+    "Cargo.lock and duplicate dependency audit",
+    "native library discovery/build features",
+    "resolver/runtime versions and hashes",
+    "selected authenticated resolver policy",
+    "redacted account probe outcome",
+    "actual media formats tested",
+    "acceptance-test results with not_run labels"
+  ],
+  "prohibited_in_manifest": [
+    "cookies",
+    "authorization headers",
+    "signed media URLs",
+    "account secrets",
+    "unverified claims of tested compatibility"
+  ]
+}
