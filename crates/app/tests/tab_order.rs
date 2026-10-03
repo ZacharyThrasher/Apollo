@@ -214,16 +214,9 @@ fn assert_sane_with(
     forward
 }
 
-/// Every item on Home's shelves is one page stop.
+/// Every shelf on Home is one page stop.
 fn home_items(shell: &Entity<Shell>, vcx: &mut VisualTestContext) -> usize {
-    shell.read_with(vcx, |s, cx| {
-        s.home()
-            .read(cx)
-            .shelves()
-            .iter()
-            .map(|shelf| shelf.items.len())
-            .sum()
-    })
+    shell.read_with(vcx, |s, cx| s.home().read(cx).shelves().len())
 }
 
 #[gpui::test]
@@ -235,7 +228,7 @@ fn home_tabs_through_the_nav_then_the_player_bar(cx: &mut TestAppContext) {
     assert_eq!(
         order.len(),
         NAV.len() + items + BAR.len(),
-        "home's page stops are its items: {order:?}"
+        "home's page stops are its shelves: {order:?}"
     );
 }
 

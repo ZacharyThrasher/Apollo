@@ -534,6 +534,43 @@ fn left_and_right_walk_the_items_and_the_row_follows_the_focus(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn a_shelf_is_one_tab_stop_that_remembers_where_you_were(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    let (first, second_shelf_first) = page.view.read_with(vcx, |v, cx| {
+        let shelves = page.home.read(cx).shelves();
+        (
+            v.item_stops()[0].clone(),
+            v.item_stops()[shelves[0].items.len()].clone(),
+        )
+    });
+    vcx.update(|window, cx| window.focus(&first, cx));
+    vcx.simulate_keystrokes("right right");
+    let third = page.view.read_with(vcx, |v, _| v.item_stops()[2].clone());
+    assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(third.clone()));
+    vcx.run_until_parked();
+
+    // Tab leaves the shelf: the next stop is the next shelf's remembered item, not item four.
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(
+        vcx.update(|window, cx| window.focused(cx)),
+        Some(second_shelf_first),
+        "Tab goes shelf to shelf"
+    );
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("shift-tab");
+    assert_eq!(
+        vcx.update(|window, cx| window.focused(cx)),
+        Some(third),
+        "and comes back to the item you left"
+    );
+
+    // The arrows stay inside the shelf.
+    vcx.update(|window, cx| window.focus(&first, cx));
+    vcx.simulate_keystrokes("left");
+    assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(first));
+}
+
+#[gpui::test]
 fn the_chevrons_show_on_hover_and_page_the_row(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     narrow(vcx);
