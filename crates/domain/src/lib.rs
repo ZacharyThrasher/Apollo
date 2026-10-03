@@ -3,6 +3,7 @@
 
 pub mod lease;
 pub mod links;
+pub mod listing;
 pub mod model;
 pub mod playback;
 pub mod queue;
