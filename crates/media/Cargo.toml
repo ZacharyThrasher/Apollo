@@ -1,0 +1,24 @@
+[package]
+name = "apollo-media"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "libmpv adapter implementing apollo_runtime::MediaEngine (Windows)"
+build = "build.rs"
+
+[dependencies]
+apollo-domain = { path = "../domain" }
+apollo-runtime = { path = "../runtime" }
+apollo-services-common = { path = "../services-common" }
+
+[target.'cfg(windows)'.dependencies]
+libmpv2 = "=6.0.0"
+libmpv2-sys = "=4.0.1"
+
+[target.'cfg(windows)'.dev-dependencies]
+libmpv2 = "=6.0.0"
+libmpv2-sys = "=4.0.1"
+
+[dev-dependencies]
+apollo-domain = { path = "../domain", features = ["test-support"] }
