@@ -1,0 +1,239 @@
+{
+ "contents": [
+  {
+   "addToPlaylistRenderer": {
+    "playlists": [
+     {
+      "playlistAddToOptionRenderer": {
+       "playlistId": "LM",
+       "title": {
+        "runs": [
+         {
+          "text": "Liked Music"
+         }
+        ]
+       },
+       "shortBylineText": {
+        "simpleText": "132 songs"
+       },
+       "addToPlaylistServiceEndpoint": {
+        "likeEndpoint": {
+         "status": "LIKE",
+         "target": {
+          "videoId": "aaaaaaaaaaa"
+         },
+         "likeParams": "OAM%3D"
+        }
+       },
+       "thumbnailRenderer": {
+        "musicThumbnailRenderer": {
+         "thumbnail": {
+          "thumbnails": [
+           {
+            "url": "https://yt3.googleusercontent.com/redacted=w88-h88"
+           }
+          ]
+         }
+        }
+       },
+       "additionalIcons": [
+        {
+         "iconType": "KEEP"
+        }
+       ]
+      }
+     },
+     {
+      "playlistAddToOptionRenderer": {
+       "playlistId": "PLrecorded0001",
+       "title": {
+        "runs": [
+         {
+          "text": "Playlist One"
+         }
+        ]
+       },
+       "shortBylineText": {
+        "runs": [
+         {
+          "text": "59"
+         },
+         {
+          "text": " tracks"
+         }
+        ]
+       },
+       "addToPlaylistServiceEndpoint": {
+        "playlistEditEndpoint": {
+         "playlistId": "PLrecorded0001",
+         "actions": [
+          {
+           "addedVideoId": "aaaaaaaaaaa",
+           "action": "ACTION_ADD_VIDEO",
+           "dedupeOption": "DEDUPE_OPTION_CHECK"
+          }
+         ]
+        }
+       },
+       "removeFromPlaylistServiceEndpoint": {
+        "playlistEditEndpoint": {
+         "playlistId": "PLrecorded0001",
+         "actions": [
+          {
+           "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID",
+           "removedVideoId": "aaaaaaaaaaa"
+          }
+         ]
+        }
+       },
+       "thumbnailRenderer": {
+        "musicThumbnailRenderer": {
+         "thumbnail": {
+          "thumbnails": [
+           {
+            "url": "https://yt3.googleusercontent.com/redacted=w88-h88",
+            "width": 44,
+            "height": 44
+           },
+           {
+            "url": "https://yt3.googleusercontent.com/redacted=w88-h88",
+            "width": 88,
+            "height": 88
+           }
+          ]
+         }
+        }
+       }
+      }
+     },
+     {
+      "playlistAddToOptionRenderer": {
+       "playlistId": "PLrecorded0002",
+       "title": {
+        "runs": [
+         {
+          "text": "Playlist Two"
+         }
+        ]
+       },
+       "shortBylineText": {
+        "runs": [
+         {
+          "text": "9"
+         },
+         {
+          "text": " tracks"
+         }
+        ]
+       },
+       "addToPlaylistServiceEndpoint": {
+        "playlistEditEndpoint": {
+         "playlistId": "PLrecorded0002",
+         "actions": [
+          {
+           "addedVideoId": "aaaaaaaaaaa",
+           "action": "ACTION_ADD_VIDEO",
+           "dedupeOption": "DEDUPE_OPTION_CHECK"
+          }
+         ]
+        }
+       },
+       "removeFromPlaylistServiceEndpoint": {
+        "playlistEditEndpoint": {
+         "playlistId": "PLrecorded0002",
+         "actions": [
+          {
+           "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID",
+           "removedVideoId": "aaaaaaaaaaa"
+          }
+         ]
+        }
+       },
+       "thumbnailRenderer": {
+        "musicThumbnailRenderer": {
+         "thumbnail": {
+          "thumbnails": [
+           {
+            "url": "https://yt3.googleusercontent.com/redacted=w88-h88",
+            "width": 44,
+            "height": 44
+           },
+           {
+            "url": "https://yt3.googleusercontent.com/redacted=w88-h88",
+            "width": 88,
+            "height": 88
+           }
+          ]
+         }
+        }
+       }
+      }
+     },
+     {
+      "playlistAddToOptionRenderer": {
+       "playlistId": "PLrecorded0003",
+       "title": {
+        "runs": [
+         {
+          "text": "Playlist Three"
+         }
+        ]
+       },
+       "shortBylineText": {
+        "runs": [
+         {
+          "text": "20"
+         },
+         {
+          "text": " tracks"
+         }
+        ]
+       },
+       "addToPlaylistServiceEndpoint": {
+        "playlistEditEndpoint": {
+         "playlistId": "PLrecorded0003",
+         "actions": [
+          {
+           "addedVideoId": "aaaaaaaaaaa",
+           "action": "ACTION_ADD_VIDEO",
+           "dedupeOption": "DEDUPE_OPTION_CHECK"
+          }
+         ]
+        }
+       },
+       "removeFromPlaylistServiceEndpoint": {
+        "playlistEditEndpoint": {
+         "playlistId": "PLrecorded0003",
+         "actions": [
+          {
+           "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID",
+           "removedVideoId": "aaaaaaaaaaa"
+          }
+         ]
+        }
+       },
+       "thumbnailRenderer": {
+        "musicThumbnailRenderer": {
+         "thumbnail": {
+          "thumbnails": [
+           {
+            "url": "https://yt3.googleusercontent.com/redacted=w88-h88",
+            "width": 44,
+            "height": 44
+           },
+           {
+            "url": "https://yt3.googleusercontent.com/redacted=w88-h88",
+            "width": 88,
+            "height": 88
+           }
+          ]
+         }
+        }
+       }
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

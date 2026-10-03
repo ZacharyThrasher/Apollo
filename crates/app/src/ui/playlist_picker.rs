@@ -52,6 +52,8 @@ pub fn bind_keys(cx: &mut App) {
 pub const PANEL_WIDTH: f32 = 280.0;
 pub const PANEL_MAX_HEIGHT: f32 = 320.0;
 const ROW_HEIGHT: f32 = 40.0;
+/// The shortest the popover gets, however little room there is.
+const MIN_HEIGHT: f32 = 160.0;
 const SKELETON_ROWS: usize = 5;
 /// Gap between the anchor and the popover, and the least it keeps from the window's edge.
 const ANCHOR_GAP: f32 = spacing::S1;
@@ -415,7 +417,7 @@ impl Render for PlaylistPicker {
                     Vertical::Top(y) => placed.top(px(y - layout::TITLE_BAR_HEIGHT)),
                     Vertical::Bottom(y) => placed.bottom(px(y)),
                 };
-                layer.child(placed.child(panel))
+                layer.child(placed.child(panel.max_h(px(at.max_height))))
             }
             None => layer
                 .flex()
@@ -433,6 +435,9 @@ impl Render for PlaylistPicker {
 pub struct Position {
     pub left: f32,
     pub vertical: Vertical,
+    /// The tallest the popover may be here: its usual maximum, or the room that is left on the
+    /// side it opens to (the list scrolls inside).
+    pub max_height: f32,
 }
 
 /// Either the popover's top edge, or its bottom edge measured up from the window's bottom.
@@ -443,7 +448,8 @@ pub enum Vertical {
 }
 
 /// Below the anchor with the right edges aligned (the actions sit at a row's right), above it
-/// when the room below is too short for the tallest popover, and always inside the window.
+/// when the room below is too short for the tallest popover and the room above is longer, and
+/// always inside the window: where neither side fits it, the popover shrinks to the roomier one.
 pub fn popover_position(anchor: Bounds<Pixels>, window: gpui::Size<Pixels>) -> Position {
     let (window_w, window_h) = (f32::from(window.width), f32::from(window.height));
     let right = f32::from(anchor.origin.x + anchor.size.width);
@@ -452,12 +458,19 @@ pub fn popover_position(anchor: Bounds<Pixels>, window: gpui::Size<Pixels>) -> P
     let max_left = (window_w - PANEL_WIDTH - EDGE_MARGIN).max(EDGE_MARGIN);
     let left = (right - PANEL_WIDTH).clamp(EDGE_MARGIN, max_left);
     let room_below = window_h - bottom - ANCHOR_GAP - EDGE_MARGIN;
-    let vertical = if room_below >= PANEL_MAX_HEIGHT || top < PANEL_MAX_HEIGHT {
-        Vertical::Top(bottom + ANCHOR_GAP)
+    // The title bar stays clear, so the room above starts under it.
+    let room_above = top - layout::TITLE_BAR_HEIGHT - ANCHOR_GAP - EDGE_MARGIN;
+    let (vertical, room) = if room_below >= PANEL_MAX_HEIGHT || room_below >= room_above {
+        (Vertical::Top(bottom + ANCHOR_GAP), room_below)
     } else {
-        Vertical::Bottom(window_h - top + ANCHOR_GAP)
+        (Vertical::Bottom(window_h - top + ANCHOR_GAP), room_above)
     };
-    Position { left, vertical }
+    Position {
+        left,
+        vertical,
+        // Never so short that the header and a row or two do not fit.
+        max_height: room.min(PANEL_MAX_HEIGHT).max(MIN_HEIGHT),
+    }
 }
 
 fn playlist_row(
@@ -608,8 +621,20 @@ mod tests {
     }
 
     #[test]
-    fn a_short_window_opens_below_rather_than_off_the_top() {
-        let at = popover_position(anchor(500.0, 200.0), size(px(1000.0), px(400.0)));
+    fn a_short_window_takes_the_roomier_side_and_shrinks_to_fit_it() {
+        // 480 high, anchor in the upper part: more room below than above, but not 320px of it.
+        let window = size(px(864.0), px(480.0));
+        let at = popover_position(anchor(500.0, 200.0), window);
         assert!(matches!(at.vertical, Vertical::Top(_)));
+        let room_below = 480.0 - 232.0 - ANCHOR_GAP - EDGE_MARGIN;
+        assert_eq!(at.max_height, room_below);
+        // A row lower down has more room above, so it opens upward and fits there.
+        let at = popover_position(anchor(500.0, 297.0), window);
+        assert!(matches!(at.vertical, Vertical::Bottom(_)));
+        assert!(at.max_height <= PANEL_MAX_HEIGHT);
+        assert!(297.0 - at.max_height - ANCHOR_GAP >= layout::TITLE_BAR_HEIGHT);
+        // Whatever the window, the popover is never taller than its usual maximum.
+        let tall = popover_position(anchor(500.0, 200.0), size(px(1200.0), px(1200.0)));
+        assert_eq!(tall.max_height, PANEL_MAX_HEIGHT);
     }
 }

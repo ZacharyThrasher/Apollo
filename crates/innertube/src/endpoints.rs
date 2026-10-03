@@ -592,12 +592,14 @@ fn add_options_body(context: Context, video_id: &str) -> serde_json::Value {
     #[serde(rename_all = "camelCase")]
     struct Body {
         context: Context,
-        video_id: String,
+        /// An array: the service answers `videoId` (a single string) with a 400. Found against
+        /// the real account; the first version of this request guessed the singular.
+        video_ids: [String; 1],
         exclude_watch_later: bool,
     }
     serde_json::to_value(Body {
         context,
-        video_id: video_id.to_owned(),
+        video_ids: [video_id.to_owned()],
         // Watch Later is a YouTube (not YouTube Music) list: not a place a song goes here.
         exclude_watch_later: true,
     })
@@ -681,7 +683,8 @@ mod tests {
     fn the_playlist_sheet_request_leaves_out_watch_later() {
         let (tube, client) = tube();
         let body = add_options_body(tube.context_for(&client), "dQw4w9WgXcQ");
-        assert_eq!(body["videoId"], "dQw4w9WgXcQ");
+        assert_eq!(body["videoIds"], serde_json::json!(["dQw4w9WgXcQ"]));
+        assert!(body.get("videoId").is_none(), "the service rejects the singular with a 400");
         assert_eq!(body["excludeWatchLater"], true);
     }
 }
