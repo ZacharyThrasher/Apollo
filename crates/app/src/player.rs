@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use apollo_domain::model::QueueEntryId;
+use apollo_domain::model::{QueueEntryId, Track};
 use apollo_domain::playback::{Event, Failure, Intent, Phase};
 use apollo_domain::queue::{QueueEntry, Repeat};
 use apollo_runtime::Driver;
@@ -16,6 +16,7 @@ use gpui::{Context, RenderImage, SharedString};
 use crate::accent_anim::AccentAnim;
 use crate::art::{ArtSource, DecodedArt};
 use crate::backend::{LibraryTrack, Ports, Prepared};
+use crate::library::LibrarySource;
 use crate::settings::VolumeStore;
 use crate::thumbs::Thumbs;
 
@@ -97,6 +98,7 @@ pub struct PlayerModel {
     status: Status,
     driver: Option<AppDriver>,
     art_source: Option<Arc<dyn ArtSource>>,
+    library: Option<Arc<dyn LibrarySource>>,
     art: HashMap<String, ArtSlot>,
     thumbs: Thumbs,
     accent: AccentAnim,
@@ -112,6 +114,7 @@ impl PlayerModel {
             status: Status::Starting,
             driver: None,
             art_source: None,
+            library: None,
             art: HashMap::new(),
             thumbs: Thumbs::default(),
             accent: AccentAnim::new(Accent::fallback()),
@@ -129,6 +132,7 @@ impl PlayerModel {
             ports: Ports { resolver, engine },
             queue,
             art,
+            library,
             ..
         } = prepared;
         let mut driver = Driver::new(resolver, engine);
@@ -142,6 +146,7 @@ impl PlayerModel {
         });
         self.driver = Some(driver);
         self.art_source = Some(art);
+        self.library = Some(library);
         self.status = Status::Ready;
         self.sync(cx);
     }
@@ -159,6 +164,21 @@ impl PlayerModel {
 
     pub fn is_ready(&self) -> bool {
         self.driver.is_some()
+    }
+
+    /// The accent right now (mid-crossfade included) and whether it is still moving, for views
+    /// that draw it without the full [`PlayerView`] snapshot.
+    pub fn accent_now(&self) -> (Accent, bool) {
+        self.accent.at(Instant::now())
+    }
+
+    pub fn status(&self) -> &Status {
+        &self.status
+    }
+
+    /// What the library screen reads through, once the backend is installed.
+    pub fn library_source(&self) -> Option<Arc<dyn LibrarySource>> {
+        self.library.clone()
     }
 
     /// Silence the engine and drop the adapters (which reap their helper processes).
@@ -205,12 +225,52 @@ impl PlayerModel {
         self.handle(Event::Seek { position_ms }, cx);
     }
 
-    pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
+    fn next_seed(&mut self) -> u64 {
         let seed = self.shuffle_seed;
         self.shuffle_seed = self
             .shuffle_seed
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
+        seed
+    }
+
+    /// Replace the queue with `tracks` and start playing. `start` is the first track's index
+    /// (default: the first, or a random one when shuffling); `shuffle` sets the queue's shuffle
+    /// on or off, `None` keeping the current setting.
+    pub fn play_tracks(
+        &mut self,
+        tracks: Vec<Track>,
+        start: Option<usize>,
+        shuffle: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        if tracks.is_empty() || self.driver.is_none() {
+            return;
+        }
+        let seed = self.next_seed();
+        let shuffle_on = match (shuffle, self.driver.as_ref()) {
+            (Some(on), _) => on,
+            (None, Some(d)) => d.coordinator().queue().shuffle(),
+            (None, None) => false,
+        };
+        let start = start.unwrap_or(if shuffle_on {
+            (seed >> 11) as usize % tracks.len()
+        } else {
+            0
+        });
+        if let Some(d) = self.driver.as_mut() {
+            // Before the context is built, so the new queue is shuffled around its first track.
+            // Off then on, so a repeated Shuffle draws a new order instead of reusing the seed.
+            d.edit_queue(|q| {
+                q.set_shuffle(false, seed);
+                q.set_shuffle(shuffle_on, seed);
+            });
+        }
+        self.handle(Event::PlayContext { tracks, start }, cx);
+    }
+
+    pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
+        let seed = self.next_seed();
         if let Some(d) = self.driver.as_mut() {
             let on = !d.coordinator().queue().shuffle();
             d.edit_queue(|q| q.set_shuffle(on, seed));
@@ -312,7 +372,8 @@ impl PlayerModel {
 
     // ---- artwork -----------------------------------------------------------
 
-    fn current_video(&self) -> Option<String> {
+    /// The video id of the queue's current track.
+    pub fn current_video(&self) -> Option<String> {
         let d = self.driver.as_ref()?;
         Some(
             d.coordinator()

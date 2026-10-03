@@ -286,3 +286,67 @@ fn a_single_account_session_falls_back_to_the_menu_identity() {
     let v = account_validation(&menu, &[]).unwrap();
     assert_eq!(v.identities, vec![IdentityId::new("UCme")]);
 }
+
+fn card(browse_id: &str, title: &str, subtitle: Option<&str>) -> Value {
+    let mut c = json!({ "musicTwoRowItemRenderer": {
+        "title": { "runs": [{ "text": title }] },
+        "navigationEndpoint": { "browseEndpoint": { "browseId": browse_id } },
+        "thumbnailRenderer": { "musicThumbnailRenderer": { "thumbnail": { "thumbnails": [
+            { "url": "https://img.example/small", "width": 60, "height": 60 },
+            { "url": "https://img.example/large", "width": 226, "height": 226 }
+        ] } } }
+    } });
+    if let Some(s) = subtitle {
+        c["musicTwoRowItemRenderer"]["subtitle"] = json!({ "runs": [{ "text": s }] });
+    }
+    c
+}
+
+fn grid(cards: Vec<Value>) -> Value {
+    json!({ "contents": { "gridRenderer": { "items": cards } } })
+}
+
+#[test]
+fn library_playlist_cards_become_collections() {
+    use innertube::models::browse::parse_library;
+    let cards = parse_library(&grid(vec![
+        card("VLPLabc", "Road trip", Some("Playlist • 42 songs")),
+        card("VLLM", "Liked Music", None),
+        card("UCartist", "Not a playlist", None),
+    ]));
+    let list = collections_from_grid(&cards, CollectionKind::Playlist);
+    assert_eq!(list.len(), 2, "artists have no track list here");
+    assert_eq!(list[0].kind, CollectionKind::Playlist);
+    assert_eq!(list[0].id.as_str(), "VLPLabc");
+    assert_eq!(list[0].title, "Road trip");
+    assert_eq!(list[0].subtitle.as_deref(), Some("Playlist • 42 songs"));
+    assert_eq!(
+        list[0].thumbnail.as_deref(),
+        Some("https://img.example/large")
+    );
+    assert!(list[1].is_liked_music());
+    assert_eq!(list[1].subtitle, None);
+}
+
+#[test]
+fn library_album_cards_become_collections() {
+    use innertube::models::browse::parse_library;
+    let cards = parse_library(&grid(vec![
+        card("MPREb_x", "Night Shift", Some("Album • Neon Arcade • 2024")),
+        card("VLPLabc", "A playlist among albums", None),
+    ]));
+    let list = collections_from_grid(&cards, CollectionKind::Album);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].kind, CollectionKind::Album);
+    assert_eq!(list[0].id.as_str(), "MPREb_x");
+}
+
+#[test]
+fn a_card_without_a_title_or_id_is_dropped_not_shown_blank() {
+    let mut c = innertube::models::browse::parse_library(&grid(vec![card("VLPLabc", "x", None)]));
+    c[0].title = "  ".into();
+    assert!(collections_from_grid(&c, CollectionKind::Playlist).is_empty());
+    c[0].title = "x".into();
+    c[0].id = String::new();
+    assert!(collections_from_grid(&c, CollectionKind::Playlist).is_empty());
+}

@@ -36,6 +36,7 @@ fn prepared() -> Prepared {
         },
         queue,
         art: Arc::new(TestArt),
+        library: Arc::new(apollo_app::library::sim::SimLibrary::instant()),
     }
 }
 

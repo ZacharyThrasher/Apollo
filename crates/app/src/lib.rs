@@ -6,6 +6,7 @@ pub mod app;
 pub mod art;
 pub mod assets;
 pub mod backend;
+pub mod library;
 pub mod motion;
 pub mod platform;
 pub mod player;

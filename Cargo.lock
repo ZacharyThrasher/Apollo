@@ -205,7 +205,9 @@ version = "0.0.0"
 dependencies = [
  "apollo-account",
  "apollo-domain",
+ "apollo-innertube",
  "apollo-media",
+ "apollo-provider",
  "apollo-resolver",
  "apollo-runtime",
  "apollo-services-common",

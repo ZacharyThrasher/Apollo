@@ -57,6 +57,8 @@ icons! {
     Delete => "delete-regular",
     ChevronDown => "chevron-down-regular",
     Spinner => "spinner",
+    ArrowLeft => "arrow-left-regular",
+    HeartFilled => "heart-filled",
 }
 
 pub struct Assets;

@@ -14,6 +14,7 @@ use crate::motion::PanelSlide;
 use crate::player::PlayerModel;
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
+use crate::ui::library::{self, LibraryView};
 use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
@@ -50,12 +51,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", StepForward, Some(crate::ui::slider::KEY_CONTEXT)),
     ]);
     crate::ui::queue_panel::bind_keys(cx);
+    library::bind_keys(cx);
 }
 
 pub struct Shell {
     player: Entity<PlayerModel>,
     account: Entity<AccountModel>,
     account_page: Entity<AccountPage>,
+    library: Entity<LibraryView>,
+    /// The account epoch the library was last loaded under.
+    library_epoch: u64,
     /// The first time the account turns out to be signed out, the window opens on Settings.
     routed_to_sign_in: bool,
     route: Route,
@@ -139,6 +144,18 @@ impl Shell {
             )
         });
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
+        let library = cx.new(|cx| {
+            LibraryView::new(
+                player.clone(),
+                {
+                    let weak = weak.clone();
+                    move |_, cx| {
+                        let _ = weak.update(cx, |s, cx| s.show_route(Route::Search, cx));
+                    }
+                },
+                cx,
+            )
+        });
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&account, |this, _, cx| this.account_changed(cx))
             .detach();
@@ -148,6 +165,8 @@ impl Shell {
             player,
             account,
             account_page,
+            library,
+            library_epoch: 0,
             routed_to_sign_in: false,
             route: Route::Home,
             nav_expanded: false,
@@ -169,6 +188,12 @@ impl Shell {
 
     /// Opens Settings once if the startup check ends with nobody signed in.
     fn account_changed(&mut self, cx: &mut Context<Self>) {
+        // A different login, identity or sign-out: nothing listed under the old one stays.
+        let epoch = self.account.read(cx).service().view().epoch;
+        if epoch != self.library_epoch {
+            self.library_epoch = epoch;
+            self.library.update(cx, |l, cx| l.reset(cx));
+        }
         if !self.routed_to_sign_in && self.account.read(cx).is_signed_out() {
             self.routed_to_sign_in = true;
             self.route = Route::Settings;
@@ -179,6 +204,10 @@ impl Shell {
 
     pub fn route(&self) -> Route {
         self.route
+    }
+
+    pub fn library(&self) -> &Entity<LibraryView> {
+        &self.library
     }
 
     pub fn nav_expanded(&self) -> bool {
@@ -197,7 +226,8 @@ impl Shell {
         self.now_playing_open
     }
 
-    fn show_route(&mut self, route: Route, cx: &mut Context<Self>) {
+    /// Switch page (what the nav rail and the empty states' actions do).
+    pub fn show_route(&mut self, route: Route, cx: &mut Context<Self>) {
         self.route = route;
         self.now_playing_open = false;
         cx.notify();
@@ -259,30 +289,38 @@ impl Render for Shell {
         .attention(self.account.read(cx).attention())
         .on_route({
             let shell = shell.clone();
-            move |route, _, cx| {
-                shell.update(cx, |s, cx| s.show_route(route, cx));
+            move |route, window, cx| {
+                shell.update(cx, |s, cx| {
+                    // Choosing Library while on it returns to its lists.
+                    if route == Route::Library && s.route == Route::Library {
+                        s.library.update(cx, |l, cx| l.go_home(window, cx));
+                    }
+                    s.show_route(route, cx);
+                });
             }
         });
 
-        let page = div()
-            .id("page")
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .when(!self.now_playing_open, |d| {
-                d.overflow_y_scroll()
-                    .px(px(spacing::S8))
-                    .pt(px(spacing::S6))
-                    .child(
-                        style::text_style(div(), typography::PAGE_TITLE, cx)
-                            .text_color(color::text_primary())
-                            .child(self.route.title()),
-                    )
-                    .when(self.route == Route::Settings, |page| {
-                        page.child(self.account_page.clone())
-                    })
-            })
-            .when(self.now_playing_open, |d| d.child(self.now_playing.clone()));
+        let page = div().id("page").flex_1().min_w_0().h_full();
+        let page = if self.now_playing_open {
+            page.child(self.now_playing.clone())
+        } else if self.route == Route::Library {
+            // The library's lists scroll themselves (virtualized), so the page does not.
+            page.px(px(spacing::S8))
+                .pt(px(spacing::S6))
+                .child(self.library.clone())
+        } else {
+            page.overflow_y_scroll()
+                .px(px(spacing::S8))
+                .pt(px(spacing::S6))
+                .child(
+                    style::text_style(div(), typography::PAGE_TITLE, cx)
+                        .text_color(color::text_primary())
+                        .child(self.route.title()),
+                )
+                .when(self.route == Route::Settings, |page| {
+                    page.child(self.account_page.clone())
+                })
+        };
 
         // The queue panel slides in from the right edge over 200 ms, then stays mounted only
         // while it is open or moving.

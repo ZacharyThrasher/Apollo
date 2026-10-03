@@ -36,6 +36,7 @@ use apollo_services_common::{EventSink, LeaseStore};
 use super::{LibraryTrack, Ports, Prepared};
 use crate::account::{AccountPorts, AvatarSource, SessionSource, SignInError};
 use crate::art::{ArtSource, DecodedArt};
+use crate::library::live::InnerTubeLibrary;
 use crate::player::DEFAULT_VOLUME;
 
 /// Windows Credential Manager service name for the app's vault key.
@@ -170,6 +171,19 @@ pub fn prepare(
         return Err("Liked Music has no playable tracks".into());
     }
 
+    // The library screen reads the account's playlists and albums through InnerTube. It asks the
+    // account for the session (and, for a login that can act as several channels, the selected
+    // one) on every request, so it follows sign-in, sign-out and channel changes.
+    let channel_of = account.clone();
+    let library = InnerTubeLibrary::new(
+        Arc::new(account.clone()),
+        Arc::new(move || match channel_of.view().identity {
+            IdentityState::Selected(identity) => identity.page_id,
+            _ => None,
+        }),
+    )
+    .map_err(|e| format!("library source: {e}"))?;
+
     Ok(Prepared {
         label: "real services",
         ports: Ports {
@@ -178,6 +192,7 @@ pub fn prepare(
         },
         queue,
         art: Arc::new(HttpArt::new(thumbs)),
+        library: Arc::new(library),
     })
 }
 

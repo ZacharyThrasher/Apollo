@@ -17,6 +17,7 @@ use apollo_services_common::EventSink;
 
 use crate::account::AccountPorts;
 use crate::art::ArtSource;
+use crate::library::LibrarySource;
 
 pub mod account;
 #[cfg(all(windows, feature = "real-services"))]
@@ -40,6 +41,8 @@ pub struct Prepared {
     pub ports: Ports,
     pub queue: Vec<LibraryTrack>,
     pub art: Arc<dyn ArtSource>,
+    /// What the library screen lists and opens.
+    pub library: Arc<dyn LibrarySource>,
 }
 
 /// Which backend to run, from the command line / build features.
