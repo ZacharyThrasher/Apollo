@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use apollo_services_common::win::{spawn_in_job, JobObject, PrivateDir};
+use apollo_services_common::win::{
+    remove_dir_all_with_retry, spawn_in_job, sweep_stale, JobObject, PrivateDir,
+};
 use serde::Deserialize;
 use zeroize::Zeroize;
 
@@ -130,10 +132,14 @@ pub fn run_login(cfg: &LoginConfig, cancel: &LoginCancel) -> Result<CookieJar, L
     if cancel.is_cancelled() {
         return Err(LoginError::Cancelled);
     }
+    // A previous attempt that crashed or was killed may have left its profile behind.
+    sweep_stale(&cfg.profile_base, "login");
     let profile = PrivateDir::create(&cfg.profile_base, "login").map_err(|_| LoginError::Io)?;
     let result = run_helper(cfg, cancel, &profile);
-    // The throwaway WebView2 profile (nested directories) is removed whatever happened.
-    let _ = std::fs::remove_dir_all(profile.path());
+    // The throwaway WebView2 profile (nested directories, still locked for a moment by WebView2
+    // child processes that outlive the helper) is removed whatever happened. If it cannot be
+    // removed it is swept at the next start; the owner is not told it was clean when it was not.
+    let _gone = remove_dir_all_with_retry(profile.path(), Duration::from_secs(15));
     result
 }
 

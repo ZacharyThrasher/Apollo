@@ -102,11 +102,37 @@ login handoff with a fake helper (pipe-only transport, crash, user close, timeou
 output, cancel kills the tree, profile removal, canary scan), Firefox import on synthetic and WAL
 profiles, and the **real** Credential Manager and ACL checks.
 
+## Real-account evidence (2026-10-03, `crates/m2-probe`, run on the owner's PC)
+
+| Run | Result |
+|---|---|
+| `--source firefox --silent` | 22/22 PASS |
+| `--source firefox` (audible, WASAPI, ~30% volume) | 22/22 PASS; the output-device guard did not misfire |
+| `--source login` (real WebView2 helper, owner signed in) | 22/22 PASS (25 cookies captured through the anonymous pipe) |
+
+Each run: session validated by the service, stored encrypted, Liked Music listing (131 entries),
+4 varied tracks resolve and play with no PO-token service (first audio about 5 s), ~4 Hz position,
+exact seek, EOF auto-advance, explicit Next, pause/resume, 20 rapid Next (one owner, no leaked
+yt-dlp processes), then logout while playing (audio stops, vault key and file deleted) and a play
+attempt afterwards fails as `SessionExpired` without starting a process.
+
+Bugs the real runs found (all fixed, with regression tests):
+1. **Cookie header**: a Firefox jar holds SAPISID/SID/... under both `.google.com` and `.youtube.com`;
+   sending all of them to music.youtube.com made the service answer "logged out". Only
+   host-matching, unexpired cookies are sent now.
+2. **WebView2 profile left behind**: after a real sign-in the throwaway profile directory survived
+   because WebView2 child processes still held files when it was deleted. Removal now retries for up
+   to 15 s, stale `login-*` profiles are swept (recursively) at the next start, and a test cancels
+   the real helper and checks nothing is left.
+3. **Firefox default profile**: `[Install]` section beats a stale legacy `Default=1`.
+
+Weak spot in the probe: "pause holds position" paused a track right after it started (0 ms to
+0 ms); the following "resume continues" check does show real progress.
+
 ## not_run / limits
 
-- WebView2 + Google through *this* crate path: the helper is the M0 spike moved into its own crate;
-  the owner-run probe (`crates/m2-probe`) exercises it end to end.
-- Brand/channel selection against a real multi-channel account (TEST-03).
+- Brand/channel selection against a real multi-channel account (TEST-03). The single-account
+  `accounts_list` response did parse (1 identity) in the real runs.
 - Cookie lifetime/rotation observed over days; periodic revalidation uses a 30-minute policy value
   that is not a claimed cookie lifetime.
 - Premium status is owner-declared only.
