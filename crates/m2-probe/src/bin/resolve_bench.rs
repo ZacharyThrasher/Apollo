@@ -319,12 +319,14 @@ mod imp {
         // ------------------------------------------------- 6. worker settings compared
         out.say("\n[6] AFTER, tuned: which yt-dlp setting makes a cold click fastest? (a fresh worker per setting, started before the first click; cold clicks on distinct tracks)");
         let skip: (&str, &[&str]) = ("player_skip", &["webpage", "initial_data"]);
+        let skip_all: (&str, &[&str]) = ("player_skip", &["webpage", "initial_data", "configs"]);
         let variants: Vec<(&str, Vec<(&str, &[&str])>)> = vec![
             ("yt-dlp defaults", vec![]),
-            ("skip page + initial data", vec![skip]),
-            ("skip + web_music only", vec![skip, ("player_client", &["web_music"])]),
-            ("skip + tv_downgraded only", vec![skip, ("player_client", &["tv_downgraded"])]),
-            ("skip + web_creator only", vec![skip, ("player_client", &["web_creator"])]),
+            ("skip page+initial", vec![skip]),
+            ("skip page+initial+configs", vec![skip_all]),
+            ("skip all + embedded,tv", vec![skip_all, ("player_client", &["web_embedded", "tv_downgraded"])]),
+            ("skip page+initial + embedded,tv", vec![skip, ("player_client", &["web_embedded", "tv_downgraded"])]),
+            ("skip page+initial + creator,tv,music", vec![skip, ("player_client", &["web_creator", "tv_downgraded", "web_music"])]),
         ];
         let mut tuned: Vec<(String, Vec<u64>, usize)> = Vec::new();
         for (name, args) in variants {
@@ -375,7 +377,7 @@ mod imp {
             out.say(format!("then    libmpv open {o} ms, audio moving {a} ms"));
         }
         for (name, times, failed) in &tuned {
-            out.say(format!("TUNED   {name:<28} median {} (failed {failed})", secs(median(times))));
+            out.say(format!("TUNED   {name:<38} median {} (failed {failed})", secs(median(times))));
         }
         let _ = worker_ready_ms;
         finish(&out, &out_path);

@@ -140,6 +140,8 @@ struct Note {
     phases: Vec<(String, u64)>,
     /// Which YouTube client served the stream (the `c=` parameter of the URL) and the format id.
     client: Option<String>,
+    /// The chosen format's id and audio bitrate (kbps), to see what quality a setting yields.
+    format: Option<String>,
 }
 
 impl Note {
@@ -150,6 +152,9 @@ impl Note {
         }
         if let Some(c) = &self.client {
             s.push_str(&format!(" client={c}"));
+        }
+        if let Some(f) = &self.format {
+            s.push_str(&format!(" {f}"));
         }
         if !self.phases.is_empty() {
             let p: Vec<String> = self
@@ -739,6 +744,25 @@ impl Inner {
             note.client = reply["client"]
                 .as_str()
                 .map(|c| c.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').take(24).collect());
+            let info = &reply["info"];
+            let fid: String = info["format_id"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .take(16)
+                .collect();
+            if !fid.is_empty() {
+                let abr = info["abr"].as_f64().map_or(String::new(), |a| format!(" abr={}", a.round() as i64));
+                let codec: String = info["acodec"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '.')
+                    .take(12)
+                    .collect();
+                note.format = Some(format!("fmt={fid}{abr} codec={codec}"));
+            }
             if let Some(phases) = reply["phases"].as_array() {
                 note.phases = phases
                     .iter()
