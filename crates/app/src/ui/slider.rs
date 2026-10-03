@@ -58,6 +58,8 @@ pub struct Slider {
     focus: FocusHandle,
     label: gpui::SharedString,
     value: f32,
+    /// The value in words for assistive technology ("1:23 of 3:12", "70%").
+    value_text: Option<gpui::SharedString>,
     step: f32,
     enabled: bool,
     accent: Accent,
@@ -79,6 +81,7 @@ impl Slider {
             focus: focus.clone(),
             label: label.into(),
             value: 0.0,
+            value_text: None,
             step: 0.05,
             enabled: true,
             accent,
@@ -89,6 +92,12 @@ impl Slider {
 
     pub fn value(mut self, value: f32) -> Self {
         self.value = value.clamp(0.0, 1.0);
+        self
+    }
+
+    /// What the value means in words, for screen readers; the fraction alone says little.
+    pub fn value_text(mut self, text: impl Into<gpui::SharedString>) -> Self {
+        self.value_text = Some(text.into());
         self
     }
 
@@ -223,6 +232,8 @@ impl RenderOnce for Slider {
         let on_change_down = on_change.clone();
         let on_change_back = on_change.clone();
         let on_change_fwd = on_change.clone();
+        let on_change_a11y = on_change.clone();
+        let value_text = self.value_text.clone();
 
         div()
             .id(self.id.clone())
@@ -234,6 +245,25 @@ impl RenderOnce for Slider {
             .aria_numeric_value(f64::from(value))
             .aria_min_numeric_value(0.0)
             .aria_max_numeric_value(1.0)
+            .aria_numeric_value_step(f64::from(step))
+            .when_some(value_text, |d, text| d.aria_value(text))
+            // Assistive technology moves the slider the way the arrow keys and the mouse do.
+            .when_some(on_change_a11y, |d, f| {
+                use gpui::accesskit::ActionData;
+                use gpui::AccessibleAction as A;
+                let (up, down, set) = (f.clone(), f.clone(), f);
+                d.on_a11y_action(A::Increment, move |_, window, cx| {
+                    up(stepped(value, step), true, window, cx)
+                })
+                .on_a11y_action(A::Decrement, move |_, window, cx| {
+                    down(stepped(value, -step), true, window, cx)
+                })
+                .on_a11y_action(A::SetValue, move |data, window, cx| {
+                    if let Some(ActionData::NumericValue(v)) = data {
+                        set((*v as f32).clamp(0.0, 1.0), true, window, cx)
+                    }
+                })
+            })
             .w_full()
             .h(px(HIT_HEIGHT))
             .flex()

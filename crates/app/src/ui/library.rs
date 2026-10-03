@@ -728,6 +728,9 @@ impl LibraryView {
             )
             .child(
                 div()
+                    .id("library-tabs")
+                    .role(gpui::Role::TabList)
+                    .aria_label("Library")
                     .flex()
                     .flex_row()
                     .gap(px(spacing::S2))
@@ -817,6 +820,13 @@ impl LibraryView {
             ListKind::Collections => "collections",
             ListKind::Tracks => "tracks",
         };
+        let name = match kind {
+            ListKind::Collections => match self.model.read(cx).tab() {
+                Tab::Playlists => "Playlists",
+                Tab::Albums => "Albums",
+            },
+            ListKind::Tracks => "Tracks",
+        };
         let focused = keyboard_focused(&self.focus.list, window);
         let handle = self.scroll_handle(cx).clone();
         // The element the list sits in has to be tall (a bounded flex child), so the list only
@@ -826,6 +836,7 @@ impl LibraryView {
             .key_context(LIST_CONTEXT)
             .track_focus(&self.focus.list)
             .role(gpui::Role::List)
+            .aria_label(name)
             .size_full()
             .min_h_0();
         Self::list_actions(list, cx)
@@ -1460,6 +1471,7 @@ impl LibraryView {
             .key_context(LIST_CONTEXT)
             .track_focus(&self.focus.list)
             .role(gpui::Role::List)
+            .aria_label("Artist")
             .size_full()
             .min_h_0();
         Self::list_actions(list, cx)

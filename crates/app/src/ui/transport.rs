@@ -191,6 +191,12 @@ pub fn progress(
             div().flex_1().min_w_0().child(
                 Slider::new(id(prefix, "progress"), state, focus, "Seek", v.accent)
                     .value(fraction)
+                    .value_text(match duration {
+                        Some(d) if seekable => {
+                            format!("{} of {}", format_time(shown_ms), format_time(d))
+                        }
+                        _ => format_time(shown_ms),
+                    })
                     .step(
                         duration
                             .filter(|d| *d > 0)

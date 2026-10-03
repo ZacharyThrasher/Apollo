@@ -674,6 +674,7 @@ impl RenderOnce for SongRow {
         let active = level > 0.0 || self.selected;
         let play = std::rc::Rc::new(self.on_play);
         let play_art = play.clone();
+        let play_row = play.clone();
         let play_info = play;
         let queue = self.on_queue;
         let (on_like, on_playlist) = (self.on_like, self.on_playlist);
@@ -807,6 +808,10 @@ impl RenderOnce for SongRow {
                 self.title, self.artists
             )))
             .aria_selected(self.selected)
+            // The art and the text play on click; assistive technology addresses the whole row.
+            .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
+                play_row(window, cx)
+            })
             .bg(if self.selected {
                 color::state_selected()
             } else {

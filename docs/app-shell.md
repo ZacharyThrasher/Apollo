@@ -33,6 +33,7 @@ fallback), no art, and a 25 s track to watch the end-of-track advance.
 | Tab / Shift+Tab | move between controls (accent focus ring, keyboard focus only) |
 | Enter | activate the focused control |
 | Left / Right on a slider | seek 5 s / volume 5% |
+| Media keys (play/pause, next, previous) | the same as the buttons, even with Apollo in the background (`docs/os-media.md`) |
 | Ctrl+K or Ctrl+F | open Search and focus its field |
 | Down / Up in the search field | move the selection through results |
 | Enter in the search field | search now, or play the selected song |
@@ -63,9 +64,9 @@ They do not cover pixels; screenshots on Windows do.
 
 ## Not in this slice
 
-Album, artist and playlist pages (their search cards are inert), tray, SMTC wiring beyond what
-exists. The account is re-validated by a
-background thread (about every 30 minutes) in real mode; re-validating immediately after a
+Tray. (SMTC and the media keys are wired: `docs/os-media.md`. Accessibility:
+`docs/accessibility.md`.) The account is re-validated by a background thread (about every 30
+minutes) in real mode; re-validating immediately after a
 `SessionExpired` playback failure is not wired yet.
 
 ## Search

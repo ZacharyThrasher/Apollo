@@ -153,6 +153,7 @@ impl Render for NowPlaying {
                 v.accent,
             )
             .icon_color(on_off(liked))
+            .accessible_name("Like")
             .toggled(liked)
             .on_click({
                 let (writes, video) = (self.writes.clone(), video.clone());
@@ -244,6 +245,8 @@ impl Render for NowPlaying {
                 "Close",
                 v.accent,
             )
+            // The window's own Close button is also on screen.
+            .accessible_name("Close Now Playing")
             .on_click(move |window, cx| on_close(window, cx))
         };
 

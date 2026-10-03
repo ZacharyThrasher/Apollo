@@ -1,6 +1,9 @@
 //! Custom title bar: a 32px drag region over the Mica backdrop with native-style caption
 //! buttons. Windows resolves the control areas itself (snap layouts, double-click maximize,
-//! system menu), so there are no click handlers here.
+//! system menu), so there are no click handlers here. The buttons are also exposed to assistive
+//! technology as named buttons whose accessible Click does the same thing; Windows draws no
+//! system caption for a window like this, so they would otherwise be invisible to Narrator and
+//! voice control.
 
 use apollo_theme::tokens::layout;
 use gpui::{
@@ -80,6 +83,24 @@ impl CaptionButton {
         }
     }
 
+    fn label(self) -> &'static str {
+        match self {
+            Self::Minimize => "Minimize",
+            Self::Maximize => "Maximize",
+            Self::Restore => "Restore",
+            Self::Close => "Close",
+        }
+    }
+
+    /// What an assistive-technology Click on the button does.
+    fn activate(self, window: &mut Window) {
+        match self {
+            Self::Minimize => window.minimize_window(),
+            Self::Maximize | Self::Restore => window.zoom_window(),
+            Self::Close => window.remove_window(),
+        }
+    }
+
     fn area(self) -> WindowControlArea {
         match self {
             Self::Minimize => WindowControlArea::Min,
@@ -120,6 +141,13 @@ impl RenderOnce for CaptionButton {
                     .active(|s| s.bg(color::close_pressed()).text_color(color::close_fg()))
             })
             .window_control_area(self.area())
+            .role(gpui::Role::Button)
+            .aria_label(self.label())
+            .when(enabled, |d| {
+                d.on_a11y_action(gpui::AccessibleAction::Click, move |_, window, _| {
+                    self.activate(window)
+                })
+            })
             .child(self.glyph())
     }
 }
