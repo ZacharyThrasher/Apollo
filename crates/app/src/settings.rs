@@ -1,5 +1,5 @@
 //! What lives between runs, in the app's SQLite store (non-secret state only): the volume, the
-//! autoplay switch (both in the `settings` table) and the queue with its position.
+//! autoplay and volume-normalization switches (all in the `settings` table) and the queue with its position.
 
 use std::path::PathBuf;
 
@@ -8,6 +8,7 @@ use apollo_store::Store;
 
 const KEY_VOLUME: &str = "volume_percent";
 const KEY_AUTOPLAY: &str = "autoplay";
+const KEY_NORMALIZE: &str = "normalize_volume";
 
 /// Where the volume is kept. Blocking: call off the UI thread.
 pub trait VolumeStore: Send + Sync {
@@ -17,6 +18,12 @@ pub trait VolumeStore: Send + Sync {
 
 /// Whether autoplay is on. Blocking: call off the UI thread.
 pub trait AutoplayStore: Send + Sync {
+    fn load(&self) -> Option<bool>;
+    fn save(&self, on: bool);
+}
+
+/// Whether volume normalization is on. Blocking: call off the UI thread.
+pub trait NormalizeStore: Send + Sync {
     fn load(&self) -> Option<bool>;
     fn save(&self, on: bool);
 }
@@ -96,6 +103,24 @@ impl AutoplayStore for SqliteSettings {
         if let Some(store) = self.open() {
             if let Err(err) = store.set_setting(KEY_AUTOPLAY, if on { "on" } else { "off" }) {
                 eprintln!("could not save autoplay: {err}");
+            }
+        }
+    }
+}
+
+impl NormalizeStore for SqliteSettings {
+    fn load(&self) -> Option<bool> {
+        match self.open()?.get_setting(KEY_NORMALIZE).ok()??.trim() {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => None,
+        }
+    }
+
+    fn save(&self, on: bool) {
+        if let Some(store) = self.open() {
+            if let Err(err) = store.set_setting(KEY_NORMALIZE, if on { "on" } else { "off" }) {
+                eprintln!("could not save volume normalization: {err}");
             }
         }
     }
@@ -181,6 +206,23 @@ mod tests {
             .set_setting(KEY_AUTOPLAY, "maybe")
             .unwrap();
         assert_eq!(AutoplayStore::load(&store), None);
+    }
+
+    #[test]
+    fn normalization_round_trips_and_garbage_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apollo.db");
+        let store = SqliteSettings::at(path.clone());
+        assert_eq!(NormalizeStore::load(&store), None);
+        NormalizeStore::save(&store, false);
+        assert_eq!(NormalizeStore::load(&store), Some(false));
+        NormalizeStore::save(&store, true);
+        assert_eq!(NormalizeStore::load(&store), Some(true));
+        Store::open(&path)
+            .unwrap()
+            .set_setting(KEY_NORMALIZE, "maybe")
+            .unwrap();
+        assert_eq!(NormalizeStore::load(&store), None);
     }
 
     #[test]

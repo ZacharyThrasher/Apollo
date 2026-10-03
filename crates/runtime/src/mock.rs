@@ -70,6 +70,7 @@ pub enum EngineCall {
     Close(LoadId),
     Stop,
     SetVolume(u8),
+    SetNormalization(bool),
 }
 
 /// Models what the audio device is doing.
@@ -147,5 +148,8 @@ impl MediaEngine for MockEngine {
     }
     fn set_volume(&mut self, percent: u8) {
         self.calls.push(EngineCall::SetVolume(percent));
+    }
+    fn set_normalization(&mut self, on: bool) {
+        self.calls.push(EngineCall::SetNormalization(on));
     }
 }

@@ -8,9 +8,11 @@
 pub mod classify;
 pub mod coalesce;
 pub mod config;
+pub mod ramp;
 #[cfg(windows)]
 mod engine;
 
 pub use config::{core_options, MediaConfig};
+pub use ramp::GainRamp;
 #[cfg(windows)]
 pub use engine::{MediaError, MpvEngine};

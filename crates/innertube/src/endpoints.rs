@@ -15,6 +15,7 @@ use crate::models::context::Context;
 use crate::models::metadata::{
     self, AccountIdentity, AccountInfo, NextResult, Rating, SearchResult,
 };
+use crate::models::player::{parse_player_loudness, PlayerLoudness};
 use crate::transport::{Error, InnerTube};
 
 /// Search filter params (opaque base64). context/08.
@@ -154,6 +155,22 @@ impl InnerTube {
         let value = self.post("next", metadata_client, &body, true).await?;
         let next = metadata::parse_next(&value);
         Ok(next)
+    }
+
+    /// How loud YouTube measured a video, from the `player` endpoint (`playerConfig.audioConfig`).
+    ///
+    /// Metadata only. The response also carries stream URLs and playback-tracking pings; both are
+    /// dropped unread (audio comes from yt-dlp, and Apollo does not report plays). The request is
+    /// the plain one the web client sends before it has a stream: no signature timestamp, no
+    /// PO token, nothing that would let the answer be played. Read-only and idempotent.
+    pub async fn player_loudness(
+        &self,
+        client: &YouTubeClient,
+        video_id: &str,
+    ) -> Result<PlayerLoudness, Error> {
+        let body = player_body(self.context_for(client), video_id);
+        let value = self.post("player", client, &body, true).await?;
+        Ok(parse_player_loudness(&value))
     }
 
     /// Logged-in account summary (`account/account_menu`, context/01). Requires a cookie. Also the
@@ -587,6 +604,42 @@ fn rate_body(context: Context, video_id: &str) -> serde_json::Value {
         .expect("a plain struct serialises")
 }
 
+/// The `player` request. `contentCheckOk`/`racyCheckOk` make a track that sits behind a content
+/// warning answer like any other, so its loudness is still readable.
+fn player_body(context: Context, video_id: &str) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        video_id: String,
+        playback_context: PlaybackContext,
+        content_check_ok: bool,
+        racy_check_ok: bool,
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PlaybackContext {
+        content_playback_context: ContentPlaybackContext,
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ContentPlaybackContext {
+        html5_preference: &'static str,
+    }
+    serde_json::to_value(Body {
+        context,
+        video_id: video_id.to_owned(),
+        playback_context: PlaybackContext {
+            content_playback_context: ContentPlaybackContext {
+                html5_preference: "HTML5_PREF_WANTS",
+            },
+        },
+        content_check_ok: true,
+        racy_check_ok: true,
+    })
+    .expect("a plain struct serialises")
+}
+
 fn add_options_body(context: Context, video_id: &str) -> serde_json::Value {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -649,6 +702,19 @@ mod tests {
             ..Session::default()
         };
         (InnerTube::new(session, None).unwrap(), client)
+    }
+
+    #[test]
+    fn the_player_request_asks_for_one_video_and_nothing_to_play_it_with() {
+        let (tube, client) = tube();
+        let body = player_body(tube.context_for(&client), "dQw4w9WgXcQ");
+        assert_eq!(body["videoId"], "dQw4w9WgXcQ");
+        assert_eq!(body["context"]["client"]["clientName"], "WEB_REMIX");
+        assert_eq!(body["contentCheckOk"], true);
+        // No signature timestamp and no PO token: the answer cannot be used to fetch a stream.
+        let text = body.to_string();
+        assert!(!text.contains("signatureTimestamp"), "{text}");
+        assert!(!text.contains("poToken"), "{text}");
     }
 
     #[test]

@@ -18,6 +18,7 @@ use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
+use crate::ui::playback_page::PlaybackPage;
 use crate::ui::home_page::{self, HomeView};
 use crate::ui::library::{self, LibraryView};
 use crate::ui::nav::{NavRail, Route};
@@ -84,6 +85,7 @@ pub struct Shell {
     player: Entity<PlayerModel>,
     account: Entity<AccountModel>,
     account_page: Entity<AccountPage>,
+    playback_page: Entity<PlaybackPage>,
     library: Entity<LibraryView>,
     home: Entity<HomeModel>,
     home_page: Entity<HomeView>,
@@ -217,6 +219,7 @@ impl Shell {
             )
         });
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
+        let playback_page = cx.new(|cx| PlaybackPage::new(player.clone(), cx));
         let library = cx.new(|cx| {
             LibraryView::new(
                 player.clone(),
@@ -292,6 +295,7 @@ impl Shell {
             player,
             account,
             account_page,
+            playback_page,
             library,
             home,
             home_page,
@@ -751,6 +755,7 @@ impl Render for Shell {
                 )
                 .when(self.route == Route::Settings, |page| {
                     page.child(self.account_page.clone())
+                        .child(self.playback_page.clone())
                 })
         };
 
