@@ -126,6 +126,7 @@ impl Opts {
                 startup_timeout: Duration::from_secs(10),
                 request_timeout: Duration::from_secs(10),
                 youtube_args: Vec::new(),
+                foreground_youtube_args: None,
             },
             session: TestSession::new(true),
             ytdlp: None,
@@ -553,6 +554,37 @@ fn youtube_arguments_reach_the_worker_and_default_to_none() {
         "{}",
         r.log_text()
     );
+}
+
+fn skip_args(mut o: Opts) -> Opts {
+    o.warm.foreground_youtube_args = Some(vec![("player_skip".into(), vec!["webpage".into()])]);
+    o
+}
+
+#[test]
+fn a_click_uses_the_fast_arguments_and_background_work_keeps_the_full_ones() {
+    let mut r = rig(skip_args(Opts::new("ok")));
+    let ahead = r.coordinator_requests[1].track.clone();
+    r.rs().prefetch(&ahead);
+    assert!(wait_until(WAIT, || r.rs().cached() == 1));
+    r.start(2);
+    r.result(WAIT).unwrap().1.unwrap();
+    let log = r.log_text();
+    assert!(log.contains(&format!("SERVE RESOLVE ARGS {} skip=false", ahead.video_id.as_str())), "{log}");
+    assert_eq!(r.count("skip=true"), 1, "{log}");
+    assert!(r.diag().contains("src=warm-fast"), "{}", r.diag());
+}
+
+#[test]
+fn a_fast_resolve_that_gives_no_stream_is_retried_once_with_the_full_arguments() {
+    let mut r = rig(skip_args(Opts::new("skip-unsupported")));
+    r.start(0);
+    let (_, res) = r.result(WAIT).expect("result");
+    res.expect("the retry succeeded");
+    assert_eq!(r.count("SERVE RESOLVE START"), 2);
+    assert_eq!(r.count("skip=true"), 1);
+    assert_eq!(r.count("skip=false"), 1);
+    assert!(r.diag().contains("retrying with the full settings"), "{}", r.diag());
 }
 
 #[test]

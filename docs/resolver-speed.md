@@ -66,3 +66,15 @@ worker. It would also make us own the client quirks yt-dlp tracks (visitor data,
 timestamp, PO-token rules) and drop its multi-client fallback. A web client turning SABR-only
 would break both paths and is not bypassed in either (spec). Revisit only if cold clicks stay
 above roughly 1.5 s after the trim; if built, keep the workers as the fallback.
+
+## Round 2 results (bench section [6], owner's PC)
+| Setting | Cold click | Stream |
+|---|---|---|
+| yt-dlp defaults | 3.3 s | WEB_REMIX opus itag 774, about 256 kbps (Premium) |
+| skip page + initial data | 1.9 s | WEB_EMBEDDED_PLAYER opus itag 251, about 130 kbps |
+| skip page + initial data, embedded and tv clients only | 2.65 s | same as above, slower |
+| also skip client configs / only web_music, tv or web_creator / Premium client set without the page | no playable format | refused |
+
+Production now uses the skip setting for clicks only and the defaults for everything resolved
+ahead (`WarmConfig::fast_clicks`). A click whose fast resolve fails is retried once with the
+defaults. The remaining cold-click time is mostly the web music player API call (0.9 to 1.4 s).

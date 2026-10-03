@@ -685,6 +685,9 @@ impl Inner {
         }
     }
 
+    /// One warm resolution. A click uses the fast arguments when configured; if those yield no
+    /// usable stream (an embedding-restricted track, a format they cannot give) the same track is
+    /// resolved again with the full arguments.
     fn produce_warm(
         &self,
         pool: &Pool,
@@ -694,7 +697,37 @@ impl Inner {
         job: &Job,
         note: &mut Note,
     ) -> Warm {
+        let fast = pool.config().foreground_youtube_args.is_some() && foreground.load(Ordering::SeqCst);
+        let first = self.warm_once(pool, video_id, snapshot, foreground, job, note, fast);
+        if fast {
+            if let Warm::Done(Outcome::Failed(Failure::Unsupported | Failure::Restricted, code)) = &first {
+                self.note(format!("fast resolve gave {code}; retrying with the full settings"));
+                return self.warm_once(pool, video_id, snapshot, foreground, job, note, false);
+            }
+        }
+        first
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn warm_once(
+        &self,
+        pool: &Pool,
+        video_id: &VideoId,
+        snapshot: &SessionSnapshot,
+        foreground: &AtomicBool,
+        job: &Job,
+        note: &mut Note,
+        fast: bool,
+    ) -> Warm {
         let cfg = pool.config();
+        let args: &[(String, Vec<String>)] = match (&cfg.foreground_youtube_args, fast) {
+            (Some(a), true) => a,
+            _ => &cfg.youtube_args,
+        };
+        let extractor_args = {
+            let youtube: serde_json::Map<String, Value> = args.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+            json!({ "youtube": youtube })
+        };
         let closed = || self.closed.load(Ordering::SeqCst);
         let waiting_cancelled = || job.is_cancelled() || self.closed.load(Ordering::SeqCst);
         for attempt in 0..2 {
@@ -720,7 +753,7 @@ impl Inner {
             }
             let w = co.worker();
             let sent = Instant::now();
-            let msg = json!({"op": "resolve", "video_id": video_id.as_str()});
+            let msg = json!({"op": "resolve", "video_id": video_id.as_str(), "extractor_args": extractor_args});
             let reply = match w.request(msg, cfg.request_timeout, &closed) {
                 Ok(v) => v,
                 Err(WorkerError::Timeout) => {
@@ -739,7 +772,7 @@ impl Inner {
                     return Warm::Done(Outcome::Failed(Failure::Network, "worker-died"));
                 }
             };
-            note.src = "warm";
+            note.src = if fast { "warm-fast" } else { "warm" };
             note.worker_ms = Some(sent.elapsed().as_millis() as u64);
             note.client = reply["client"]
                 .as_str()

@@ -40,9 +40,27 @@ pub struct WarmConfig {
     /// yt-dlp `--extractor-args youtube:<key>=<values>` for the workers, e.g.
     /// `("player_skip", ["webpage", "initial_data"])`. Empty = yt-dlp's own defaults.
     pub youtube_args: Vec<(String, Vec<String>)>,
+    /// Arguments for a request somebody is waiting on (a click), where speed beats the very best
+    /// stream. `None` = the same as `youtube_args`. A click that fails with these is retried once
+    /// with `youtube_args`.
+    pub foreground_youtube_args: Option<Vec<(String, Vec<String>)>>,
 }
 
 impl WarmConfig {
+    /// Production defaults: a click skips yt-dlp's watch-page and initial-data requests (about
+    /// 1.5 s faster, measured on the owner's PC) at the price of the plain ~130 kbps stream;
+    /// everything resolved ahead of time (queue, hover, page open) keeps yt-dlp's defaults, which
+    /// give the Premium ~256 kbps stream. See docs/adr/0004-warm-resolver-workers.md.
+    pub fn fast_clicks() -> Self {
+        Self {
+            foreground_youtube_args: Some(vec![(
+                "player_skip".to_owned(),
+                vec!["webpage".to_owned(), "initial_data".to_owned()],
+            )]),
+            ..Self::default()
+        }
+    }
+
     pub fn with_youtube_arg(mut self, key: &str, values: &[&str]) -> Self {
         self.youtube_args
             .push((key.to_owned(), values.iter().map(|v| (*v).to_owned()).collect()));
@@ -59,6 +77,7 @@ impl Default for WarmConfig {
             startup_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(30),
             youtube_args: Vec::new(),
+            foreground_youtube_args: None,
         }
     }
 }
@@ -124,7 +143,7 @@ impl ResolverConfig {
             max_concurrent: 2,
             max_stdout_bytes: 8 * 1024 * 1024,
             url_policy: UrlPolicy::production(),
-            warm: Some(WarmConfig::default()),
+            warm: Some(WarmConfig::fast_clicks()),
             cache: Some(CacheConfig::default()),
             pinned: Some(PinnedTools::m0_baseline()),
             #[cfg(feature = "test-support")]
