@@ -192,6 +192,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "apollo-login-helper"
+version = "0.0.0"
+dependencies = [
+ "cookie",
+ "serde_json",
+ "tao",
+ "wry",
+]
+
+[[package]]
 name = "apollo-m0-gpui"
 version = "0.0.0"
 dependencies = [
