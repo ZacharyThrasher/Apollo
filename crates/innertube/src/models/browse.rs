@@ -620,12 +620,26 @@ pub fn parse_search_all(root: &Value) -> SearchResults {
     for node in contents {
         if let Some(card) = node.get("musicCardShelfRenderer") {
             // Top result: the primary match + its related rows.
-            if let Some(main) = card_shelf_main(card) {
-                r.top.push(main);
-            }
+            let main = card_shelf_main(card);
+            // An artist card lists that artist's songs as "Song • 4:35": the row names no artist
+            // of its own, so it takes the card's (as the service's own page shows it).
+            let card_artist = main.as_ref().filter(|m| m.kind == "artist").map(|m| ArtistRun {
+                text: m.title.clone(),
+                id: Some(m.id.clone()),
+            });
+            r.top.extend(main);
             for c in card.get("contents").and_then(Value::as_array).into_iter().flatten() {
                 if let Some(li) = c.get("musicResponsiveListItemRenderer") {
-                    r.top.extend(list_item_to_browse_item(li));
+                    let Some(mut item) = list_item_to_browse_item(li) else {
+                        continue;
+                    };
+                    if let (true, Some(artist)) =
+                        (item.kind == "song" && item.artist_runs.is_empty(), &card_artist)
+                    {
+                        item.subtitle = Some(artist.text.clone());
+                        item.artist_runs = vec![artist.clone()];
+                    }
+                    r.top.push(item);
                 }
             }
         } else {
@@ -1830,6 +1844,39 @@ mod tests {
         let s = parse_search_suggestions(&signed_in);
         assert_eq!(s.queries[0].text, "la vie en rose");
         assert!(s.queries[0].history);
+    }
+
+    #[test]
+    fn an_artist_cards_song_rows_take_the_cards_artist() {
+        // Real shape: the card's rows say "Song • 4:35" (no artist), the card is the artist.
+        let top_song = json!({ "musicResponsiveListItemRenderer": {
+            "playlistItemData": { "videoId": "topvid" },
+            "flexColumns": [
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Top Song" }] } } },
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                    { "text": "Song" }, { "text": " • " }, { "text": "4:35" }] } } }
+            ]
+        } });
+        let root = json!({ "contents": { "tabbedSearchResultsRenderer": { "tabs": [{ "tabRenderer": { "content": {
+            "sectionListRenderer": { "contents": [
+                { "musicCardShelfRenderer": {
+                    "title": { "runs": [{ "text": "The Artist", "navigationEndpoint": { "browseEndpoint": { "browseId": "UCart" } } }] },
+                    "subtitle": { "runs": [{ "text": "Artist" }] },
+                    "contents": [top_song]
+                } }
+            ] }
+        } } }] } } });
+        let r = parse_search_all(&root);
+        let song = r.top.iter().find(|i| i.kind == "song").expect("the card's song row");
+        assert_eq!(song.subtitle.as_deref(), Some("The Artist"));
+        assert_eq!(song.duration.as_deref(), Some("4:35"));
+        assert_eq!(
+            song.artist_runs
+                .iter()
+                .map(|x| (x.text.as_str(), x.id.as_deref()))
+                .collect::<Vec<_>>(),
+            [("The Artist", Some("UCart"))]
+        );
     }
 
     #[test]
