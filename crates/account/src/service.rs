@@ -252,11 +252,18 @@ impl AccountService {
     }
 
     pub fn declare_premium(&self, declared: bool) {
-        self.inner.state.lock().unwrap().premium = if declared {
-            PremiumEvidence::OwnerDeclared
-        } else {
-            PremiumEvidence::Undeclared
+        let stored = {
+            let mut s = self.inner.state.lock().unwrap();
+            s.premium = if declared {
+                PremiumEvidence::OwnerDeclared
+            } else {
+                PremiumEvidence::Undeclared
+            };
+            s.storage == StorageMode::Durable
         };
+        if stored {
+            self.persist(); // keep the stored session in step with the declaration
+        }
         self.notify();
     }
 
@@ -287,6 +294,11 @@ impl AccountService {
                     s.validated_at = None; // from disk: unconfirmed until the service says so
                     s.jar = Some(acc.jar);
                     s.selected_key = acc.selected_identity;
+                    s.premium = if acc.premium_declared {
+                        PremiumEvidence::OwnerDeclared
+                    } else {
+                        PremiumEvidence::Undeclared
+                    };
                     s.session = SessionState::Validating;
                     s.storage = StorageMode::Durable;
                     s.problem = Problem::None;
@@ -576,6 +588,7 @@ impl AccountService {
             StoredAccount {
                 jar,
                 selected_identity: s.selected_key.clone(),
+                premium_declared: s.premium == PremiumEvidence::OwnerDeclared,
             }
         };
         let result = store.save(&acc);

@@ -19,13 +19,22 @@ use serde::{Deserialize, Serialize};
 use crate::jar::CookieJar;
 use crate::vault::{Vault, VaultError};
 
-/// What is persisted: the jar plus the identity the owner explicitly selected (an opaque key:
-/// page id when the service gives one, else the display name).
+/// What is persisted: the jar, the identity the owner explicitly selected (an opaque key: page
+/// id when the service gives one, else the display name), and the owner's Premium declaration
+/// made when they signed in (AUTH-01), so a restart does not silently disable content.
 #[derive(Serialize, Deserialize, Default)]
 pub struct StoredAccount {
     pub jar: CookieJar,
     #[serde(default)]
     pub selected_identity: Option<String>,
+    /// Sessions stored before this field existed were all written after a declared sign-in, so
+    /// a missing field reads as declared.
+    #[serde(default = "legacy_declared")]
+    pub premium_declared: bool,
+}
+
+fn legacy_declared() -> bool {
+    true
 }
 
 const KEY_NAME: &str = "jar-key-v1";
@@ -196,7 +205,7 @@ mod tests {
     use crate::vault::{MemoryVault, UnavailableVault};
 
     fn jar() -> StoredAccount {
-        StoredAccount { selected_identity: Some("page-1".into()), jar: CookieJar {
+        StoredAccount { selected_identity: Some("page-1".into()), premium_declared: true, jar: CookieJar {
             cookies: vec![Cookie {
                 name: "SAPISID".into(),
                 value: "VALUECANARY-1234567890".into(),
@@ -214,6 +223,14 @@ mod tests {
         let p = std::env::temp_dir().join(format!("apollo-store-test-{}", apollo_services_common::random_hex(6)));
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn a_session_stored_before_the_declaration_field_existed_reads_as_declared() {
+        let mut v = serde_json::to_value(jar()).unwrap();
+        v.as_object_mut().unwrap().remove("premium_declared");
+        let back: StoredAccount = serde_json::from_value(v).unwrap();
+        assert!(back.premium_declared);
     }
 
     #[test]

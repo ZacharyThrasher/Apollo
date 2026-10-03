@@ -43,6 +43,7 @@ fn encrypted_store_on_the_real_vault_roundtrips_and_cleans_up() {
     let svc = service();
     let store = EncryptedStore::new(Arc::new(WindowsCredentialVault::new(svc.clone())), &dir).unwrap();
     let acc = StoredAccount {
+        premium_declared: true,
         jar: CookieJar {
             cookies: vec![Cookie {
                 name: "SAPISID".into(),
