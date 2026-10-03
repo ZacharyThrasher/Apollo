@@ -127,6 +127,8 @@ impl Opts {
                 request_timeout: Duration::from_secs(10),
                 youtube_args: Vec::new(),
                 foreground_youtube_args: None,
+                watch_url: false,
+                foreground_watch_url: false,
             },
             session: TestSession::new(true),
             ytdlp: None,
@@ -558,6 +560,7 @@ fn youtube_arguments_reach_the_worker_and_default_to_none() {
 
 fn skip_args(mut o: Opts) -> Opts {
     o.warm.foreground_youtube_args = Some(vec![("player_skip".into(), vec!["webpage".into()])]);
+    o.warm.foreground_watch_url = true;
     o
 }
 
@@ -572,6 +575,7 @@ fn a_click_uses_the_fast_arguments_and_background_work_keeps_the_full_ones() {
     let log = r.log_text();
     assert!(log.contains(&format!("SERVE RESOLVE ARGS {} skip=false", ahead.video_id.as_str())), "{log}");
     assert_eq!(r.count("skip=true"), 1, "{log}");
+    assert_eq!(r.count("site=www"), 1, "only the click uses the plain watch URL: {log}");
     assert!(r.diag().contains("src=warm-fast"), "{}", r.diag());
 }
 

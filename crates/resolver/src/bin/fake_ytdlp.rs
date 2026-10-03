@@ -90,7 +90,10 @@ fn serve(args: &[String]) {
                 let vid = req["video_id"].as_str().unwrap_or("").to_owned();
                 log_line(format!("SERVE RESOLVE START {vid} t={}", millis()));
                 let skipping = req["extractor_args"].to_string().contains("player_skip");
-                log_line(format!("SERVE RESOLVE ARGS {vid} skip={skipping}"));
+                log_line(format!(
+                    "SERVE RESOLVE ARGS {vid} skip={skipping} site={}",
+                    req["site"].as_str().unwrap_or("none")
+                ));
                 if mode == "crash-always" {
                     std::process::exit(9);
                 }

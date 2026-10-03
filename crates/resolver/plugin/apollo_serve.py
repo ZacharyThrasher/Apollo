@@ -190,7 +190,8 @@ def serve():
                 log.reset()
                 t0 = time.monotonic()
                 try:
-                    info = ydl.extract_info('https://music.youtube.com/watch?v=' + vid,
+                    host = 'www.youtube.com' if req.get('site') == 'www' else 'music.youtube.com'
+                    info = ydl.extract_info('https://' + host + '/watch?v=' + vid,
                                             download=False)
                 except Exception as exc:  # yt-dlp raises DownloadError with its message
                     _reply(out, {'id': rid, 'ok': False, 'error': str(exc)[:2000],

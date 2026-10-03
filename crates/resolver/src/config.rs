@@ -44,6 +44,12 @@ pub struct WarmConfig {
     /// stream. `None` = the same as `youtube_args`. A click that fails with these is retried once
     /// with `youtube_args`.
     pub foreground_youtube_args: Option<Vec<(String, Vec<String>)>>,
+    /// Resolve `www.youtube.com/watch?v=` instead of the music site's URL. The music URL makes
+    /// yt-dlp also call the (slow, about 1 s) web music client, which is where the Premium
+    /// stream comes from; the plain watch URL skips that call.
+    pub watch_url: bool,
+    /// Same, for requests somebody is waiting on (only used with `foreground_youtube_args`).
+    pub foreground_watch_url: bool,
 }
 
 impl WarmConfig {
@@ -78,6 +84,8 @@ impl Default for WarmConfig {
             request_timeout: Duration::from_secs(30),
             youtube_args: Vec::new(),
             foreground_youtube_args: None,
+            watch_url: false,
+            foreground_watch_url: false,
         }
     }
 }
