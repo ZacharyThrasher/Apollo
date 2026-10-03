@@ -198,6 +198,7 @@ impl SearchPage {
             return;
         }
         self.selected = Some(0);
+        self.hint_selected(cx);
         window.focus(&self.results_focus, cx);
         self.scroll.scroll_to_item(0);
         cx.notify();
@@ -219,8 +220,16 @@ impl SearchPage {
         }
     }
 
+    /// The keyboard selection is resting on a song: have it ready in case it is played.
+    fn hint_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
+            self.player.update(cx, |m, cx| m.hint_play(&song.track, cx));
+        }
+    }
+
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         self.selected = Some(index);
+        self.hint_selected(cx);
         // The songs' heading is child 0 of the list, so song `i` is child `i + 1`.
         self.scroll.scroll_to_item(index + 1);
         cx.notify();
@@ -524,6 +533,12 @@ impl SearchPage {
                                 })
                             })
                         },
+                        on_intent: {
+                            let (player, track) = (self.player.clone(), song.track.clone());
+                            Box::new(move |_, cx| {
+                                player.update(cx, |m, cx| m.hint_play(&track, cx))
+                            })
+                        },
                     }
                     .into_any_element(),
                 );
@@ -660,6 +675,8 @@ struct SongRow {
     on_playlist: RowAction,
     on_play: RowAction,
     on_queue: RowAction,
+    /// The pointer is resting on the row: the track is likely to be played next.
+    on_intent: RowAction,
 }
 
 impl RenderOnce for SongRow {
@@ -677,6 +694,7 @@ impl RenderOnce for SongRow {
         let play_row = play.clone();
         let play_info = play;
         let queue = self.on_queue;
+        let intent = self.on_intent;
         let (on_like, on_playlist) = (self.on_like, self.on_playlist);
         let liked = self.liked;
         let accent = color::accent(self.accent);
@@ -817,11 +835,14 @@ impl RenderOnce for SongRow {
             } else {
                 color::state_hover().opacity(level)
             })
-            .on_hover(move |hovered, _, cx| {
+            .on_hover(move |hovered, window, cx| {
                 row_fade.update(cx, |s, cx| {
                     s.set(*hovered, Instant::now(), animate);
                     cx.notify();
                 });
+                if *hovered {
+                    intent(window, cx);
+                }
             })
             .when(self.selected, |d| {
                 d.child(

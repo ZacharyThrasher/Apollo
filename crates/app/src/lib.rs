@@ -7,6 +7,7 @@ pub mod art;
 pub mod assets;
 pub mod backend;
 pub mod home;
+pub mod latency;
 pub mod library;
 pub mod motion;
 pub mod os_media;

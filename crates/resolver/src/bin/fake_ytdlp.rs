@@ -8,7 +8,8 @@ use std::{env, fs, thread};
 
 fn append(path: &str, line: String) {
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{line}");
+        // One write call, so lines from concurrent processes never interleave.
+        let _ = f.write_all(format!("{line}\n").as_bytes());
     }
 }
 
@@ -29,8 +30,110 @@ fn good_url() -> String {
     )
 }
 
+fn millis() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
+}
+
+/// The warm-worker mode (`apollo-serve:`): the same one-JSON-object-per-line protocol as the
+/// real plugin (`plugin/apollo_serve.py`), with behaviour from the environment:
+/// APOLLO_FAKE_MODE (ok, rotate, wrong-id, drm, fail-bot, crash-once, crash-always, hang,
+/// startup-fail),
+/// APOLLO_FAKE_DELAY_MS (per resolve), APOLLO_FAKE_STARTUP_MS, APOLLO_FAKE_LOG.
+fn serve(args: &[String]) {
+    use std::io::BufRead;
+    let mode = env::var("APOLLO_FAKE_MODE").unwrap_or_else(|_| "ok".into());
+    let log = env::var("APOLLO_FAKE_LOG").ok();
+    let num = |k: &str| env::var(k).ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let (delay, startup) = (num("APOLLO_FAKE_DELAY_MS"), num("APOLLO_FAKE_STARTUP_MS"));
+    let log_line = |l: String| {
+        if let Some(p) = &log {
+            append(p, l);
+        }
+    };
+    log_line(format!("SERVE START pid={} args={args:?}", std::process::id()));
+    if mode == "startup-fail" {
+        // What yt-dlp prints when the worker plugin was not loaded.
+        eprintln!("ERROR: Unsupported URL: apollo-serve:");
+        std::process::exit(1);
+    }
+    log_line(format!("SERVE ENV {:?}", env::vars().collect::<Vec<_>>()));
+    let out = std::io::stdout();
+    let mut out = out.lock();
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        let Ok(req) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let id = req["id"].clone();
+        let reply = |out: &mut std::io::StdoutLock, v: serde_json::Value| {
+            let _ = writeln!(out, "{v}");
+            let _ = out.flush();
+        };
+        match req["op"].as_str().unwrap_or("") {
+            "init" => {
+                thread::sleep(Duration::from_millis(startup));
+                // Noise before the reply must not break the channel.
+                let _ = writeln!(out, "[apollo-serve] Extracting URL: apollo-serve:");
+                reply(&mut out, serde_json::json!({"event":"ready","startup_ms":startup}));
+            }
+            "cookies" => {
+                let n = req["netscape"].as_str().map_or(0, |t| t.lines().count());
+                log_line(format!("SERVE COOKIES lines={n}"));
+                reply(&mut out, serde_json::json!({"id": id, "ok": true, "n": n}));
+            }
+            "resolve" => {
+                let vid = req["video_id"].as_str().unwrap_or("").to_owned();
+                log_line(format!("SERVE RESOLVE START {vid} t={}", millis()));
+                if mode == "crash-always" {
+                    std::process::exit(9);
+                }
+                if mode == "crash-once" {
+                    if let Ok(flag) = env::var("APOLLO_FAKE_FLAG") {
+                        if fs::metadata(&flag).is_err() {
+                            let _ = fs::write(&flag, "x");
+                            std::process::exit(9);
+                        }
+                    }
+                }
+                if mode == "hang" {
+                    thread::sleep(Duration::from_secs(300));
+                }
+                thread::sleep(Duration::from_millis(delay));
+                let phases = serde_json::json!([["Downloading webpage", 0], ["Downloading player API JSON", delay / 2]]);
+                let doc_for = |id: &str, extra: &str| {
+                    serde_json::from_str::<serde_json::Value>(&doc(id, &good_url(), extra)).unwrap()
+                };
+                let mut v = match mode.as_str() {
+                    "wrong-id" => serde_json::json!({"id": id, "ok": true, "info": doc_for("zzzzzzzzzzz", "")}),
+                    "drm" => serde_json::json!({"id": id, "ok": true, "info": doc_for(&vid, r#","_has_drm":true"#)}),
+                    "fail-bot" => serde_json::json!({"id": id, "ok": false,
+                        "error": format!("ERROR: [youtube] {vid}: Sign in to confirm you're not a bot")}),
+                    _ => serde_json::json!({"id": id, "ok": true, "info": doc_for(&vid, "")}),
+                };
+                v["phases"] = phases;
+                v["ms"] = serde_json::json!(delay);
+                if mode == "rotate" {
+                    v["jar"] = serde_json::json!("# Netscape HTTP Cookie File\n# rotated-by-worker\n");
+                }
+                log_line(format!("SERVE RESOLVE END {vid} t={}", millis()));
+                reply(&mut out, v);
+            }
+            "quit" => {
+                log_line("SERVE QUIT".into());
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.iter().any(|a| a == "apollo-serve:") {
+        serve(&args);
+        return;
+    }
     let mode = env::var("APOLLO_FAKE_MODE").unwrap_or_else(|_| "ok".into());
     let log = env::var("APOLLO_FAKE_LOG").ok();
     let cookie_path = args

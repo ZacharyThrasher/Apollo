@@ -509,6 +509,11 @@ impl LibraryModel {
         let settled = !detail.is_loading();
         let failed = detail.failure().is_some();
         let pending = if settled { detail.pending.take() } else { None };
+        // Opening a page is the strongest hint that its first track is about to be played.
+        let first = detail.listing.items().first().map(|r| r.track.clone());
+        if let Some(track) = first.filter(|_| pending.is_none() && !failed) {
+            self.player.update(cx, |p, _| p.prefetch(&track));
+        }
         self.writes.update(cx, |w, cx| w.seed(seeds, cx));
         if let Some(request) = pending.filter(|_| !failed) {
             self.play_collection(detail_id, request, cx);
@@ -652,6 +657,13 @@ impl LibraryModel {
             Ok(content) => Load::Ready(Arc::new(content)),
             Err(failure) => Load::Failed(failure),
         };
+        let first = match &self.artist_mut(id).map(|d| &d.state) {
+            Some(Load::Ready(c)) => c.top_songs.first().map(|r| r.track.clone()),
+            _ => None,
+        };
+        if let Some(track) = first.filter(|_| pending.is_none()) {
+            self.player.update(cx, |p, _| p.prefetch(&track));
+        }
         self.writes.update(cx, |w, cx| w.seed(seeds, cx));
         if let Some(request) = pending.filter(|_| ok) {
             self.play_artist(id, request, cx);

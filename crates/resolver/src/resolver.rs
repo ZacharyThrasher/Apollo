@@ -17,30 +17,40 @@ use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
+#[cfg(windows)]
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
+use apollo_domain::model::{Track, VideoId};
 use apollo_domain::playback::{Event, Failure, LeaseId, LoadId};
 use apollo_runtime::{ResolveRequest, Resolver};
+#[cfg(windows)]
 use apollo_services_common::win::{self, PrivateDir};
 use apollo_services_common::{
-    EventSink, LeaseStore, SecretString, SessionProvider, SessionUnavailable,
+    EventSink, LeaseStore, SecretString, SessionProvider, SessionSnapshot, SessionUnavailable,
 };
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+#[cfg(windows)]
 use crate::argv::build_args;
+use crate::cache::LeaseCache;
 use crate::config::ResolverConfig;
 use crate::parse::{
     classify_failure, lease_error_code, lease_error_failure, parse_ytdlp_json,
 };
+#[cfg(windows)]
 use crate::runner::{run_contained, KillSwitch, RunStatus};
+use crate::warm::{self, Acquire, Pool, WorkerError, WorkerSpawn};
 
+#[cfg(windows)]
 const COOKIE_FILE: &str = "cookies.txt";
 const SCRATCH_MAX_AGE: Duration = Duration::from_secs(10 * 60);
 const MAX_DIAG: usize = 200;
+const MAX_LOG_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug)]
 pub enum ResolverError {
@@ -74,9 +84,78 @@ fn sha256_hex(path: &Path) -> std::io::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Cancellation for one resolution. On Windows the cold path's helper process is killed with it.
 #[derive(Default)]
 struct Job {
+    #[cfg(windows)]
     switch: KillSwitch,
+    #[cfg(not(windows))]
+    flag: AtomicBool,
+}
+
+impl Job {
+    fn cancel(&self) {
+        #[cfg(windows)]
+        self.switch.cancel();
+        #[cfg(not(windows))]
+        self.flag.store(true, Ordering::SeqCst);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        #[cfg(windows)]
+        return self.switch.is_cancelled();
+        #[cfg(not(windows))]
+        return self.flag.load(Ordering::SeqCst);
+    }
+}
+
+/// Speculative requests (prefetch) are numbered above any real load id so the same job table can
+/// hold them: `cancel_all` (logout, quit) must stop them too.
+const PREFETCH_KEY_BASE: u64 = 1 << 62;
+/// At most this many prefetch threads at once; more are dropped (hover spam, long queues).
+const MAX_PREFETCH_PENDING: usize = 6;
+
+/// What one resolution produced, shareable between the callers waiting for it.
+#[derive(Clone, Copy)]
+enum Produced {
+    Ok(LeaseId),
+    Failed(Failure, &'static str),
+}
+
+/// One resolution in progress for a video id. A second caller (a click on a track that is being
+/// prefetched) waits for it instead of starting another.
+struct Flight {
+    /// `None` = running. `Some(None)` = abandoned by its leader before it started (retry).
+    done: Mutex<Option<Option<Produced>>>,
+    cv: Condvar,
+    /// Someone is actually waiting to play this: workers should not treat it as speculative.
+    foreground: AtomicBool,
+}
+
+/// Facts about one resolution for the diagnostics line. Static labels and numbers only.
+#[derive(Default)]
+struct Note {
+    src: &'static str,
+    worker_ms: Option<u64>,
+    phases: Vec<(String, u64)>,
+}
+
+impl Note {
+    fn suffix(&self) -> String {
+        let mut s = format!(" src={}", if self.src.is_empty() { "cold" } else { self.src });
+        if let Some(ms) = self.worker_ms {
+            s.push_str(&format!(" worker_ms={ms}"));
+        }
+        if !self.phases.is_empty() {
+            let p: Vec<String> = self
+                .phases
+                .iter()
+                .map(|(l, ms)| format!("{}@{ms}", l.replace(' ', "_")))
+                .collect();
+            s.push_str(&format!(" phases={}", p.join(",")));
+        }
+        s
+    }
 }
 
 enum Outcome {
@@ -91,9 +170,31 @@ struct Inner {
     sink: EventSink,
     session: Arc<dyn SessionProvider>,
     jobs: Mutex<HashMap<u64, Arc<Job>>>,
+    #[cfg_attr(not(windows), allow(dead_code))]
     slots: (Mutex<usize>, Condvar),
     diag: Mutex<VecDeque<String>>,
     closed: AtomicBool,
+    pool: Option<Arc<Pool>>,
+    cache: Option<LeaseCache>,
+    flights: Mutex<HashMap<String, Arc<Flight>>>,
+    prefetch_pending: AtomicUsize,
+    prefetch_seq: AtomicU64,
+    log_file: Mutex<Option<std::path::PathBuf>>,
+}
+
+/// A cheap handle for things that outlive the resolver's owner (logout hooks).
+#[derive(Clone)]
+pub struct ResolverHandle {
+    inner: Arc<Inner>,
+}
+
+impl ResolverHandle {
+    /// Logout / identity change: cancel everything in flight, forget every cached URL and drop
+    /// every lease. Warm workers stay (they hold no account data once their next request
+    /// reloads the cookies), but their cookie state is marked stale.
+    pub fn invalidate(&self) {
+        self.inner.invalidate();
+    }
 }
 
 pub struct YtDlpResolver {
@@ -104,6 +205,7 @@ pub struct YtDlpResolver {
 impl YtDlpResolver {
     /// Verifies the pinned tools, prepares the run directories and sweeps leftovers of
     /// processes that died without cleaning up (stale private cookie dirs, old scratch files).
+    /// With warm workers configured it also starts them in the background.
     pub fn new(
         cfg: ResolverConfig,
         leases: LeaseStore,
@@ -128,8 +230,36 @@ impl YtDlpResolver {
         let scratch = cfg.run_dir.join("scratch");
         fs::create_dir_all(&cookies).map_err(|e| ResolverError::Io(e.to_string()))?;
         fs::create_dir_all(&scratch).map_err(|e| ResolverError::Io(e.to_string()))?;
+        #[cfg(windows)]
         win::sweep_stale(&cookies, "ytdlp");
         sweep_old(&scratch, SCRATCH_MAX_AGE);
+
+        let pool = match &cfg.warm {
+            Some(warm_cfg) => {
+                let plugin_root = warm::install_plugin(&cfg.run_dir)
+                    .map_err(|e| ResolverError::Io(format!("worker plugin: {e}")))?;
+                #[allow(unused_mut)]
+                let mut env = helper_env(&scratch);
+                #[cfg(feature = "test-support")]
+                for (k, v) in &cfg.extra_env {
+                    env.push((k.into(), v.into()));
+                }
+                let pool = Pool::new(
+                    warm_cfg.clone(),
+                    WorkerSpawn {
+                        ytdlp: cfg.ytdlp.clone(),
+                        deno: cfg.deno.clone(),
+                        plugin_root,
+                        scratch: scratch.clone(),
+                        env,
+                    },
+                );
+                pool.prewarm(warm_cfg.prewarm);
+                Some(pool)
+            }
+            None => None,
+        };
+        let cache = cfg.cache.clone().map(LeaseCache::new);
         Ok(Self {
             inner: Arc::new(Inner {
                 cfg,
@@ -140,20 +270,39 @@ impl YtDlpResolver {
                 slots: (Mutex::new(0), Condvar::new()),
                 diag: Mutex::new(VecDeque::new()),
                 closed: AtomicBool::new(false),
+                pool,
+                cache,
+                flights: Mutex::new(HashMap::new()),
+                prefetch_pending: AtomicUsize::new(0),
+                prefetch_seq: AtomicU64::new(0),
+                log_file: Mutex::new(None),
             }),
             threads: Mutex::new(Vec::new()),
         })
     }
 
-    /// Cancel every in-flight resolution (logout, quit). Their helper trees are killed.
-    pub fn cancel_all(&self) {
-        let jobs: Vec<Arc<Job>> = self.inner.jobs.lock().unwrap().drain().map(|(_, j)| j).collect();
-        for j in jobs {
-            j.switch.cancel();
+    /// Also append every diagnostics line (they hold only outcome codes and timings) to `path`,
+    /// time-stamped, so a run can be read afterwards. An oversized old file is moved aside.
+    pub fn set_log_file(&self, path: std::path::PathBuf) {
+        if fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
+            let _ = fs::rename(&path, path.with_extension("old"));
+        }
+        *self.inner.log_file.lock().unwrap() = Some(path);
+    }
+
+    pub fn handle(&self) -> ResolverHandle {
+        ResolverHandle {
+            inner: self.inner.clone(),
         }
     }
 
-    /// Redacted outcome lines (`load=3 preload=false outcome=ok ms=4800`). Safe to show or log.
+    /// Cancel every in-flight resolution (logout, quit). Their helper trees are killed.
+    pub fn cancel_all(&self) {
+        self.inner.cancel_all();
+    }
+
+    /// Redacted outcome lines (`load=3 preload=false outcome=ok ms=4800 src=warm ...`). Safe to
+    /// show or log.
     pub fn diagnostics(&self) -> Vec<String> {
         self.inner.diag.lock().unwrap().iter().cloned().collect()
     }
@@ -161,6 +310,35 @@ impl YtDlpResolver {
     /// Resolutions currently in flight.
     pub fn in_flight(&self) -> usize {
         self.inner.jobs.lock().unwrap().len()
+    }
+
+    /// Resolve `track` ahead of need so that playing it later starts from the cache. Silent: no
+    /// event is produced, nothing is cancelled, and a track already cached or being resolved is
+    /// left alone. Never waits for a worker that a click could need.
+    pub fn prefetch(&self, track: &Track) {
+        self.inner.prefetch(&track.video_id);
+    }
+
+    /// Warm worker pool state for diagnostics: (alive, idle, started, failed starts).
+    pub fn warm_status(&self) -> Option<(usize, usize, u64, u64)> {
+        self.inner.pool.as_ref().map(|p| {
+            (
+                p.alive(),
+                p.idle(),
+                p.stats.spawned.load(Ordering::Relaxed),
+                p.stats.spawn_failures.load(Ordering::Relaxed),
+            )
+        })
+    }
+
+    /// Why the warm workers could not start, if they could not (diagnostics only).
+    pub fn warm_last_error(&self) -> Option<String> {
+        self.inner.pool.as_ref().and_then(|p| p.last_error())
+    }
+
+    /// Cached resolutions held right now.
+    pub fn cached(&self) -> usize {
+        self.inner.cache.as_ref().map_or(0, LeaseCache::len)
     }
 }
 
@@ -177,7 +355,7 @@ impl Resolver for YtDlpResolver {
             .unwrap()
             .insert(request.load.get(), job.clone())
         {
-            old.switch.cancel(); // a re-resolve of the same load supersedes the old one
+            old.cancel(); // a re-resolve of the same load supersedes the old one
         }
         let inner = self.inner.clone();
         let handle = thread::Builder::new()
@@ -191,9 +369,13 @@ impl Resolver for YtDlpResolver {
 
     fn cancel(&mut self, load: LoadId) {
         if let Some(job) = self.inner.jobs.lock().unwrap().remove(&load.get()) {
-            job.switch.cancel();
+            job.cancel();
             self.inner.note(format!("load={} outcome=cancel-requested", load.get()));
         }
+    }
+
+    fn prefetch(&mut self, track: &Track) {
+        YtDlpResolver::prefetch(self, track);
     }
 }
 
@@ -202,10 +384,13 @@ impl Drop for YtDlpResolver {
         // Quit: reject new work, cancel everything, wait (bounded) for the helpers to be reaped.
         self.inner.closed.store(true, Ordering::SeqCst);
         self.cancel_all();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        if let Some(pool) = &self.inner.pool {
+            pool.close(); // kills idle workers; busy ones die when their request returns
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
         let threads: Vec<_> = self.threads.lock().unwrap().drain(..).collect();
         for t in threads {
-            while !t.is_finished() && std::time::Instant::now() < deadline {
+            while !t.is_finished() && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(10));
             }
             if t.is_finished() {
@@ -231,8 +416,24 @@ fn sweep_old(dir: &Path, max_age: Duration) {
     }
 }
 
+/// What `produce_warm` decided.
+enum Warm {
+    Done(Outcome),
+    /// Workers are unavailable: use a process per track.
+    Fallback,
+}
+
 impl Inner {
     fn note(&self, line: String) {
+        if let Some(path) = self.log_file.lock().unwrap().as_ref() {
+            use std::io::Write;
+            let stamp = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis());
+            if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = f.write_all(format!("t={stamp} resolver {line}\n").as_bytes());
+            }
+        }
         let mut d = self.diag.lock().unwrap();
         if d.len() == MAX_DIAG {
             d.pop_front();
@@ -240,19 +441,39 @@ impl Inner {
         d.push_back(line);
     }
 
+    fn cancel_all(&self) {
+        let jobs: Vec<Arc<Job>> = self.jobs.lock().unwrap().drain().map(|(_, j)| j).collect();
+        for j in jobs {
+            j.cancel();
+        }
+    }
+
+    fn invalidate(&self) {
+        self.cancel_all();
+        if let Some(cache) = &self.cache {
+            cache.clear();
+        }
+        self.leases.clear();
+        if let Some(pool) = &self.pool {
+            pool.recycle(); // cookies live in worker memory: end those processes too
+        }
+    }
+
     fn run_one(self: Arc<Self>, req: ResolveRequest, job: Arc<Job>) {
-        let started = std::time::Instant::now();
-        let outcome = self.resolve(&req, &job);
+        let started = Instant::now();
+        let mut note = Note::default();
+        let outcome = self.resolve(&req, &job, &mut note);
         let (label, result) = match &outcome {
             Outcome::Ok(l) => ("ok".to_owned(), Some(Ok(*l))),
             Outcome::Failed(f, code) => (format!("{code}"), Some(Err(*f))),
             Outcome::Cancelled => ("cancelled".to_owned(), None),
         };
         self.note(format!(
-            "load={} preload={} outcome={label} ms={}",
+            "load={} preload={} outcome={label} ms={}{}",
             req.load.get(),
             req.preload,
-            started.elapsed().as_millis()
+            started.elapsed().as_millis(),
+            note.suffix()
         ));
         // Forget this job unless a newer one replaced it.
         {
@@ -269,12 +490,310 @@ impl Inner {
         }
     }
 
+    // ------------------------------------------------------------------ speculative
+
+    fn prefetch(self: &Arc<Self>, video_id: &VideoId) {
+        if self.closed.load(Ordering::SeqCst) || (self.cache.is_none() && self.pool.is_none()) {
+            return;
+        }
+        let vid = video_id.as_str().to_owned();
+        if !crate::argv::valid_video_id(&vid) {
+            return;
+        }
+        if self.cache.as_ref().is_some_and(|c| c.get(&vid, &self.leases).is_some())
+            || self.flights.lock().unwrap().contains_key(&vid)
+        {
+            return;
+        }
+        if self.prefetch_pending.fetch_add(1, Ordering::SeqCst) >= MAX_PREFETCH_PENDING {
+            self.prefetch_pending.fetch_sub(1, Ordering::SeqCst);
+            return;
+        }
+        let key = PREFETCH_KEY_BASE + self.prefetch_seq.fetch_add(1, Ordering::SeqCst);
+        let job = Arc::new(Job::default());
+        self.jobs.lock().unwrap().insert(key, job.clone());
+        let me = self.clone();
+        let spawned = thread::Builder::new()
+            .name("apollo-prefetch".into())
+            .spawn(move || {
+                let started = Instant::now();
+                let mut note = Note::default();
+                let outcome = me.resolve_video(&VideoId::new(&vid), false, &job, &mut note);
+                let label = match &outcome {
+                    Outcome::Ok(_) => "ok".to_owned(),
+                    Outcome::Failed(_, code) => (*code).to_owned(),
+                    Outcome::Cancelled => "cancelled".to_owned(),
+                };
+                me.note(format!(
+                    "prefetch outcome={label} ms={}{}",
+                    started.elapsed().as_millis(),
+                    note.suffix()
+                ));
+                me.jobs.lock().unwrap().remove(&key);
+                me.prefetch_pending.fetch_sub(1, Ordering::SeqCst);
+            });
+        if spawned.is_err() {
+            self.jobs.lock().unwrap().remove(&key);
+            self.prefetch_pending.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    // ------------------------------------------------------------------- resolving
+
+    fn resolve(&self, req: &ResolveRequest, job: &Job, note: &mut Note) -> Outcome {
+        if self.cache.is_none() && self.pool.is_none() {
+            // The original behaviour, untouched: a process per request.
+            #[cfg(windows)]
+            return self.resolve_cold(&req.track.video_id, req.load.get(), job);
+            #[cfg(not(windows))]
+            return Outcome::Failed(Failure::Unsupported, "no-worker");
+        }
+        let out = self.resolve_video(&req.track.video_id, !req.preload, job, note);
+        match out {
+            // The load was cancelled while the helper worked: the URL stays cached for the next
+            // request, but this load gets nothing.
+            Outcome::Ok(_) if job.is_cancelled() => Outcome::Cancelled,
+            other => other,
+        }
+    }
+
+    /// The session gate, then cache, then (shared) resolution.
+    fn resolve_video(&self, video_id: &VideoId, foreground: bool, job: &Job, note: &mut Note) -> Outcome {
+        let vid = video_id.as_str();
+        loop {
+            if job.is_cancelled() || self.closed.load(Ordering::SeqCst) {
+                return Outcome::Cancelled;
+            }
+            // AUTH-02: the gate is the account's own validated session, never the resolver's
+            // success, and never the cache (no session = no cached URLs handed out).
+            let Some(snapshot) = self.session.snapshot() else {
+                return match self.session.unavailable_reason() {
+                    SessionUnavailable::NoSession => {
+                        Outcome::Failed(Failure::SessionExpired, "no-session")
+                    }
+                    SessionUnavailable::Unconfirmed => {
+                        Outcome::Failed(Failure::Network, "session-unconfirmed")
+                    }
+                };
+            };
+            if let Some(id) = self.cache.as_ref().and_then(|c| c.get(vid, &self.leases)) {
+                note.src = "cache";
+                return Outcome::Ok(id);
+            }
+            let (flight, leader) = {
+                let mut flights = self.flights.lock().unwrap();
+                match flights.get(vid) {
+                    Some(f) => (f.clone(), false),
+                    None => {
+                        let f = Arc::new(Flight {
+                            done: Mutex::new(None),
+                            cv: Condvar::new(),
+                            foreground: AtomicBool::new(foreground),
+                        });
+                        flights.insert(vid.to_owned(), f.clone());
+                        (f, true)
+                    }
+                }
+            };
+            if !leader {
+                if foreground {
+                    flight.foreground.store(true, Ordering::SeqCst);
+                }
+                note.src = "joined";
+                let mut g = flight.done.lock().unwrap();
+                let finished = loop {
+                    if let Some(r) = *g {
+                        break r;
+                    }
+                    if job.is_cancelled() || self.closed.load(Ordering::SeqCst) {
+                        return Outcome::Cancelled;
+                    }
+                    g = flight.cv.wait_timeout(g, Duration::from_millis(25)).unwrap().0;
+                };
+                match finished {
+                    Some(Produced::Ok(id)) => return Outcome::Ok(id),
+                    Some(Produced::Failed(f, code)) => return Outcome::Failed(f, code),
+                    None => continue, // the leader gave up before starting: take over
+                }
+            }
+
+            let outcome = self.produce(video_id, &snapshot, &flight.foreground, job, note);
+            let produced = match &outcome {
+                Outcome::Ok(id) => {
+                    if let Some(c) = &self.cache {
+                        c.insert(vid, *id);
+                    }
+                    Some(Produced::Ok(*id))
+                }
+                Outcome::Failed(f, code) => Some(Produced::Failed(*f, code)),
+                Outcome::Cancelled => None,
+            };
+            *flight.done.lock().unwrap() = Some(produced);
+            flight.cv.notify_all();
+            {
+                let mut flights = self.flights.lock().unwrap();
+                if flights.get(vid).is_some_and(|f| Arc::ptr_eq(f, &flight)) {
+                    flights.remove(vid);
+                }
+            }
+            return outcome;
+        }
+    }
+
+    /// Actually resolve: a warm worker if one can run, else (Windows) a process per track.
+    fn produce(
+        &self,
+        video_id: &VideoId,
+        snapshot: &SessionSnapshot,
+        foreground: &AtomicBool,
+        job: &Job,
+        note: &mut Note,
+    ) -> Outcome {
+        if let Some(pool) = &self.pool {
+            if pool.usable() {
+                match self.produce_warm(pool, video_id, snapshot, foreground, job, note) {
+                    Warm::Done(o) => return o,
+                    Warm::Fallback => {}
+                }
+            }
+            // Workers cannot run here: say why, then fall back to a process per track.
+            self.note(format!(
+                "warm workers unavailable ({}); using a process per track",
+                pool.last_error().unwrap_or_else(|| "unknown".into())
+            ));
+        }
+        #[cfg(windows)]
+        {
+            note.src = "cold";
+            self.resolve_cold(video_id, 0, job)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = job;
+            Outcome::Failed(Failure::Unsupported, "no-worker")
+        }
+    }
+
+    fn produce_warm(
+        &self,
+        pool: &Pool,
+        video_id: &VideoId,
+        snapshot: &SessionSnapshot,
+        foreground: &AtomicBool,
+        job: &Job,
+        note: &mut Note,
+    ) -> Warm {
+        let cfg = pool.config();
+        let closed = || self.closed.load(Ordering::SeqCst);
+        let waiting_cancelled = || job.is_cancelled() || self.closed.load(Ordering::SeqCst);
+        for attempt in 0..2 {
+            let mut co = match pool.acquire(foreground, &waiting_cancelled) {
+                Acquire::Got(c) => c,
+                Acquire::Cancelled => return Warm::Done(Outcome::Cancelled),
+                Acquire::Unavailable => return Warm::Fallback,
+            };
+            let w = co.worker();
+            if w.loaded_epoch != Some(snapshot.epoch) {
+                let msg = json!({"op": "cookies", "netscape": snapshot.cookies_netscape.expose()});
+                match w.request(msg, Duration::from_secs(10), &closed) {
+                    Ok(v) if v["ok"] == true => w.loaded_epoch = Some(snapshot.epoch),
+                    Ok(_) => {
+                        co.discard();
+                        return Warm::Done(Outcome::Failed(Failure::Unsupported, "cookie-load-failed"));
+                    }
+                    Err(_) => {
+                        co.discard();
+                        continue; // a dead worker: one retry on a fresh one
+                    }
+                }
+            }
+            let w = co.worker();
+            let sent = Instant::now();
+            let msg = json!({"op": "resolve", "video_id": video_id.as_str()});
+            let reply = match w.request(msg, cfg.request_timeout, &closed) {
+                Ok(v) => v,
+                Err(WorkerError::Timeout) => {
+                    co.discard();
+                    return Warm::Done(Outcome::Failed(Failure::Network, "timeout"));
+                }
+                Err(WorkerError::Aborted) => {
+                    co.discard();
+                    return Warm::Done(Outcome::Cancelled);
+                }
+                Err(_) => {
+                    co.discard();
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Warm::Done(Outcome::Failed(Failure::Network, "worker-died"));
+                }
+            };
+            note.src = "warm";
+            note.worker_ms = Some(sent.elapsed().as_millis() as u64);
+            if let Some(phases) = reply["phases"].as_array() {
+                note.phases = phases
+                    .iter()
+                    .filter_map(|p| {
+                        let label = p[0].as_str()?;
+                        let ms = p[1].as_u64()?;
+                        // "[youtube] Downloading webpage" -> "Downloading webpage"
+                        let label = match (label.strip_prefix('['), label.find(']')) {
+                            (Some(_), Some(end)) => &label[end + 1..],
+                            _ => label,
+                        };
+                        let label: String = label
+                            .trim()
+                            .chars()
+                            .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+                            .take(40)
+                            .collect();
+                        (!label.is_empty()).then_some((label, ms))
+                    })
+                    .collect();
+            }
+            // Cookie rotation: yt-dlp may rewrite the jar. Offer it back under the epoch the worker
+            // loaded; the account service refuses it if a newer jar exists (TEST-15). A merge bumps
+            // the epoch, so the next request reloads the merged jar.
+            if let (Some(jar), Some(epoch)) = (reply["jar"].as_str(), w.loaded_epoch) {
+                let merged = self.session.offer_rotation(epoch, SecretString::new(jar.to_owned()));
+                self.note(format!("cookie-rotation merged={merged}"));
+            }
+            drop(co);
+            return Warm::Done(self.finish_reply(video_id, &reply));
+        }
+        Warm::Done(Outcome::Failed(Failure::Network, "worker-died"))
+    }
+
+    /// A worker's reply to the validated lease (or the failure class), the same checks as the
+    /// per-process path.
+    fn finish_reply(&self, video_id: &VideoId, reply: &Value) -> Outcome {
+        if reply["ok"] != true {
+            let text = reply["error"].as_str().unwrap_or("");
+            let (f, code) = classify_failure(text);
+            return Outcome::Failed(f, code);
+        }
+        let Ok(bytes) = serde_json::to_vec(&reply["info"]) else {
+            return Outcome::Failed(Failure::Unsupported, "unparseable-output");
+        };
+        let candidate = match parse_ytdlp_json(&bytes) {
+            Ok(c) => c,
+            Err(_) => return Outcome::Failed(Failure::Unsupported, "unparseable-output"),
+        };
+        match self.cfg.url_policy.validate(video_id, candidate) {
+            Ok(lease) => Outcome::Ok(self.leases.insert(lease)),
+            Err(e) => Outcome::Failed(lease_error_failure(&e), lease_error_code(&e)),
+        }
+    }
+
+    // ---------------------------------------------------------- one process per track
+
+    #[cfg(windows)]
     fn acquire_slot(&self, job: &Job) -> Option<SlotGuard<'_>> {
         let max = self.cfg.max_concurrent.max(1);
         let (lock, cv) = &self.slots;
         let mut n = lock.lock().unwrap();
         loop {
-            if job.switch.is_cancelled() || self.closed.load(Ordering::SeqCst) {
+            if job.is_cancelled() || self.closed.load(Ordering::SeqCst) {
                 return None;
             }
             if *n < max {
@@ -285,7 +804,8 @@ impl Inner {
         }
     }
 
-    fn resolve(&self, req: &ResolveRequest, job: &Job) -> Outcome {
+    #[cfg(windows)]
+    fn resolve_cold(&self, video_id: &VideoId, load: u64, job: &Job) -> Outcome {
         let Some(_slot) = self.acquire_slot(job) else {
             return Outcome::Cancelled;
         };
@@ -301,7 +821,7 @@ impl Inner {
                 }
             };
         };
-        let video_id = req.track.video_id.as_str();
+        let video_str = video_id.as_str();
         let (cookies_base, scratch) = (self.cfg.run_dir.join("cookies"), self.cfg.run_dir.join("scratch"));
         let Ok(dir) = PrivateDir::create(&cookies_base, "ytdlp") else {
             return Outcome::Failed(Failure::Unsupported, "private-dir-failed");
@@ -310,7 +830,7 @@ impl Inner {
         else {
             return Outcome::Failed(Failure::Unsupported, "cookie-file-failed");
         };
-        let Some(args) = build_args(video_id, &cookie_path, &self.cfg.deno) else {
+        let Some(args) = build_args(video_str, &cookie_path, &self.cfg.deno) else {
             return Outcome::Failed(Failure::Unsupported, "bad-video-id");
         };
 
@@ -332,13 +852,13 @@ impl Inner {
             if let Ok(after) = fs::read_to_string(&cookie_path) {
                 if after != snapshot.cookies_netscape.expose() && !after.is_empty() {
                     let merged = self.session.offer_rotation(snapshot.epoch, SecretString::new(after));
-                    self.note(format!("load={} cookie-rotation merged={merged}", req.load.get()));
+                    self.note(format!("load={load} cookie-rotation merged={merged}"));
                 }
             }
         }
         drop(dir); // zero and delete the cookie file now, before anything else happens
 
-        if job.switch.is_cancelled() || matches!(run.status, RunStatus::Cancelled) {
+        if job.is_cancelled() || matches!(run.status, RunStatus::Cancelled) {
             return Outcome::Cancelled;
         }
         match run.status {
@@ -356,12 +876,12 @@ impl Inner {
             Ok(c) => c,
             Err(_) => return Outcome::Failed(Failure::Unsupported, "unparseable-output"),
         };
-        let lease = match self.cfg.url_policy.validate(&req.track.video_id, candidate) {
+        let lease = match self.cfg.url_policy.validate(video_id, candidate) {
             Ok(l) => l,
             Err(e) => return Outcome::Failed(lease_error_failure(&e), lease_error_code(&e)),
         };
         let id = self.leases.insert(lease);
-        if job.switch.is_cancelled() {
+        if job.is_cancelled() {
             self.leases.remove(id); // cancelled while parsing: leave nothing behind
             return Outcome::Cancelled;
         }
@@ -369,10 +889,12 @@ impl Inner {
     }
 }
 
+#[cfg(windows)]
 struct SlotGuard<'a> {
     inner: &'a Inner,
 }
 
+#[cfg(windows)]
 impl Drop for SlotGuard<'_> {
     fn drop(&mut self) {
         let (lock, cv) = &self.inner.slots;
@@ -382,6 +904,7 @@ impl Drop for SlotGuard<'_> {
 }
 
 /// A minimal, explicit environment: no proxy variables, no user profile, no config discovery.
+#[cfg(windows)]
 fn helper_env(scratch: &Path) -> Vec<(OsString, OsString)> {
     let sys_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let mut path = OsString::from(&sys_root);
@@ -396,6 +919,19 @@ fn helper_env(scratch: &Path) -> Vec<(OsString, OsString)> {
         ("USERPROFILE".into(), s.clone()),
         ("APPDATA".into(), s.clone()),
         ("LOCALAPPDATA".into(), s.clone()),
+        ("HOME".into(), s),
+        ("PYTHONIOENCODING".into(), "utf-8".into()),
+        ("NO_COLOR".into(), "1".into()),
+    ]
+}
+
+/// Non-Windows builds only exist for development and tests: keep PATH so a script yt-dlp runs.
+#[cfg(not(windows))]
+fn helper_env(scratch: &Path) -> Vec<(OsString, OsString)> {
+    let s = scratch.as_os_str().to_owned();
+    vec![
+        ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
+        ("TMPDIR".into(), s.clone()),
         ("HOME".into(), s),
         ("PYTHONIOENCODING".into(), "utf-8".into()),
         ("NO_COLOR".into(), "1".into()),

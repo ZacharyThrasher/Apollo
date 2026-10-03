@@ -10,6 +10,10 @@ description = "Owner-run Milestone 2 probe: real account session -> resolver -> 
 name = "apollo-m2-probe"
 path = "src/main.rs"
 
+[[bin]]
+name = "apollo-resolve-bench"
+path = "src/bin/resolve_bench.rs"
+
 [target.'cfg(windows)'.dependencies]
 apollo-account = { path = "../account" }
 apollo-domain = { path = "../domain" }

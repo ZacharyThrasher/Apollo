@@ -22,6 +22,57 @@ impl PinnedTools {
     }
 }
 
+/// Keep yt-dlp running between tracks (see `warm.rs`). Without it every track pays for a new
+/// process, a new YouTube session and a re-parse of the player script.
+#[derive(Clone, Debug)]
+pub struct WarmConfig {
+    /// Most workers alive at once. Each is a resident yt-dlp (~100 MB).
+    pub max_workers: usize,
+    /// Most workers speculative (prefetch / preload) work may occupy, so a user's click always
+    /// finds one free.
+    pub background_limit: usize,
+    /// Workers started in the background at launch, before anyone clicks play.
+    pub prewarm: usize,
+    /// A worker that has not announced itself within this long is killed.
+    pub startup_timeout: Duration,
+    /// A request that takes longer kills its worker (a worker is only ever lost, never stuck).
+    pub request_timeout: Duration,
+}
+
+impl Default for WarmConfig {
+    fn default() -> Self {
+        Self {
+            max_workers: 3,
+            background_limit: 2,
+            prewarm: 2,
+            startup_timeout: Duration::from_secs(30),
+            request_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Memory-only reuse of resolved stream URLs. A signed googlevideo URL stays valid for hours;
+/// reusing it skips the whole resolution.
+#[derive(Clone, Debug)]
+pub struct CacheConfig {
+    pub max_entries: usize,
+    /// A cached URL must stay valid at least this much longer than "now", so a track that
+    /// starts from the cache can also be played through.
+    pub min_remaining: Duration,
+    /// How long a URL with no reported expiry may be reused.
+    pub max_unknown_age: Duration,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            max_entries: 64,
+            min_remaining: Duration::from_secs(15 * 60),
+            max_unknown_age: Duration::from_secs(5 * 60),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ResolverConfig {
     pub ytdlp: PathBuf,
@@ -35,6 +86,12 @@ pub struct ResolverConfig {
     /// yt-dlp's `-J` output is capped; more than this kills the run.
     pub max_stdout_bytes: usize,
     pub url_policy: UrlPolicy,
+    /// `Some` = keep warm yt-dlp workers (falls back to a process per track when they cannot
+    /// run). `None` = the original behaviour: one process per track.
+    pub warm: Option<WarmConfig>,
+    /// `Some` = reuse resolved URLs (and share one resolution between callers asking for the
+    /// same track). `None` = every request resolves.
+    pub cache: Option<CacheConfig>,
     /// `None` skips verification (tests only).
     pub pinned: Option<PinnedTools>,
     /// Extra environment for the helper. Only exists in test builds.
@@ -44,7 +101,8 @@ pub struct ResolverConfig {
 
 impl ResolverConfig {
     /// Production settings: tools under `tools_dir` (`yt-dlp/yt-dlp.exe`, `deno/deno.exe`),
-    /// pinned to the M0 baseline, production URL policy, 30 s timeout.
+    /// pinned to the M0 baseline, production URL policy, 30 s timeout, warm workers and a
+    /// resolved-URL cache. [`ResolverConfig::legacy`] turns both off.
     pub fn production(tools_dir: &Path, run_dir: PathBuf) -> Self {
         Self {
             ytdlp: tools_dir.join("yt-dlp").join("yt-dlp.exe"),
@@ -54,9 +112,19 @@ impl ResolverConfig {
             max_concurrent: 2,
             max_stdout_bytes: 8 * 1024 * 1024,
             url_policy: UrlPolicy::production(),
+            warm: Some(WarmConfig::default()),
+            cache: Some(CacheConfig::default()),
             pinned: Some(PinnedTools::m0_baseline()),
             #[cfg(feature = "test-support")]
             extra_env: Vec::new(),
         }
+    }
+
+    /// The original behaviour (a fresh yt-dlp per track, nothing reused): the "before" in
+    /// timing comparisons and an escape hatch.
+    pub fn legacy(mut self) -> Self {
+        self.warm = None;
+        self.cache = None;
+        self
     }
 }

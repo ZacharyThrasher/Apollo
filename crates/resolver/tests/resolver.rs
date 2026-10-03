@@ -139,6 +139,8 @@ fn config(root: &Path, mode: &str, log: &Path, pidfile: &Path) -> ResolverConfig
         max_concurrent: 2,
         max_stdout_bytes: 1024 * 1024,
         url_policy: UrlPolicy::production(),
+        warm: None,
+        cache: None,
         pinned: None,
         extra_env: vec![
             ("APOLLO_FAKE_MODE".into(), mode.into()),
@@ -530,7 +532,7 @@ fn pinned_tools_are_verified() {
         assert!(err.to_string().contains("pinned SHA-256"), "{err}");
 
         // The real M0 baseline tools match their recorded pins.
-        let cfg = ResolverConfig::production(&tools, root.join("run"));
+        let cfg = ResolverConfig::production(&tools, root.join("run")).legacy();
         assert_eq!(cfg.timeout, Duration::from_secs(30));
         YtDlpResolver::new(cfg, LeaseStore::new(), sink, TestSession::new(true))
             .expect("M0 baseline yt-dlp/deno must match their pins");
@@ -607,7 +609,7 @@ fn real_ytdlp_through_the_contained_runner_with_placeholder_cookies() {
     }
     let root = std::env::temp_dir().join(format!("apollo-resolver-test-{}", random_hex(6)));
     fs::create_dir_all(&root).unwrap();
-    let cfg = ResolverConfig::production(&tools, root.join("run"));
+    let cfg = ResolverConfig::production(&tools, root.join("run")).legacy();
     let (tx, rx) = mpsc::channel();
     let tx = Mutex::new(tx);
     let sink: EventSink = Arc::new(move |ev| {

@@ -4,10 +4,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use apollo_domain::model::{QueueEntryId, Track};
-use apollo_domain::playback::{Event, Failure, Intent, Phase};
+use apollo_domain::playback::{EngineEvent, Event, Failure, Intent, Phase};
 use apollo_domain::queue::{QueueEntry, Repeat};
 use apollo_runtime::Driver;
 use apollo_theme::Accent;
@@ -16,6 +16,7 @@ use gpui::{Context, RenderImage, SharedString};
 use crate::accent_anim::AccentAnim;
 use crate::art::{ArtSource, DecodedArt};
 use crate::backend::{LibraryTrack, Ports, Prepared};
+use crate::latency::Latency;
 use crate::library::LibrarySource;
 use crate::os_media::{MediaState, MediaTrack, OsCommand};
 use crate::settings::VolumeStore;
@@ -26,6 +27,14 @@ type AppDriver =
 
 /// Volume the app starts at when none was saved (coordinator decision).
 pub const DEFAULT_VOLUME: u8 = 70;
+
+/// How long the pointer (or keyboard selection) must rest on a track before it is resolved ahead
+/// of a click: long enough that sweeping across a list asks YouTube for nothing.
+const INTENT_DELAY: Duration = Duration::from_millis(250);
+
+/// Tracks after the one that starts that are resolved right away, so the first Next is instant
+/// (the coordinator itself only preloads the next track once the current one has loaded).
+const LOOKAHEAD: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -109,6 +118,9 @@ pub struct PlayerModel {
     muted: bool,
     volume_store: Option<Arc<dyn VolumeStore>>,
     shuffle_seed: u64,
+    latency: Latency,
+    /// The track the user last showed interest in (hover/selection), for the prefetch debounce.
+    intent: Option<String>,
 }
 
 impl PlayerModel {
@@ -125,6 +137,8 @@ impl PlayerModel {
             muted: false,
             volume_store: None,
             shuffle_seed: seed_from_clock(),
+            latency: Latency::default(),
+            intent: None,
         }
     }
 
@@ -147,11 +161,91 @@ impl PlayerModel {
         driver.edit_queue(|q| {
             q.play_context(tracks, 0);
         });
+        // The queue starts paused on its first track: have it ready so the first Play is instant.
+        let first = driver.coordinator().queue().current().map(|e| e.track.clone());
         self.driver = Some(driver);
         self.art_source = Some(art);
         self.library = Some(library);
         self.status = Status::Ready;
+        if let Some(track) = first {
+            self.prefetch(&track);
+        }
         self.sync(cx);
+    }
+
+    /// Where the "time to first audio" lines go (none in tests).
+    pub fn set_latency_log(&mut self, path: Option<std::path::PathBuf>) {
+        self.latency.set_log(path);
+    }
+
+    /// Resolve `track` ahead of need so that playing it starts from a ready stream. Silent and
+    /// cheap to repeat: a track already ready or being resolved is left alone.
+    pub fn prefetch(&mut self, track: &Track) {
+        if let Some(d) = self.driver.as_mut() {
+            d.prefetch(track);
+        }
+    }
+
+    /// The user is lingering on `track` (hover, keyboard selection): prefetch it once the interest
+    /// has lasted [`INTENT_DELAY`] and moved nowhere else.
+    pub fn hint_play(&mut self, track: &Track, cx: &mut Context<Self>) {
+        let id = track.video_id.as_str().to_owned();
+        if self.intent.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        self.intent = Some(id.clone());
+        let track = track.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(INTENT_DELAY).await;
+            let _ = this.update(cx, |m, _| {
+                if m.intent.as_deref() == Some(id.as_str()) {
+                    m.prefetch(&track);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Prefetch what plays after the current track, in play order.
+    fn prefetch_upcoming(&mut self) {
+        let Some(d) = self.driver.as_mut() else { return };
+        let next: Vec<Track> = d
+            .coordinator()
+            .queue()
+            .upcoming()
+            .take(LOOKAHEAD)
+            .map(|e| e.track.clone())
+            .collect();
+        for track in &next {
+            d.prefetch(track);
+        }
+    }
+
+    /// Time-to-first-audio bookkeeping: what the user just asked for, and the milestones that
+    /// follow. Observes only; it never changes what is played.
+    fn trace(&mut self, kind: Option<&'static str>, event: &Event) {
+        let now = Instant::now();
+        let Some(d) = self.driver.as_ref() else { return };
+        let c = d.coordinator();
+        let active = c.active_load();
+        let begin = |l: &mut Latency, default: &'static str| l.begin(kind.unwrap_or(default), now);
+        match event {
+            Event::PlayContext { .. } => begin(&mut self.latency, "play_tracks"),
+            Event::PlayEntry { .. } => begin(&mut self.latency, "queue_entry"),
+            Event::Next => begin(&mut self.latency, "next"),
+            Event::Previous => begin(&mut self.latency, "previous"),
+            Event::Play if c.phase() == Phase::Idle => begin(&mut self.latency, "play"),
+            Event::Pause | Event::Stop | Event::Logout => self.latency.cancel(),
+            Event::Resolved { load, .. } if active == Some(*load) => self.latency.resolved(now),
+            Event::Engine { load, event } if active == Some(*load) => match event {
+                EngineEvent::Opened { .. } => self.latency.opened(now),
+                EngineEvent::Position(p) if *p > 0 => {
+                    self.latency.audio(now);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
     }
 
     pub fn fail(&mut self, detail: &str, cx: &mut Context<Self>) {
@@ -194,6 +288,12 @@ impl PlayerModel {
     // ---- commands ----------------------------------------------------------
 
     pub fn handle(&mut self, event: Event, cx: &mut Context<Self>) {
+        self.handle_as(None, event, cx);
+    }
+
+    /// `handle`, naming what the user did for the latency log (`None` = derived from the event).
+    fn handle_as(&mut self, kind: Option<&'static str>, event: Event, cx: &mut Context<Self>) {
+        self.trace(kind, &event);
         if let Some(d) = self.driver.as_mut() {
             d.handle(event);
         }
@@ -232,7 +332,8 @@ impl PlayerModel {
                 q.play_next(vec![track]);
             });
         }
-        self.handle(Event::Next, cx);
+        self.handle_as(Some("play_now"), Event::Next, cx);
+        self.prefetch_upcoming();
     }
 
     /// Add `track` to the end of the up-next list, ahead of the rest of the context.
@@ -299,6 +400,7 @@ impl PlayerModel {
             });
         }
         self.handle(Event::PlayContext { tracks, start }, cx);
+        self.prefetch_upcoming();
     }
 
     pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {

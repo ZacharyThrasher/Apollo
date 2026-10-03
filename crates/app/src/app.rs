@@ -47,7 +47,10 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     let volume_store: Option<Arc<dyn VolumeStore>> =
         SettingsVolume::default_location().map(|s| Arc::new(s) as Arc<dyn VolumeStore>);
     let player = cx.new(|_| PlayerModel::new());
-    player.update(cx, |m, _| m.set_volume_store(volume_store.clone()));
+    player.update(cx, |m, _| {
+        m.set_volume_store(volume_store.clone());
+        m.set_latency_log(crate::latency::default_log());
+    });
     let ports = mode.account_ports();
     let account = cx.new(|cx| AccountModel::new(ports.clone(), cx));
     let window = open_window(cx, player.clone(), account.clone());

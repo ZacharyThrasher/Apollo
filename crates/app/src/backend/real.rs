@@ -132,7 +132,11 @@ pub fn prepare(
     let app_dir = app_dir()?;
     let account = account.clone();
     let run_dir = app_dir.join("run");
-    let rcfg = ResolverConfig::production(&opts.tools, run_dir);
+    let mut rcfg = ResolverConfig::production(&opts.tools, run_dir);
+    // Escape hatch and "before" measurement: APOLLO_RESOLVER=legacy runs a yt-dlp per track.
+    if std::env::var("APOLLO_RESOLVER").is_ok_and(|v| v.eq_ignore_ascii_case("legacy")) {
+        rcfg = rcfg.legacy();
+    }
     let leases = LeaseStore::new();
     let resolver = YtDlpResolver::new(
         rcfg.clone(),
@@ -141,6 +145,11 @@ pub fn prepare(
         Arc::new(account.clone()),
     )
     .map_err(|e| e.to_string())?;
+    // Outcome codes and timings only; sits beside the app's own latency lines.
+    resolver.set_log_file(app_dir.join("latency.log"));
+    // Logout: forget every resolved URL and lease, and end the helpers that hold cookies.
+    let handle = resolver.handle();
+    account.on_logout(move || handle.invalidate());
     let engine = MpvEngine::new(
         MediaConfig {
             audio_output: opts.silent.then(|| "null".to_string()),
