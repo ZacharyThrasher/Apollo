@@ -1,0 +1,4 @@
+// Ordinal 1 is the icon GPUI loads for its window class, so this one file gives the exe, the
+// taskbar button and the window the Apollo mark. Regenerate with `cargo run -p apollo-app
+// --example make_icon`.
+1 ICON "apollo.ico"

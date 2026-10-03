@@ -135,6 +135,23 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     if let Some(tray) = tray {
         crate::tray_win::install(cx, window, tray, player.clone(), settings.clone());
     }
+    // A second launch asks this window to come forward, whether it is hidden in the tray,
+    // minimized or behind others.
+    #[cfg(windows)]
+    {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        crate::single_instance::listen(move || {
+            let _ = tx.send(());
+        });
+        cx.spawn(async move |cx| {
+            while rx.recv().await.is_some() {
+                cx.update(|cx| {
+                    let _ = window.update(cx, |_, window, _| crate::tray_win::show(window));
+                });
+            }
+        })
+        .detach();
+    }
     start_services(
         cx,
         mode,
