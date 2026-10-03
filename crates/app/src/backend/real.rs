@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apollo_account::identity::{InnerTubeValidator, UreqHttp};
@@ -321,7 +321,7 @@ fn spawn_revalidation(account: AccountService) {
 /// Artwork from the listing's own thumbnail URL, falling back to the video's standard
 /// thumbnail. Plain unauthenticated GETs of image URLs; nothing here touches the session.
 struct HttpArt {
-    thumbs: HashMap<String, String>,
+    thumbs: Mutex<HashMap<String, String>>,
     agent: ureq::Agent,
 }
 
@@ -331,7 +331,10 @@ impl HttpArt {
             .timeout_global(Some(ART_TIMEOUT))
             .build()
             .into();
-        Self { thumbs, agent }
+        Self {
+            thumbs: Mutex::new(thumbs),
+            agent,
+        }
     }
 
     fn get(&self, url: &str) -> Option<DecodedArt> {
@@ -357,10 +360,18 @@ impl AvatarSource for HttpAvatars {
 
 impl ArtSource for HttpArt {
     fn fetch(&self, video_id: &str) -> Option<DecodedArt> {
-        self.thumbs
-            .get(video_id)
-            .and_then(|url| self.get(url))
+        let listed = self.thumbs.lock().unwrap().get(video_id).cloned();
+        listed
+            .and_then(|url| self.get(&url))
             .or_else(|| self.get(&format!("https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")))
+    }
+
+    fn hint(&self, video_id: &str, url: &str) {
+        self.thumbs
+            .lock()
+            .unwrap()
+            .entry(video_id.to_owned())
+            .or_insert_with(|| url.to_owned());
     }
 }
 

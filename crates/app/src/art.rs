@@ -118,6 +118,11 @@ pub fn square(img: RgbaImage) -> RgbaImage {
 /// Source of artwork for a track. Blocking; callers run it off the UI thread.
 pub trait ArtSource: Send + Sync {
     fn fetch(&self, video_id: &str) -> Option<DecodedArt>;
+
+    /// The thumbnail a listing (library, search) gave for a track this source was not told
+    /// about at start-up. Without it a source can only guess the video's own frame, which is
+    /// letterboxed for songs.
+    fn hint(&self, _video_id: &str, _url: &str) {}
 }
 
 /// Fixture artwork for the simulated backend: no network, deterministic.

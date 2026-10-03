@@ -434,6 +434,35 @@ fn the_player_bar_columns_fit_the_window_and_the_transport_stays_centred(cx: &mu
     }
 }
 
+#[gpui::test]
+fn a_listings_thumbnail_reaches_the_art_source_for_tracks_it_was_not_told_about(
+    cx: &mut TestAppContext,
+) {
+    use std::sync::Mutex;
+    struct Hints(Mutex<Vec<(String, String)>>);
+    impl ArtSource for Hints {
+        fn fetch(&self, _: &str) -> Option<DecodedArt> {
+            None
+        }
+        fn hint(&self, video_id: &str, url: &str) {
+            self.0.lock().unwrap().push((video_id.into(), url.into()));
+        }
+    }
+    let hints = Arc::new(Hints(Mutex::default()));
+    let player = cx.new(|_| PlayerModel::new());
+    let mut ready = prepared();
+    ready.art = hints.clone();
+    cx.update(|cx| player.update(cx, |m, cx| m.install(ready, cx)));
+    player.read_with(cx, |m, _| {
+        m.hint_art("abcdefghijk", Some("https://t/a"));
+        m.hint_art("nothumbnail", None);
+    });
+    assert_eq!(
+        *hints.0.lock().unwrap(),
+        [("abcdefghijk".to_owned(), "https://t/a".to_owned())]
+    );
+}
+
 // ---- queue panel ---------------------------------------------------------------------------
 
 use apollo_app::ui::now_playing::art_side;
