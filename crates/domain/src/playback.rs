@@ -15,6 +15,12 @@ use crate::queue::{Advance, AdvanceKind, Previous, Queue};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LoadId(u64);
 
+impl LoadId {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// Opaque handle for a memory-only stream lease held by the services layer.
 /// The domain never sees URLs, headers or cookies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

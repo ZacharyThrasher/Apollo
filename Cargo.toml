@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/domain", "spikes/m0-gpui", "spikes/m0-media", "spikes/m0-login", "spikes/m0-resolve"]
+members = ["crates/domain", "crates/runtime", "spikes/m0-gpui", "spikes/m0-media", "spikes/m0-login", "spikes/m0-resolve"]
 
 [workspace.package]
 edition = "2021"
