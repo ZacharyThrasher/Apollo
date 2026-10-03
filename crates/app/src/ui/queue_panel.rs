@@ -26,8 +26,9 @@ use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::player_bar::text_line;
 use crate::ui::playing_row;
-use crate::ui::row_actions::{heart_action, ACTION_SIZE};
+use crate::ui::row_actions::{heart_action, more_slot, ACTION_SIZE};
 use crate::ui::switch::LabeledSwitch;
+use crate::ui::track_menu::{self, Subject};
 use crate::ui::transport::on_off;
 
 actions!(
@@ -541,6 +542,20 @@ impl QueuePanel {
                 move |_, cx| writes.update(cx, |w, cx| w.toggle_like(&video, cx))
             }));
 
+        // More: like the heart, its room is reserved and it shows on hover or under the cursor.
+        // The playing row has no remove, so its menu has none either.
+        let menu = if is_current {
+            Subject::track(row.track.clone(), None)
+        } else {
+            Subject::queued(row.track.clone(), id)
+        };
+        let more = div()
+            .flex_none()
+            .when(!at_cursor, |d| {
+                d.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
+            })
+            .child(more_slot(format!("queue-more-{ix}"), true, menu.clone()));
+
         let surface = div()
             .id(("queue-row", ix))
             .debug_selector(|| format!("queue-row-{ix}"))
@@ -606,6 +621,7 @@ impl QueuePanel {
                     )),
             )
             .child(heart)
+            .child(more)
             .child(
                 div()
                     .relative()
@@ -627,6 +643,7 @@ impl QueuePanel {
                 })
             });
 
+        let surface = track_menu::on_context_menu(surface, menu);
         let wrapper = div()
             .relative()
             .h(px(ROW_HEIGHT))
@@ -848,6 +865,7 @@ mod tests {
     fn row(n: u64) -> QueueRow {
         QueueRow {
             id: QueueEntryId::from_raw(n),
+            track: apollo_domain::model::Track::new(format!("v{n}"), format!("Track {n}")),
             video_id: format!("v{n}"),
             title: format!("Track {n}").into(),
             artist: "Artist".into(),

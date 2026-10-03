@@ -80,6 +80,8 @@ enum ArtSlot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueRow {
     pub id: QueueEntryId,
+    /// The whole track, for what a row's menu needs (its artist and album, its link).
+    pub track: Track,
     pub video_id: String,
     pub title: SharedString,
     pub artist: SharedString,
@@ -456,6 +458,40 @@ impl PlayerModel {
             });
         }
         self.sync(cx);
+    }
+
+    /// Put `track` right after the one playing.
+    pub fn play_next(&mut self, track: Track, cx: &mut Context<Self>) {
+        self.edit_queue(cx, |q| {
+            q.play_next(vec![track]);
+        });
+        self.prefetch_upcoming();
+    }
+
+    /// Add `tracks` to the end of the up-next list, ahead of the rest of the context.
+    pub fn add_tracks_to_queue(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        self.edit_queue(cx, |q| {
+            q.add_to_queue(tracks);
+        });
+    }
+
+    /// Start a radio: `seed` plays now and the queue carries on as it, once `radio` arrives
+    /// ([`PlayerModel::finish_radio`]). The queue is left as it is until then, so a radio that
+    /// cannot be fetched loses nothing.
+    pub fn start_radio(&mut self, seed: Track, cx: &mut Context<Self>) {
+        self.edit_queue(cx, |q| {
+            q.play_next(vec![seed]);
+        });
+        self.handle_as(Some("start_radio"), Event::Next, cx);
+    }
+
+    /// The radio's tracks replace everything that was up next.
+    pub fn finish_radio(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        self.edit_queue(cx, |q| {
+            q.clear_upcoming();
+            q.append_radio(tracks);
+        });
+        self.prefetch_upcoming();
     }
 
     pub fn seek(&mut self, position_ms: u64, cx: &mut Context<Self>) {
@@ -1001,6 +1037,7 @@ impl PlayerModel {
 fn queue_row(entry: &QueueEntry) -> QueueRow {
     QueueRow {
         id: entry.id,
+        track: entry.track.clone(),
         video_id: entry.track.video_id.as_str().to_owned(),
         title: entry.track.title.clone().into(),
         artist: artist_line(&entry.track),
