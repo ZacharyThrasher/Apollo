@@ -202,7 +202,8 @@ fn after_a_sign_out_the_library_says_signed_out_and_signs_in_through_settings(
         FakeSource::ok(),
         true,
     );
-    r.shell.update(vcx, |s, cx| s.show_route(Route::Library, cx));
+    r.shell
+        .update(vcx, |s, cx| s.show_route(Route::Library, cx));
     vcx.run_until_parked();
     let button = vcx
         .debug_bounds("library-sign-in")
@@ -234,7 +235,8 @@ fn an_expired_session_keeps_the_librarys_own_expired_message(cx: &mut TestAppCon
             error: Some(SignInError::Expired)
         }
     ));
-    r.shell.update(vcx, |s, cx| s.show_route(Route::Library, cx));
+    r.shell
+        .update(vcx, |s, cx| s.show_route(Route::Library, cx));
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("library-sign-in").is_none());
 }
@@ -632,4 +634,55 @@ fn the_attention_dot_names_its_reason(cx: &mut TestAppContext) {
         r.account.read_with(vcx, |m, _| m.attention()),
         Some("Session expired")
     );
+}
+
+#[gpui::test]
+fn settings_shows_the_window_switches_and_a_click_flips_one(cx: &mut TestAppContext) {
+    use apollo_app::settings::{SettingsBackend, SettingsModel, CLOSE_TO_TRAY};
+
+    #[derive(Default)]
+    struct Memory(Mutex<std::collections::HashMap<String, String>>);
+    impl SettingsBackend for Memory {
+        fn get(&self, key: &str) -> Option<String> {
+            self.0.lock().unwrap().get(key).cloned()
+        }
+        fn set(&self, key: &str, value: &str) {
+            self.0.lock().unwrap().insert(key.into(), value.into());
+        }
+    }
+
+    cx.update(|cx| {
+        Fonts::install(cx);
+        shell::bind_keys(cx);
+    });
+    let backend = Arc::new(Memory::default());
+    let ports = AccountPorts {
+        service: AccountService::new(Scripted::new(vec![], Validation::Expired), None),
+        source: FakeSource::ok(),
+        avatars: Arc::new(NoAvatars),
+        startup_error: None,
+    };
+    let account = cx.new(|cx| AccountModel::new(ports, cx));
+    let player = cx.new(|_| PlayerModel::new());
+    let settings = cx.new(|_| SettingsModel::new(Some(backend.clone())));
+    let (shell, vcx) = cx.add_window_view({
+        let (player, account, settings) = (player.clone(), account.clone(), settings.clone());
+        move |_, cx| Shell::with_settings(player, account, settings, cx)
+    });
+    account.update(vcx, |m, cx| m.startup_finished(cx));
+    shell.update(vcx, |s, cx| s.show_route(Route::Settings, cx));
+    vcx.run_until_parked();
+
+    for id in ["setting-close-to-tray", "setting-start-minimized"] {
+        assert!(vcx.debug_bounds(id).is_some(), "{id} is on the page");
+    }
+    assert!(
+        settings.read_with(vcx, |m, _| m.get(&CLOSE_TO_TRAY)),
+        "on by default"
+    );
+
+    let row = vcx.debug_bounds("setting-close-to-tray").unwrap();
+    vcx.simulate_click(row.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert!(!settings.read_with(vcx, |m, _| m.get(&CLOSE_TO_TRAY)));
 }

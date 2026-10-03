@@ -806,7 +806,7 @@ fn settings_playback_has_a_gapless_row_under_normalize_whose_switch_flips_it(cx:
 
     let normalize = bounds(vcx, "setting-normalize-volume");
     let row = bounds(vcx, "setting-gapless-playback");
-    let switch = bounds(vcx, "gapless-playback");
+    let switch = bounds(vcx, "setting-gapless-playback-switch");
     assert_eq!(row.size.height, gpui::px(48.0), "a settings row is 48px");
     assert!(row.top() >= normalize.bottom(), "below the normalize row, in the same card");
     assert_eq!(row.left(), normalize.left());
@@ -814,10 +814,10 @@ fn settings_playback_has_a_gapless_row_under_normalize_whose_switch_flips_it(cx:
     assert!(switch.right() <= row.right());
     assert!(player.read_with(vcx, |m, _| m.gapless()), "on by default");
 
-    click(vcx, "gapless-playback");
+    click(vcx, "setting-gapless-playback");
     assert!(!player.read_with(vcx, |m, _| m.gapless()));
     assert!(player.read_with(vcx, |m, _| m.normalize()), "the other switch is untouched");
-    click(vcx, "gapless-playback");
+    click(vcx, "setting-gapless-playback");
     assert!(player.read_with(vcx, |m, _| m.gapless()));
 }
 
@@ -829,14 +829,14 @@ fn settings_has_a_playback_section_whose_switch_flips_normalization(cx: &mut Tes
     vcx.run_until_parked();
 
     let row = bounds(vcx, "setting-normalize-volume");
-    let switch = bounds(vcx, "normalize-volume");
+    let switch = bounds(vcx, "setting-normalize-volume-switch");
     assert_eq!(row.size.height, gpui::px(48.0), "a settings row is 48px");
     assert!(switch.left() > row.center().x, "the switch is on the right of its label");
     assert!(switch.right() <= row.right());
     assert!(player.read_with(vcx, |m, _| m.normalize()), "on by default");
 
-    click(vcx, "normalize-volume");
+    click(vcx, "setting-normalize-volume");
     assert!(!player.read_with(vcx, |m, _| m.normalize()));
-    click(vcx, "normalize-volume");
+    click(vcx, "setting-normalize-volume");
     assert!(player.read_with(vcx, |m, _| m.normalize()));
 }

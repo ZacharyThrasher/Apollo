@@ -1,0 +1,136 @@
+//! Settings: one scrolling column of sections. Account first (its own page), then the sections
+//! of switches built from [`SettingsSection`] and [`SettingsRow`]: Playback, then Window.
+
+use apollo_theme::tokens::spacing;
+use gpui::{
+    div, prelude::*, px, Context, Entity, FocusHandle, IntoElement, ParentElement, Render, Styled,
+    Window,
+};
+
+use crate::autostart;
+use crate::player::PlayerModel;
+use crate::settings::{BoolSetting, SettingsModel, CLOSE_TO_TRAY, START_MINIMIZED_TO_TRAY};
+use crate::ui::account_page::{self, AccountPage};
+use crate::ui::playback_page::PlaybackPage;
+use crate::ui::settings_row::{SettingsRow, SettingsSection};
+
+/// The column's widest extent; the page title shares it (see the shell).
+pub const MAX_WIDTH: f32 = 720.0;
+
+pub struct SettingsPage {
+    account_page: Entity<AccountPage>,
+    playback_page: Entity<PlaybackPage>,
+    settings: Entity<SettingsModel>,
+    player: Entity<PlayerModel>,
+    focus: Vec<FocusHandle>,
+    /// The sign-in launch as the registry last said; the registry is the source of truth.
+    launch_at_signin: bool,
+}
+
+impl SettingsPage {
+    pub fn new(
+        account_page: Entity<AccountPage>,
+        playback_page: Entity<PlaybackPage>,
+        settings: Entity<SettingsModel>,
+        player: Entity<PlayerModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        Self {
+            account_page,
+            playback_page,
+            settings,
+            player,
+            focus: Vec::new(),
+            launch_at_signin: autostart::is_enabled(),
+        }
+    }
+
+    /// The first `n` focus handles, created as needed. They share the Account page's tab
+    /// position, so tabbing follows paint order down the column.
+    fn handles(&mut self, n: usize, cx: &mut Context<Self>) -> Vec<FocusHandle> {
+        while self.focus.len() < n {
+            self.focus.push(
+                cx.focus_handle()
+                    .tab_index(account_page::TAB_INDEX)
+                    .tab_stop(true),
+            );
+        }
+        self.focus[..n].to_vec()
+    }
+
+    /// A row bound to `setting`.
+    fn bool_row(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        setting: &'static BoolSetting,
+        focus: &FocusHandle,
+        accent: apollo_theme::Accent,
+        cx: &Context<Self>,
+    ) -> SettingsRow {
+        let on = self.settings.read(cx).get(setting);
+        let model = self.settings.clone();
+        SettingsRow::switch(id, focus, label, on, accent).on_toggle(move |value, _, cx| {
+            model.update(cx, |m, cx| m.set(setting, value, cx));
+        })
+    }
+}
+
+impl Render for SettingsPage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let accent = self.player.read(cx).view().accent;
+        let h = self.handles(3, cx);
+
+        let mut window_section = SettingsSection::new("Window")
+            .row(self.bool_row(
+                "setting-close-to-tray",
+                "Close to tray",
+                &CLOSE_TO_TRAY,
+                &h[0],
+                accent,
+                cx,
+            ))
+            .row(self.bool_row(
+                "setting-start-minimized",
+                "Start minimized to tray",
+                &START_MINIMIZED_TO_TRAY,
+                &h[1],
+                accent,
+                cx,
+            ));
+        if autostart::AVAILABLE {
+            let weak = cx.weak_entity();
+            window_section = window_section.row(
+                SettingsRow::switch(
+                    "setting-launch-at-signin",
+                    &h[2],
+                    "Launch at sign-in",
+                    self.launch_at_signin,
+                    accent,
+                )
+                .on_toggle(move |value, _, cx| {
+                    autostart::set_enabled(value);
+                    // Show what the registry says, which differs if the write was refused.
+                    let _ = weak.update(cx, |page, cx| {
+                        page.launch_at_signin = autostart::is_enabled();
+                        cx.notify();
+                    });
+                }),
+            );
+        }
+
+        div()
+            .id("settings-page")
+            .flex()
+            .flex_col()
+            .gap(px(spacing::S8))
+            .w_full()
+            .max_w(px(MAX_WIDTH))
+            .mt(px(spacing::S6))
+            .pb(px(spacing::S8))
+            .child(self.account_page.clone())
+            .child(self.playback_page.clone())
+            .child(window_section)
+    }
+}
