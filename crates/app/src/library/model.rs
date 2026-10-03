@@ -566,13 +566,8 @@ impl LibraryModel {
         let Some(detail) = self.collection_mut(id) else {
             return;
         };
-        let tracks: Vec<Track> = detail
-            .listing
-            .items()
-            .iter()
-            .map(|row| row.track.clone())
-            .collect();
-        self.play_tracks(tracks, request, cx);
+        let rows: Vec<TrackRow> = detail.listing.items().to_vec();
+        self.play_rows(&rows, request, cx);
     }
 
     /// An artist's play commands act on the top songs shown on the page.
@@ -580,22 +575,28 @@ impl LibraryModel {
         let Some(detail) = self.artist_mut(id) else {
             return;
         };
-        let tracks: Vec<Track> = detail
+        let rows: Vec<TrackRow> = detail
             .content()
-            .map(|c| c.top_songs.iter().map(|r| r.track.clone()).collect())
+            .map(|c| c.top_songs.clone())
             .unwrap_or_default();
-        self.play_tracks(tracks, request, cx);
+        self.play_rows(&rows, request, cx);
     }
 
-    fn play_tracks(&mut self, tracks: Vec<Track>, request: PlayRequest, cx: &mut Context<Self>) {
-        if tracks.is_empty() {
+    /// Queues the rows' tracks and hands the player their listing thumbnails, so what plays
+    /// shows the art the list showed.
+    fn play_rows(&mut self, rows: &[TrackRow], request: PlayRequest, cx: &mut Context<Self>) {
+        if rows.is_empty() {
             return;
         }
-        let thumbs: Vec<(String, String)> = detail
-            .listing
-            .items()
+        let tracks: Vec<Track> = rows.iter().map(|row| row.track.clone()).collect();
+        let thumbs: Vec<(String, String)> = rows
             .iter()
-            .filter_map(|row| Some((row.track.video_id.as_str().to_owned(), row.thumbnail.clone()?)))
+            .filter_map(|row| {
+                Some((
+                    row.track.video_id.as_str().to_owned(),
+                    row.thumbnail.clone()?,
+                ))
+            })
             .collect();
         self.player.update(cx, |p, cx| {
             for (id, url) in &thumbs {

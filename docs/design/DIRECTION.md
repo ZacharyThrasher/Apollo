@@ -84,5 +84,14 @@ Applied to the Library page (`ui/library.rs`).
 4. **Playing row:** the nav's selected-row marker (3px accent bar, selected background, body-strong title), the same as the queue panel.
 5. **Icons:** Fluent System Icons only, 20px grid, taken from the Fluent set (regular for outlines, filled for the heart). Do not hand-draw icons.
 
+## Album, artist and playlist decisions (coordinator, 2026-10-03)
+Applied to the pages opened from Search cards and artist pages (`ui/library.rs`, `ui/card.rs`).
+1. **Pages:** an album or playlist page is the Library's detail view. An artist page has the same header with Play and Shuffle acting on its top songs, a "Top songs" list, then a section per row of albums, singles and playlists. Pages stack; Back (Esc, Alt+Left, the back button) closes one at a time, and closing the last one returns to the route it was opened from. The nav keeps that route lit.
+2. **Cards:** 144px artwork inside an 8px inset (the hover tint and focus ring sit in the inset), title in body-strong, second line in body text.secondary. Cards wrap in a grid with 16px between cards, and the artwork lines up with the section heading above it.
+3. **Shape:** artist artwork is a circle, on Search's artist cards and on the artist page header. It is the one cue that tells an artist from an album at a glance. Albums, singles and playlists stay 8px-radius squares.
+4. **Header:** 96px artwork, page-title name, then the card's own second line and a "N songs" line in text.tertiary once every page has loaded. The count is dropped when the second line already says songs or tracks, and its line is held open while loading so nothing shifts. It never sits on bg.overlay.
+5. **States:** the shared skeleton while loading; an error is "Couldn't load this artist" (or album, playlist) with Retry; an artist page with nothing on it says "Nothing to show" with Back.
+6. **Keyboard:** Search cards and artist-page cards are tab stops; Enter opens the focused card (its own key context, so a list's Enter does not play the selected row instead). Space stays play/pause.
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.
