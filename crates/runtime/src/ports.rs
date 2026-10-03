@@ -17,6 +17,10 @@ pub struct ResolveRequest {
 pub trait Resolver {
     fn start(&mut self, request: ResolveRequest);
     fn cancel(&mut self, load: LoadId);
+    /// Hint that `track` is likely to be played soon: resolve it ahead of need and keep the
+    /// result for a later `start`. Never produces an event, never affects playback, and may be
+    /// ignored (the default).
+    fn prefetch(&mut self, _track: &Track) {}
 }
 
 /// Decodes and outputs audio. It never obtains credentials or decides what plays next.
@@ -41,6 +45,9 @@ impl<T: Resolver + ?Sized> Resolver for Box<T> {
     }
     fn cancel(&mut self, load: LoadId) {
         (**self).cancel(load)
+    }
+    fn prefetch(&mut self, track: &Track) {
+        (**self).prefetch(track)
     }
 }
 
@@ -92,6 +99,11 @@ impl<R: Resolver, M: MediaEngine> Driver<R, M> {
     pub fn handle(&mut self, event: Event) {
         let effects = self.coordinator.handle(event);
         self.run(effects);
+    }
+
+    /// Ask the resolver to get `track` ready ahead of need (see [`Resolver::prefetch`]).
+    pub fn prefetch(&mut self, track: &Track) {
+        self.resolver.prefetch(track);
     }
 
     pub fn edit_queue(&mut self, f: impl FnOnce(&mut Queue)) {

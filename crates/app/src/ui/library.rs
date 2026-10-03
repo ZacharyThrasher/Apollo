@@ -26,6 +26,7 @@ use crate::assets::Icon;
 use crate::library::model::{
     ArtSize, ArtistDetail, ArtistTarget, Detail, LibraryModel, Load, PlayRequest, Tab, Target,
 };
+use apollo_domain::model::Track;
 use crate::library::source::{ArtistContent, TrackRow};
 use crate::library::writes::LibraryWrites;
 use crate::motion::HoverFade;
@@ -945,12 +946,14 @@ impl LibraryView {
     }
 
     /// The row's outer box: hover tint (fading), keyboard selection (tint plus inset ring),
-    /// click, hover tracking.
+    /// click, hover tracking. A track row passes its `track`: lingering on it gets the track
+    /// resolved ahead of the click.
     fn row_shell(
         &self,
         frame: &RowFrame,
         height: f32,
         playing: bool,
+        track: Option<Track>,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -977,6 +980,9 @@ impl LibraryView {
             .bg(tint)
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 this.hover.set(ix, *hovered, animations);
+                if let (true, Some(track)) = (*hovered, &track) {
+                    this.player.update(cx, |p, cx| p.hint_play(track, cx));
+                }
                 cx.notify();
             }))
             .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
@@ -1021,6 +1027,7 @@ impl LibraryView {
             &frame,
             COLLECTION_ROW,
             false,
+            None,
             move |this, window, cx| this.open(open.clone(), window, cx),
             cx,
         )
@@ -1584,6 +1591,7 @@ impl LibraryView {
             &frame,
             TRACK_ROW,
             playing,
+            Some(row.track.clone()),
             move |this, _, cx| {
                 this.model
                     .update(cx, |m, cx| m.request_play(PlayRequest::row(ix), cx))

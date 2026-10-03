@@ -8,6 +8,7 @@
 #   libmpv-2.dll            audio engine (loaded at startup; the exe will not start without it)
 #   VCRUNTIME140*.dll       MSVC runtime copied from System32 (app-local)
 #   apollo-login-helper.exe WebView2 sign-in window (needs the Evergreen WebView2 runtime)
+#   apollo-resolve-bench.exe  timing run: how long click -> playable stream takes (close Apollo first)
 #   tools\yt-dlp\yt-dlp.exe, tools\deno\deno.exe   pinned resolver tools (hash-checked by the app)
 #
 # The pinned tools come from <repo>\tools (see scripts\setup-m0-tools.ps1), or from the main
@@ -46,24 +47,27 @@ if (-not $SkipBuild) {
         if ($LASTEXITCODE -ne 0) { throw 'cargo build (apollo) failed' }
         cargo build --release -p apollo-login-helper
         if ($LASTEXITCODE -ne 0) { throw 'cargo build (login helper) failed' }
+        cargo build --release -p apollo-m2-probe --bin apollo-resolve-bench
+        if ($LASTEXITCODE -ne 0) { throw 'cargo build (resolve bench) failed' }
     } finally { Pop-Location }
 }
 
 # The target dir can be redirected (CARGO_TARGET_DIR / config); ask cargo where it is.
 $meta = cargo metadata --format-version 1 --no-deps --manifest-path (Join-Path $root 'Cargo.toml') | ConvertFrom-Json
 $rel = Join-Path $meta.target_directory 'release'
-foreach ($f in 'apollo.exe', 'apollo-login-helper.exe') {
+foreach ($f in 'apollo.exe', 'apollo-login-helper.exe', 'apollo-resolve-bench.exe') {
     if (-not (Test-Path (Join-Path $rel $f))) { throw "missing $f in $rel (build first, or drop -SkipBuild)" }
 }
 
 # Stop a running copy so its files can be replaced; never touches anything else.
-Get-Process -Name 'Apollo', 'apollo-login-helper' -ErrorAction SilentlyContinue |
+Get-Process -Name 'Apollo', 'apollo-login-helper', 'apollo-resolve-bench' -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($Dest, [StringComparison]::OrdinalIgnoreCase) } |
     ForEach-Object { $_.CloseMainWindow() | Out-Null; if (-not $_.WaitForExit(5000)) { $_.Kill() } }
 
 New-Item -ItemType Directory -Force $Dest | Out-Null
 Copy-Item (Join-Path $rel 'apollo.exe') (Join-Path $Dest 'Apollo.exe') -Force
 Copy-Item (Join-Path $rel 'apollo-login-helper.exe') (Join-Path $Dest 'apollo-login-helper.exe') -Force
+Copy-Item (Join-Path $rel 'apollo-resolve-bench.exe') (Join-Path $Dest 'apollo-resolve-bench.exe') -Force
 Copy-Item (Join-Path $tools 'mpv-dev\libmpv-2.dll') (Join-Path $Dest 'libmpv-2.dll') -Force
 # apollo.exe imports the MSVC runtime; ship it app-locally so a PC without the redistributable
 # still starts (the redistributable's DLLs are licensed for this).
