@@ -105,7 +105,11 @@ fn setup(cx: &mut TestAppContext) -> (Page, &mut VisualTestContext) {
     shell.update_in(vcx, |s, window, cx| s.focus_root(window, cx));
     let ready = prepared();
     let (search, thumbs) = (ready.search.clone(), ready.thumbs.clone());
-    player.update(vcx, |m, cx| m.install(ready, cx));
+    // These pages are about what gets queued from a list, so no radio is queued behind it.
+    player.update(vcx, |m, cx| {
+        m.restore_autoplay(Some(false));
+        m.install(ready, cx)
+    });
     shell.update(vcx, |s, cx| s.install_search(search, thumbs, cx));
     vcx.run_until_parked();
     let view = shell.read_with(vcx, |s, _| s.library().clone());

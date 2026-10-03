@@ -11,6 +11,7 @@ pub mod latency;
 pub mod library;
 pub mod motion;
 pub mod os_media;
+pub mod persist;
 pub mod platform;
 pub mod player;
 pub mod search;
