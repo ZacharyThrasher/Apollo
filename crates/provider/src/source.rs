@@ -7,6 +7,7 @@ use innertube::{Clients, InnerTube, Rating, Session, YouTubeClient, METADATA_CLI
 use tokio::sync::Notify;
 
 use crate::artist::{page_from_artist, ArtistPage};
+use crate::home::{home_page, HomePage};
 use crate::map::{
     account_validation, classify, classify_write, collections_from_grid, liked_from_rating,
     page_from_album, page_from_continuation, page_from_playlist, target_from_option, ListedTrack,
@@ -132,6 +133,26 @@ impl InnerTubeSource {
         page_from_artist(&page, browse_id)
     }
 
+    /// The account's home feed: its first batch of shelves and the token for the next.
+    pub async fn home(&self) -> Result<HomePage, LoadFailure> {
+        let parsed = self
+            .tube
+            .home(&self.client, None)
+            .await
+            .map_err(|e| classify(&e))?;
+        home_page(&parsed)
+    }
+
+    /// The batch of home shelves after the one a token came from.
+    pub async fn home_continuation(&self, token: &str) -> Result<HomePage, LoadFailure> {
+        let parsed = self
+            .tube
+            .home_continuation(&self.client, token)
+            .await
+            .map_err(|e| classify(&e))?;
+        home_page(&parsed)
+    }
+
     pub async fn continuation(&self, token: &str) -> Result<Page<ListedTrack>, LoadFailure> {
         let page = self
             .tube
@@ -189,10 +210,7 @@ impl InnerTubeSource {
     }
 
     /// The playlists the account can add `video_id` to, each flagged when it already holds it.
-    pub async fn playlists_for(
-        &self,
-        video_id: &str,
-    ) -> Result<Vec<PlaylistTarget>, LoadFailure> {
+    pub async fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
         let options = self
             .tube
             .add_to_playlist_options(&self.client, video_id)

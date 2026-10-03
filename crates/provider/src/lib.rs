@@ -4,11 +4,13 @@
 //! playback, touches credentials at rest or owns UI copy.
 
 mod artist;
+mod home;
 mod map;
 mod search;
 mod source;
 
 pub use artist::{page_from_artist, ArtistPage, ArtistSection};
+pub use home::{home_page, HomeItem, HomePage, HomeShelf};
 pub use map::{
     account_validation, classify, classify_write, collection_from_card, collections_from_grid,
     liked_from_rating, page_from_album, page_from_continuation, page_from_playlist,

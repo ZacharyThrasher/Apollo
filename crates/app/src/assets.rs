@@ -56,6 +56,8 @@ icons! {
     Dismiss => "dismiss-regular",
     Delete => "delete-regular",
     ChevronDown => "chevron-down-regular",
+    ChevronLeft => "chevron-left-regular",
+    ChevronRight => "chevron-right-regular",
     Spinner => "spinner",
     Add => "add-regular",
     ArrowLeft => "arrow-left-regular",

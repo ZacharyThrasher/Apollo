@@ -10,7 +10,7 @@ use apollo_domain::library::{
 };
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track};
-use apollo_provider::ArtistSection;
+use apollo_provider::{ArtistSection, Hit, HomeItem, HomePage, HomeShelf, ListedTrack};
 
 use super::source::{ArtistContent, LibrarySource, TrackRow};
 use crate::art::{DecodedArt, SyntheticArt};
@@ -41,6 +41,25 @@ const SLOW_LATENCY: Duration = Duration::from_millis(1_500);
 
 /// Prefix of the generated track ids; the remaining five characters are the position.
 pub const GENERATED_PREFIX: &str = "simLib";
+
+/// Token of the home feed's second and third batches.
+pub const HOME_SECOND: &str = "sim-home@2";
+pub const HOME_THIRD: &str = "sim-home@3";
+/// Songs on the simulated "Quick picks" shelf: enough for several pages of columns.
+pub const QUICK_PICKS: usize = 20;
+
+/// How the simulated service answers the home feed (tests drive the states with this).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HomeBehaviour {
+    #[default]
+    Feed,
+    /// Every request fails.
+    Fail(LoadFailure),
+    /// The feed reads cleanly and holds nothing.
+    Empty,
+    /// The first batch is fine and every later one fails.
+    FailMore(LoadFailure),
+}
 
 /// How the simulated service answers a write (tests drive the failure paths with this).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -86,6 +105,9 @@ struct SimState {
     playlists: Option<LoadFailure>,
     /// Writes the simulation received, `(what, video id)`, for tests.
     log: Vec<(String, String)>,
+    home: HomeBehaviour,
+    /// Home requests the simulation received: `""` for the first batch, else the token.
+    home_log: Vec<String>,
 }
 
 impl SimState {
@@ -96,6 +118,8 @@ impl SimState {
             writes: WriteBehaviour::default(),
             playlists: None,
             log: Vec::new(),
+            home: HomeBehaviour::default(),
+            home_log: Vec::new(),
         }
     }
 }
@@ -135,6 +159,16 @@ impl SimLibrary {
     /// How the next writes are answered (tests).
     pub fn set_write_behaviour(&self, behaviour: WriteBehaviour) {
         self.state().writes = behaviour;
+    }
+
+    /// How the home feed is answered from now on (tests).
+    pub fn set_home_behaviour(&self, behaviour: HomeBehaviour) {
+        self.state().home = behaviour;
+    }
+
+    /// The home requests received, `""` for a first batch and the token for a following one.
+    pub fn home_log(&self) -> Vec<String> {
+        self.state().home_log.clone()
     }
 
     /// Makes the playlist list fail (tests).
@@ -392,6 +426,118 @@ fn artist_content(id: &str) -> Option<ArtistContent> {
     })
 }
 
+/// A thumbnail URL the simulated store (`SimThumbs`) understands.
+fn home_art(art: Option<SyntheticArt>) -> Option<String> {
+    match art? {
+        SyntheticArt::Hue(h) => Some(format!("sim://hue/{h}")),
+        SyntheticArt::Gray => Some("sim://gray".into()),
+    }
+}
+
+fn home_song(row: TrackRow, art: Option<SyntheticArt>) -> HomeItem {
+    HomeItem::Song(ListedTrack {
+        track: row.track,
+        occurrence: None,
+        thumbnail: home_art(art),
+        explicit: false,
+        liked: None,
+    })
+}
+
+fn home_album(f: &Fixture) -> HomeItem {
+    HomeItem::Collection(Collection {
+        kind: CollectionKind::Album,
+        id: BrowseId::new(format!("{SEARCH_ALBUM_PREFIX}{}", f.album)),
+        title: f.album.into(),
+        subtitle: Some(format!("{} • 2024", f.artist)),
+        thumbnail: home_art(f.art),
+    })
+}
+
+fn home_artist(f: &Fixture) -> HomeItem {
+    HomeItem::Artist(Hit {
+        id: BrowseId::new(format!("{SEARCH_ARTIST_PREFIX}{}", f.artist)),
+        title: f.artist.into(),
+        subtitle: Some("1.2M subscribers".into()),
+        thumbnail: home_art(f.art),
+        explicit: false,
+    })
+}
+
+fn home_playlist(c: &Collection) -> HomeItem {
+    let hue = c
+        .thumbnail
+        .as_deref()
+        .and_then(|t| t.strip_prefix("sim://art/"))
+        .and_then(|h| h.parse::<f32>().ok());
+    HomeItem::Collection(Collection {
+        thumbnail: hue.map(|h| format!("sim://hue/{h}")),
+        ..c.clone()
+    })
+}
+
+/// The simulated home feed: three batches, a song shelf, shelves of cards of every kind and one
+/// that mixes songs with albums.
+fn home_batch(token: Option<&str>) -> Option<HomePage> {
+    let quick: Vec<HomeItem> = FIXTURES
+        .iter()
+        .enumerate()
+        .map(|(n, f)| home_song(fixture_row(f, n), f.art))
+        .chain((0..QUICK_PICKS.saturating_sub(FIXTURES.len())).map(|n| {
+            home_song(
+                generated_row(n),
+                Some(SyntheticArt::Hue((n % 12) as f32 * 30.0)),
+            )
+        }))
+        .collect();
+    let albums: Vec<HomeItem> = FIXTURES.iter().map(home_album).collect();
+    let artists: Vec<HomeItem> = FIXTURES.iter().map(home_artist).collect();
+    let playlists: Vec<HomeItem> = all_collections()
+        .iter()
+        .filter(|c| c.kind == CollectionKind::Playlist && c.thumbnail.is_some())
+        .filter(|c| c.id.as_str() != BROKEN_ID)
+        .take(8)
+        .map(home_playlist)
+        .collect();
+    let mixed: Vec<HomeItem> = FIXTURES
+        .iter()
+        .enumerate()
+        .flat_map(|(n, f)| [home_song(fixture_row(f, n), f.art), home_album(f)])
+        .collect();
+    let shelf = |title: &str, items: Vec<HomeItem>| HomeShelf {
+        title: title.into(),
+        items,
+    };
+    Some(match token {
+        None => HomePage {
+            shelves: vec![
+                shelf("Quick picks", quick),
+                shelf("Albums for you", albums),
+                shelf("Listen again", mixed),
+            ],
+            continuation: Some(HOME_SECOND.into()),
+            skipped: 0,
+        },
+        Some(HOME_SECOND) => HomePage {
+            shelves: vec![
+                shelf("Artists you might like", artists),
+                shelf("From your library", playlists),
+            ],
+            continuation: Some(HOME_THIRD.into()),
+            skipped: 0,
+        },
+        Some(HOME_THIRD) => HomePage {
+            shelves: vec![shelf(
+                "More albums",
+                FIXTURES.iter().rev().map(home_album).collect(),
+            )],
+            continuation: None,
+            skipped: 0,
+        },
+        Some(_) => return None,
+    })
+}
+
 fn rows_for(id: &str) -> Option<Vec<TrackRow>> {
     if let Some(single) = id.strip_prefix(SINGLE_PREFIX) {
         let at = matching(|f| f.id == single);
@@ -489,11 +635,39 @@ impl LibrarySource for SimLibrary {
         artist_content(id.as_str()).ok_or(LoadFailure::Other)
     }
 
+    fn home(&self) -> Result<HomePage, LoadFailure> {
+        self.wait(LATENCY);
+        let behaviour = {
+            let mut state = self.state();
+            state.home_log.push(String::new());
+            state.home
+        };
+        match behaviour {
+            HomeBehaviour::Fail(f) => Err(f),
+            HomeBehaviour::Empty => Ok(HomePage::default()),
+            HomeBehaviour::Feed | HomeBehaviour::FailMore(_) => {
+                home_batch(None).ok_or(LoadFailure::Other)
+            }
+        }
+    }
+
+    fn home_more(&self, token: &str) -> Result<HomePage, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        let behaviour = {
+            let mut state = self.state();
+            state.home_log.push(token.to_owned());
+            state.home
+        };
+        match behaviour {
+            HomeBehaviour::Fail(f) | HomeBehaviour::FailMore(f) => Err(f),
+            _ => home_batch(Some(token)).ok_or(LoadFailure::Parse),
+        }
+    }
+
     fn set_liked(&self, video_id: &str, liked: bool) -> Result<(), WriteFailure> {
         self.wait(PAGE_LATENCY);
         let lands = self.write_answer(if liked { "like" } else { "unlike" }.to_owned(), video_id);
-        let applies =
-            lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
         if applies {
             let mut state = self.state();
             state.liked.retain(|id| id != video_id);
@@ -536,8 +710,7 @@ impl LibrarySource for SimLibrary {
     fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> Result<(), WriteFailure> {
         self.wait(PAGE_LATENCY);
         let lands = self.write_answer(format!("add:{playlist_id}"), video_id);
-        let applies =
-            lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
         if applies {
             let mut state = self.state();
             let key = (playlist_id.to_owned(), video_id.to_owned());

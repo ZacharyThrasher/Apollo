@@ -75,6 +75,10 @@ pub struct Section {
     pub more_browse_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub more_params: Option<String>,
+    /// Content nodes of this shelf that did not become an item (a renderer this parser does not
+    /// know, or a known one with nothing usable in it).
+    #[serde(default)]
+    pub skipped: u32,
 }
 
 /// A mood/genre filter chip above the home feed (`chipCloudChipRenderer`): its label plus the
@@ -93,6 +97,10 @@ pub struct HomePage {
     pub sections: Vec<Section>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continuation: Option<String>,
+    /// Shelves of a kind this parser does not read (taste builder, cards, immersive carousels):
+    /// counted so an unread feed is distinguishable from an empty one.
+    #[serde(default)]
+    pub skipped_shelves: u32,
 }
 
 /// The orders YouTube can put a playlist in. context/08.
@@ -332,14 +340,14 @@ pub fn parse_home(root: &Value) -> HomePage {
         })
         .collect();
     let mut sections = Vec::new();
+    let mut unread_shelves = 0u32;
     for shelf in find_all(root, "musicCarouselShelfRenderer") {
         let header = find_all(shelf, "musicCarouselShelfBasicHeaderRenderer").into_iter().next();
         let title = header.and_then(|h| runs_text(h.get("title"))).unwrap_or_default();
-        let items: Vec<BrowseItem> = shelf
-            .get("contents")
-            .and_then(Value::as_array)
-            .map(|c| c.iter().filter_map(parse_carousel_item).collect())
-            .unwrap_or_default();
+        let nodes = shelf.get("contents").and_then(Value::as_array);
+        let items: Vec<BrowseItem> =
+            nodes.map(|c| c.iter().filter_map(parse_carousel_item).collect()).unwrap_or_default();
+        let skipped = nodes.map_or(0, Vec::len).saturating_sub(items.len()) as u32;
         if !items.is_empty() {
             let more = header
                 .and_then(|h| h.get("moreContentButton"))
@@ -348,10 +356,33 @@ pub fn parse_home(root: &Value) -> HomePage {
                 more.and_then(|e| e.get("browseId")).and_then(Value::as_str).map(str::to_owned);
             let more_params =
                 more.and_then(|e| e.get("params")).and_then(Value::as_str).map(str::to_owned);
-            sections.push(Section { title, items, more_browse_id, more_params });
+            sections.push(Section { title, items, more_browse_id, more_params, skipped });
+        } else if skipped > 0 {
+            // A shelf whose every item was unreadable is a shelf lost, not an empty one.
+            unread_shelves += 1;
         }
     }
-    HomePage { chips, sections, continuation: continuation_token(root) }
+    HomePage {
+        chips,
+        sections,
+        continuation: continuation_token(root),
+        skipped_shelves: count_other_shelves(root) + unread_shelves,
+    }
+}
+
+/// Shelf renderers other than the carousel, anywhere in the tree.
+fn count_other_shelves(root: &Value) -> u32 {
+    match root {
+        Value::Object(map) => map
+            .iter()
+            .map(|(key, value)| {
+                let other = key.ends_with("ShelfRenderer") && key != "musicCarouselShelfRenderer";
+                u32::from(other) + count_other_shelves(value)
+            })
+            .sum(),
+        Value::Array(items) => items.iter().map(count_other_shelves).sum(),
+        _ => 0,
+    }
 }
 
 /// One tile of Moods & Genres (`musicNavigationButtonRenderer`): a label, the `params` that browse
@@ -623,10 +654,10 @@ pub fn parse_search_all(root: &Value) -> SearchResults {
             let main = card_shelf_main(card);
             // An artist card lists that artist's songs as "Song • 4:35": the row names no artist
             // of its own, so it takes the card's (as the service's own page shows it).
-            let card_artist = main.as_ref().filter(|m| m.kind == "artist").map(|m| ArtistRun {
-                text: m.title.clone(),
-                id: Some(m.id.clone()),
-            });
+            let card_artist = main
+                .as_ref()
+                .filter(|m| m.kind == "artist")
+                .map(|m| ArtistRun { text: m.title.clone(), id: Some(m.id.clone()) });
             r.top.extend(main);
             for c in card.get("contents").and_then(Value::as_array).into_iter().flatten() {
                 if let Some(li) = c.get("musicResponsiveListItemRenderer") {
@@ -1115,25 +1146,27 @@ pub fn parse_add_to_playlist(root: &Value) -> Option<Vec<PlaylistOption>> {
         return None;
     }
     let mut seen = std::collections::HashSet::new();
-    Some(find_all(root, "playlistAddToOptionRenderer")
-        .into_iter()
-        .filter_map(|node| {
-            let id = node.get("playlistId").and_then(Value::as_str)?.trim().to_owned();
-            let title = text_or_runs(node.get("title"))?.trim().to_owned();
-            // `LM` is Liked Music, listed first with a like endpoint instead of an edit one: it is
-            // the heart's job, and "adding" to it as a playlist is not what the sheet means.
-            if id.is_empty() || id == "LM" || title.is_empty() || !seen.insert(id.clone()) {
-                return None;
-            }
-            Some(PlaylistOption {
-                id,
-                title,
-                thumbnail: last_thumbnail(node),
-                contains_video: node.get("containsSelectedVideos").and_then(Value::as_str)
-                    == Some("ALL"),
+    Some(
+        find_all(root, "playlistAddToOptionRenderer")
+            .into_iter()
+            .filter_map(|node| {
+                let id = node.get("playlistId").and_then(Value::as_str)?.trim().to_owned();
+                let title = text_or_runs(node.get("title"))?.trim().to_owned();
+                // `LM` is Liked Music, listed first with a like endpoint instead of an edit one: it is
+                // the heart's job, and "adding" to it as a playlist is not what the sheet means.
+                if id.is_empty() || id == "LM" || title.is_empty() || !seen.insert(id.clone()) {
+                    return None;
+                }
+                Some(PlaylistOption {
+                    id,
+                    title,
+                    thumbnail: last_thumbnail(node),
+                    contains_video: node.get("containsSelectedVideos").and_then(Value::as_str)
+                        == Some("ALL"),
+                })
             })
-        })
-        .collect())
+            .collect(),
+    )
 }
 
 /// Whether a `browse/edit_playlist` answer says the edit was accepted.
@@ -1892,7 +1925,9 @@ mod tests {
         // A response with no sheet is not "no playlists"; an empty sheet is.
         assert_eq!(parse_add_to_playlist(&json!({})), None);
         assert_eq!(
-            parse_add_to_playlist(&json!({ "contents": [{ "addToPlaylistRenderer": { "playlists": [] } }] })),
+            parse_add_to_playlist(
+                &json!({ "contents": [{ "addToPlaylistRenderer": { "playlists": [] } }] })
+            ),
             Some(Vec::new())
         );
     }
@@ -1985,10 +2020,7 @@ mod tests {
         assert_eq!(song.subtitle.as_deref(), Some("The Artist"));
         assert_eq!(song.duration.as_deref(), Some("4:35"));
         assert_eq!(
-            song.artist_runs
-                .iter()
-                .map(|x| (x.text.as_str(), x.id.as_deref()))
-                .collect::<Vec<_>>(),
+            song.artist_runs.iter().map(|x| (x.text.as_str(), x.id.as_deref())).collect::<Vec<_>>(),
             [("The Artist", Some("UCart"))]
         );
     }
