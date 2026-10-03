@@ -34,12 +34,14 @@ const ID_QUIT: &str = "tray-quit";
 const SW_HIDE: i32 = 0;
 const SW_SHOW: i32 = 5;
 const SW_RESTORE: i32 = 9;
+const WM_CLOSE: u32 = 0x0010;
 
 #[link(name = "user32")]
 unsafe extern "system" {
     fn ShowWindow(hwnd: *mut c_void, cmd: i32) -> i32;
     fn IsWindowVisible(hwnd: *mut c_void) -> i32;
     fn IsIconic(hwnd: *mut c_void) -> i32;
+    fn PostMessageW(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> i32;
 }
 
 /// The tray icon and the channel its clicks arrive on. Created before the window so that
@@ -232,6 +234,16 @@ pub fn hide(window: &Window) {
         // SAFETY: SW_HIDE on a window handle GPUI owns.
         unsafe { ShowWindow(hwnd, SW_HIDE) };
     }
+}
+
+/// Asks the window to close the way its own close button does, so the close-to-tray choice
+/// applies. Returns false when there is no native window to ask.
+pub fn request_close(window: &Window) -> bool {
+    let Some(hwnd) = hwnd_of(window) else {
+        return false;
+    };
+    // SAFETY: posts WM_CLOSE to a window handle GPUI owns; the window procedure decides.
+    unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) != 0 }
 }
 
 /// Brings the window back (restoring it if minimized) and to the front. A window that was opened
