@@ -56,3 +56,7 @@ Re-sync by diffing against upstream at a newer revision; keep the list below cur
   of parse or 4xx failures as "bump the client version" first.
 - The `accounts_list` and `account_menu` parsers are fixture-tested only; the real response shape
   for brand/channel accounts is still unverified (M0 gap, TEST-03).
+- `HomePage::skipped_shelves` / `Section::skipped`: shelves and items on the home feed that did not
+  parse (an unknown `*ShelfRenderer`, an unreadable item, a shelf with no readable items) are
+  counted instead of vanishing. The recorded fixture `home_anonymous_recorded.json` is an
+  anonymous response; signed-in shelf shapes in tests are hand-built, so verify them on the live account.

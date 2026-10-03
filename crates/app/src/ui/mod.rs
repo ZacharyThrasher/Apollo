@@ -3,6 +3,7 @@ pub mod anchor;
 pub mod art_tile;
 pub mod button;
 pub mod card;
+pub mod home_page;
 pub mod library;
 pub mod nav;
 pub mod now_playing;

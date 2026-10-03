@@ -11,12 +11,14 @@ use gpui::{
 };
 
 use crate::account::AccountModel;
+use crate::home::{Access, HomeModel};
 use crate::library::{LibraryWrites, Notice, Target};
 use crate::motion::PanelSlide;
 use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
+use crate::ui::home_page::{self, HomeView};
 use crate::ui::library::{self, LibraryView};
 use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
@@ -65,6 +67,7 @@ pub fn bind_keys(cx: &mut App) {
     crate::ui::card::bind_keys(cx);
     search_page::bind_keys(cx);
     library::bind_keys(cx);
+    home_page::bind_keys(cx);
     playlist_picker::bind_keys(cx);
 }
 
@@ -80,6 +83,11 @@ pub struct Shell {
     account: Entity<AccountModel>,
     account_page: Entity<AccountPage>,
     library: Entity<LibraryView>,
+    home: Entity<HomeModel>,
+    home_page: Entity<HomeView>,
+    /// What the account allows Home to do, as of the last account change.
+    home_access: Access,
+    home_epoch: u64,
     /// Likes and playlist adds, and the short error a failed one leaves.
     writes: Entity<LibraryWrites>,
     picker: Entity<PlaylistPicker>,
@@ -239,11 +247,36 @@ impl Shell {
                 cx,
             )
         });
+        let home = cx.new(|cx| HomeModel::new(player.clone(), cx));
+        let home_page = cx.new(|cx| {
+            HomeView::new(
+                player.clone(),
+                home.clone(),
+                thumbs.clone(),
+                {
+                    let weak = weak.clone();
+                    move |target, window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.open_target(target, window, cx));
+                    }
+                },
+                {
+                    let weak = weak.clone();
+                    move |_, cx| {
+                        let _ = weak.update(cx, |s, cx| s.show_route(Route::Settings, cx));
+                    }
+                },
+                cx,
+            )
+        });
         let mut shell = Self {
             player,
             account,
             account_page,
             library,
+            home,
+            home_page,
+            home_access: Access::Waiting,
+            home_epoch: 0,
             writes,
             picker,
             toast: None,
@@ -293,6 +326,16 @@ impl Shell {
         }
         let model = self.account.read(cx);
         let (signed_out, by_choice) = (model.is_signed_out(), model.is_signed_out_by_choice());
+        let access = home_access(&view, signed_out, by_choice, self.home_access);
+        if access != self.home_access || epoch != self.home_epoch {
+            if epoch != self.home_epoch {
+                self.home_page.update(cx, |h, cx| h.rewind(cx));
+            }
+            self.home_access = access;
+            self.home_epoch = epoch;
+            self.home
+                .update(cx, |h, cx| h.set_access(access, epoch, cx));
+        }
         self.library
             .update(cx, |l, cx| l.set_signed_out(by_choice, cx));
         if !self.routed_to_sign_in && signed_out {
@@ -338,6 +381,14 @@ impl Shell {
         &self.library
     }
 
+    pub fn home(&self) -> &Entity<HomeModel> {
+        &self.home
+    }
+
+    pub fn home_page(&self) -> &Entity<HomeView> {
+        &self.home_page
+    }
+
     pub fn writes(&self) -> &Entity<LibraryWrites> {
         &self.writes
     }
@@ -367,6 +418,9 @@ impl Shell {
         self.leave_opened_pages(cx);
         self.route = route;
         self.now_playing_open = false;
+        if route == Route::Home {
+            self.home.update(cx, |h, cx| h.show(Instant::now(), cx));
+        }
         cx.notify();
     }
 
@@ -426,6 +480,9 @@ impl Shell {
             return;
         };
         self.route = origin;
+        if origin == Route::Home {
+            self.home.update(cx, |h, cx| h.show(Instant::now(), cx));
+        }
         if origin == Route::Search {
             self.search.update(cx, |s, cx| s.restore_focus(window, cx));
         } else {
@@ -539,6 +596,40 @@ fn account_usable(view: &apollo_account::service::AccountView, previous: bool) -
         SessionState::Valid => matches!(view.identity, IdentityState::Selected(_)),
         SessionState::Absent | SessionState::Expired => false,
         SessionState::Validating | SessionState::Unreachable => previous,
+    }
+}
+
+/// What Home may do for the account. A confirmed session with a chosen channel, or one that
+/// could not be checked (offline), asks for the feed and shows its own failure; a re-check in
+/// progress changes nothing once the feed is open.
+fn home_access(
+    view: &apollo_account::service::AccountView,
+    signed_out: bool,
+    by_choice: bool,
+    previous: Access,
+) -> Access {
+    use apollo_account::service::{IdentityState, SessionState};
+    if by_choice {
+        return Access::SignedOut;
+    }
+    if signed_out {
+        // Nobody is signed in and the session did not simply run out: it did.
+        return Access::Expired;
+    }
+    match view.session {
+        SessionState::Valid => match view.identity {
+            IdentityState::Selected(_) => Access::Open,
+            _ => Access::Waiting,
+        },
+        SessionState::Expired => Access::Expired,
+        SessionState::Unreachable => Access::Open,
+        SessionState::Absent | SessionState::Validating => {
+            if previous == Access::Open {
+                Access::Open
+            } else {
+                Access::Waiting
+            }
+        }
     }
 }
 
@@ -663,6 +754,7 @@ impl Render for Shell {
 
         let page = match self.route {
             Route::Search if !self.now_playing_open => self.search.clone().into_any_element(),
+            Route::Home if !self.now_playing_open => self.home_page.clone().into_any_element(),
             _ => page.into_any_element(),
         };
 
@@ -795,14 +887,32 @@ mod tests {
             selected_by_service: true,
         };
         let selected = IdentityState::Selected(who);
-        assert!(account_usable(&view(SessionState::Valid, selected.clone()), false));
-        assert!(!account_usable(&view(SessionState::Valid, IdentityState::None), true));
-        assert!(!account_usable(&view(SessionState::Expired, selected.clone()), true));
-        assert!(!account_usable(&view(SessionState::Absent, IdentityState::None), true));
+        assert!(account_usable(
+            &view(SessionState::Valid, selected.clone()),
+            false
+        ));
+        assert!(!account_usable(
+            &view(SessionState::Valid, IdentityState::None),
+            true
+        ));
+        assert!(!account_usable(
+            &view(SessionState::Expired, selected.clone()),
+            true
+        ));
+        assert!(!account_usable(
+            &view(SessionState::Absent, IdentityState::None),
+            true
+        ));
         // A re-check or a lost connection changes nothing either way.
         for previous in [true, false] {
-            assert_eq!(account_usable(&view(SessionState::Validating, selected.clone()), previous), previous);
-            assert_eq!(account_usable(&view(SessionState::Unreachable, selected.clone()), previous), previous);
+            assert_eq!(
+                account_usable(&view(SessionState::Validating, selected.clone()), previous),
+                previous
+            );
+            assert_eq!(
+                account_usable(&view(SessionState::Unreachable, selected.clone()), previous),
+                previous
+            );
         }
     }
 }

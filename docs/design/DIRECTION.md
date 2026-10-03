@@ -101,5 +101,15 @@ Applied to the heart and add-to-playlist actions (`ui/row_actions.rs`, `ui/playl
 4. **Rows in the picker:** a playlist that already holds the track shows a check in text.secondary and does nothing when chosen. Adding a duplicate is skipped silently. No playlists: "No playlists yet" with no action. Load failure: "Couldn't load playlists" with Retry.
 5. **Errors:** a failed like or add rolls back and leaves a toast above the player bar: warning icon and up to six words on bg.overlay in text.secondary. It stays 4 s or until clicked, and fades in and out over 150 ms (appears and goes at once under reduced motion).
 
+## Home decisions (coordinator, 2026-10-03)
+Applied to the Home route (`ui/home_page.rs`, `home.rs`); the feed is YouTube Music's `FEmusic_home` for the signed-in account.
+1. **Page:** the "Home" page title, nothing else: no greeting, no explanatory text. Each shelf is a section titled in the same style as the other section headers.
+2. **Card shelves:** one horizontal row of the shared cards, 16px apart (artists circles, albums and playlists rounded squares). Clicking a card opens its album, artist or playlist page, and Back returns to Home.
+3. **Song shelves** (such as "Quick picks"): a grid of compact song rows (art, title, artist), four rows tall, paging sideways by column; no cards. Clicking a song plays it with that shelf as the queue. A shelf that mixes songs and cards is a card shelf; its songs queue together.
+4. **Scrolling:** a row scrolls sideways with the wheel or a swipe. Previous and next chevrons (32px circles on bg.overlay, border.strong) appear on hover at the row edges, only when there is somewhere to go, and page by a screenful, 200 ms ease-out (at once under reduced motion). The chevrons are not tab stops; Left and Right move between items and the row follows focus.
+5. **Loading:** the shared skeleton pulse (a song grid, then a card row). More shelves load by continuation as the page runs out, and a failed continuation leaves a "Couldn't load more" line with Retry at the foot. Errors are the Library's error row ("Couldn't load Home", or "Sign-in expired") with Retry; an empty feed says "Nothing to show" with Retry; signed out offers a primary Sign in button.
+6. **Freshness:** shelves are kept in memory for the session and reload in the background when Home is reopened after 10 minutes. A failed refresh keeps what is shown. A different account drops them.
+7. **Accessibility:** each shelf is a list named by its title; every item is a stop at the page's tab index.
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.
