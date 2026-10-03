@@ -3,7 +3,8 @@
 //! account's Liked Music (listed the way the M2 probe does) when someone is signed in; the
 //! sign-in screen (Settings > Account) handles everything else.
 //!
-//! Run from the repository root (the pinned tools live under `tools/`):
+//! The pinned tools live under `tools/`, beside the executable when packaged, else under the
+//! working directory (run from the repository root during development):
 //!
 //! ```text
 //! apollo --real [--source auto|stored|firefox|login|file:<path>] [--tracks N] [--silent]
@@ -96,12 +97,21 @@ impl Options {
             source,
             tracks: number("--tracks")?.unwrap_or(25).clamp(1, 300),
             silent: args.iter().any(|a| a == "--silent"),
-            tools: value("--tools").map_or_else(
-                || std::env::current_dir().unwrap_or_default().join("tools"),
-                PathBuf::from,
-            ),
+            tools: value("--tools").map_or_else(default_tools_dir, PathBuf::from),
             select_identity: number("--select-identity")?,
         })
+    }
+}
+
+/// `tools/` beside the executable (the packaged layout), else `tools/` under the working
+/// directory (running from the repository root during development).
+fn default_tools_dir() -> PathBuf {
+    let beside_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("tools")));
+    match beside_exe {
+        Some(dir) if dir.is_dir() => dir,
+        _ => std::env::current_dir().unwrap_or_default().join("tools"),
     }
 }
 

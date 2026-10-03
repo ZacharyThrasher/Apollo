@@ -65,10 +65,13 @@ pub enum Mode {
 
 impl Mode {
     /// `--real [--source stored|firefox|login|file:<path>] [--tracks N]` selects the real
-    /// services when the feature is compiled in; anything else runs the simulation
-    /// (`--signed-out` starts it without an account).
+    /// services. A Windows build with the `real-services` feature (the packaged app) uses them
+    /// by default, and `--sim` opts back into the simulation. Without the feature anything else
+    /// runs the simulation (`--signed-out` starts it without an account).
     pub fn from_args(args: &[String]) -> Result<Self, String> {
-        let wants_real = args.iter().any(|a| a == "--real");
+        let default_real = cfg!(all(windows, feature = "real-services"));
+        let wants_real = args.iter().any(|a| a == "--real")
+            || (default_real && !args.iter().any(|a| a == "--sim" || a == "--signed-out"));
         if !wants_real {
             return Ok(if args.iter().any(|a| a == "--signed-out") {
                 Mode::SimSignedOut
