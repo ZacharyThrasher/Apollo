@@ -2,14 +2,16 @@
 //! status show (never in the main chrome). Every action is a text button; the page has no
 //! helper copy, only the state and what to do about it.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use apollo_domain::playback::Event;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
-    div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Entity, FocusHandle,
-    IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Window,
+    div, img, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Entity,
+    FocusHandle, ImageSource, IntoElement, ObjectFit, ParentElement, PathPromptOptions, Render,
+    RenderImage, SharedString, Styled, Window,
 };
 
 use crate::account::{AccountModel, Method, Notice, Screen, SignInError, Who};
@@ -26,7 +28,9 @@ pub const TAB_INDEX: isize = 6;
 const MAX_WIDTH: f32 = 560.0;
 const TILE: f32 = 56.0;
 const ROW_TILE: f32 = 40.0;
-const SKELETON_PERIOD: Duration = Duration::from_millis(1600);
+/// A subtle pulse: opacity swings between 0.85 and 1.0 over 1.2 s.
+const SKELETON_PERIOD: Duration = Duration::from_millis(1200);
+const SKELETON_MIN_OPACITY: f32 = 0.85;
 
 pub struct AccountPage {
     model: Entity<AccountModel>,
@@ -80,11 +84,12 @@ impl Render for AccountPage {
                 notice,
             } => {
                 let h = self.handles(2, cx);
+                let avatar = avatar_of(&who, &model, cx);
                 let mut col = div()
                     .flex()
                     .flex_col()
                     .gap(px(spacing::S3))
-                    .child(identity_row(&who, Some(premium), cx));
+                    .child(identity_row(&who, avatar, premium, cx));
                 if let Some(notice) = notice {
                     col = col.child(notice_row(notice, &h[0], accent, &model, cx));
                 }
@@ -106,7 +111,10 @@ impl Render for AccountPage {
                         .child("Choose account"),
                 );
                 for (i, who) in list.iter().enumerate() {
-                    col = col.child(choice_row(i, who, &h[i], accent, &model, window, cx));
+                    let avatar = avatar_of(who, &model, cx);
+                    col = col.child(choice_row(
+                        i, who, avatar, &h[i], accent, &model, window, cx,
+                    ));
                 }
                 col.child(
                     div().flex().pt(px(spacing::S2)).child(
@@ -183,7 +191,7 @@ fn signed_out(
             .gap(px(spacing::S2))
             .child(
                 TextButton::new("sign-in", &h[0], "Sign in", accent)
-                    .strong()
+                    .primary()
                     .busy(working)
                     .on_click(browser),
             )
@@ -265,18 +273,41 @@ fn sign_out_handler(
     }
 }
 
-fn tile(initial: SharedString, size: f32, cx: &App) -> impl IntoElement {
-    // The no-art tile: bg.overlay, centred mark. The mark here is the account's initial.
-    style::text_style(div(), typography::SECTION, cx)
+fn avatar_of(who: &Who, model: &Entity<AccountModel>, cx: &App) -> Option<Arc<RenderImage>> {
+    who.avatar_url
+        .as_deref()
+        .and_then(|url| model.read(cx).avatar(url))
+}
+
+/// The no-art tile: bg.overlay with a centred mark, the account's initial. The channel picture
+/// replaces the mark when the service gave one.
+fn tile(
+    initial: SharedString,
+    avatar: Option<Arc<RenderImage>>,
+    size: f32,
+    cx: &App,
+) -> impl IntoElement {
+    let base = div()
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
         .size(px(size))
+        .overflow_hidden()
         .rounded(px(radius::MEDIUM))
-        .bg(color::bg_overlay())
-        .text_color(color::text_primary())
-        .child(initial)
+        .bg(color::bg_overlay());
+    match avatar {
+        Some(image) => base.child(
+            img(ImageSource::Render(image))
+                .size_full()
+                .object_fit(ObjectFit::Cover),
+        ),
+        None => base.child(
+            style::text_style(div(), typography::SECTION, cx)
+                .text_color(color::text_primary())
+                .child(initial),
+        ),
+    }
 }
 
 fn initial_of(name: &str) -> SharedString {
@@ -287,7 +318,12 @@ fn initial_of(name: &str) -> SharedString {
         .into()
 }
 
-fn identity_row(who: &Who, premium: Option<&'static str>, cx: &App) -> impl IntoElement {
+fn identity_row(
+    who: &Who,
+    avatar: Option<Arc<RenderImage>>,
+    premium: Option<&'static str>,
+    cx: &App,
+) -> impl IntoElement {
     let secondary = |text: SharedString, id: &'static str| {
         style::text_style(div(), typography::BODY, cx)
             .id(id)
@@ -301,7 +337,7 @@ fn identity_row(who: &Who, premium: Option<&'static str>, cx: &App) -> impl Into
         .flex_row()
         .items_center()
         .gap(px(spacing::S3))
-        .child(tile(initial_of(&who.name), TILE, cx))
+        .child(tile(initial_of(&who.name), avatar, TILE, cx))
         .child(
             div()
                 .flex()
@@ -369,9 +405,11 @@ fn notice_row(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn choice_row(
     index: usize,
     who: &Who,
+    avatar: Option<Arc<RenderImage>>,
     focus: &FocusHandle,
     accent: Accent,
     model: &Entity<AccountModel>,
@@ -419,7 +457,7 @@ fn choice_row(
             let key = key.clone();
             model.update(cx, |m, cx| m.choose(key, cx));
         })
-        .child(tile(initial_of(&who.name), ROW_TILE, cx))
+        .child(tile(initial_of(&who.name), avatar, ROW_TILE, cx))
         .child(texts)
         .when(ring, |d| {
             d.child(focus_ring(color::accent(accent), radius::SMALL))
@@ -441,7 +479,10 @@ fn skeleton(animate: bool) -> AnyElement {
         };
         if animate {
             el.with_animation(id, Animation::new(SKELETON_PERIOD).repeat(), |el, t| {
-                el.opacity(0.6 + 0.4 * (1.0 - (2.0 * t - 1.0).abs()))
+                el.opacity(
+                    SKELETON_MIN_OPACITY
+                        + (1.0 - SKELETON_MIN_OPACITY) * (1.0 - (2.0 * t - 1.0).abs()),
+                )
             })
             .into_any_element()
         } else {

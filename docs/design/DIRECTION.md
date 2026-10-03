@@ -58,5 +58,13 @@ Applied to the app shell from the first Windows review.
 10. **Page padding:** 32px horizontal, 24px top.
 - Next/Previous while paused starts playing (matches YouTube Music). Owner can override.
 
+## Account screen decisions (coordinator, 2026-10-03)
+Settings > Account. Other screens reuse these.
+1. **Buttons:** secondary actions (Use Firefox, Import file, Paste cookies, Retry, Sign out) are text buttons: body in text.secondary (body-strong in text.primary for Retry-style inline actions), underline on hover, keyboard-only accent focus ring, no fill. The single primary action on a view (Sign in) is the neutral filled button: bg.overlay fill, text.primary label, no accent, fill brightens by the hover tint (120 ms) and the press tint (instant), standard focus ring, 32px high, 16px side padding. At most one primary button per view. Spinners show only inside a button. Implemented as `ui/text_button.rs` (`TextButton`, `.primary()`).
+2. **Status dot:** a 6px dot in `warning`, top-right of a nav icon, marks an item that needs the owner (Settings: "Session expired" or "Choose account"). It carries an accessible name; the nav item's label becomes "Settings, <reason>".
+3. **Avatars:** the account's channel picture on the 8px-radius tile when the service returns one (Google-hosted https images only); otherwise the no-art tile with the account's initial. A picture that fails to load falls back to the initial silently.
+4. **Skeleton:** white 4% blocks at final size. The pulse is low amplitude (opacity 0.85 to 1.0, 1.2 s cycle) and static when the OS reduces motion.
+5. **Premium:** the Premium slot shows "Premium" only once the app's own account check has confirmed it, and nothing otherwise. No hedged text ("assumed", "not declared"). Today no check can confirm it (there is no entitlement endpoint), so the slot is empty.
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

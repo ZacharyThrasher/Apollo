@@ -185,7 +185,7 @@ impl Render for Shell {
                 });
             }
         })
-        .attention(self.account.read(cx).needs_attention())
+        .attention(self.account.read(cx).attention())
         .on_route({
             let shell = shell.clone();
             move |route, _, cx| {

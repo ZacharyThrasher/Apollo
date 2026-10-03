@@ -6,6 +6,7 @@
 //! cookie imports, the validation call) runs on the background executor; the service reports
 //! its changes through a channel, so the UI never calls into it while it is busy.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,7 +17,9 @@ use apollo_account::service::{
     AccountService, AccountView, IdentityState, ImportOutcome, PremiumEvidence, Problem,
     RejectReason, SessionState, StorageMode,
 };
-use gpui::{Context, SharedString};
+use gpui::{Context, RenderImage, SharedString};
+
+use crate::art::DecodedArt;
 
 /// Where a session can come from besides the cookie file and clipboard (which need nothing
 /// platform specific). Both calls block until they are done.
@@ -31,11 +34,26 @@ pub trait SessionSource: Send + Sync {
     }
 }
 
+/// Downloads a channel picture. Blocking; runs on the background executor.
+pub trait AvatarSource: Send + Sync {
+    fn fetch(&self, url: &str) -> Option<DecodedArt>;
+}
+
+/// No pictures: every account shows its initial.
+pub struct NoAvatars;
+
+impl AvatarSource for NoAvatars {
+    fn fetch(&self, _: &str) -> Option<DecodedArt> {
+        None
+    }
+}
+
 /// The service plus the platform's way of getting a session into it.
 #[derive(Clone)]
 pub struct AccountPorts {
     pub service: AccountService,
     pub source: Arc<dyn SessionSource>,
+    pub avatars: Arc<dyn AvatarSource>,
     /// Set when account storage could not be opened at startup; shown as a short error.
     pub startup_error: Option<SignInError>,
 }
@@ -140,6 +158,8 @@ pub struct Who {
     pub key: String,
     pub name: SharedString,
     pub handle: Option<SharedString>,
+    /// The channel picture, when the service gave one; the page looks the image up by this.
+    pub avatar_url: Option<String>,
 }
 
 impl From<&Identity> for Who {
@@ -148,6 +168,7 @@ impl From<&Identity> for Who {
             key: i.key(),
             name: i.name.clone().into(),
             handle: i.handle.clone().map(Into::into),
+            avatar_url: i.avatar_url.clone(),
         }
     }
 }
@@ -188,7 +209,8 @@ pub enum Screen {
     },
     SignedIn {
         who: Who,
-        premium: &'static str,
+        /// "Premium" once the app's own account check has confirmed it; `None` shows nothing.
+        premium: Option<&'static str>,
         notice: Option<Notice>,
     },
     /// The login can act as several channels; the owner picks one.
@@ -197,10 +219,12 @@ pub enum Screen {
     CantConfirm(Notice),
 }
 
-pub fn premium_text(p: PremiumEvidence) -> &'static str {
+/// What the Premium slot shows. The account service only has the owner's declaration (there is
+/// no entitlement endpoint to ask), and hedged text such as "Premium assumed" is not shown, so
+/// the slot stays empty until the account check can confirm Premium.
+pub fn premium_text(p: PremiumEvidence) -> Option<&'static str> {
     match p {
-        PremiumEvidence::OwnerDeclared => "Premium assumed",
-        PremiumEvidence::Undeclared => "Premium not declared",
+        PremiumEvidence::OwnerDeclared | PremiumEvidence::Undeclared => None,
     }
 }
 
@@ -255,6 +279,14 @@ pub struct AccountModel {
     checking: bool,
     pending: Option<Method>,
     error: Option<SignInError>,
+    avatar_source: Arc<dyn AvatarSource>,
+    avatars: HashMap<String, AvatarSlot>,
+}
+
+enum AvatarSlot {
+    Loading,
+    /// `None`: the picture could not be fetched or decoded; the initial stays.
+    Ready(Option<Arc<RenderImage>>),
 }
 
 impl AccountModel {
@@ -281,6 +313,8 @@ impl AccountModel {
             checking: true,
             pending: None,
             error: ports.startup_error,
+            avatar_source: ports.avatars,
+            avatars: HashMap::new(),
         }
     }
 
@@ -303,13 +337,23 @@ impl AccountModel {
         self.pending
     }
 
-    /// True while the owner has to do something about the account for content to work: sign in
-    /// again or pick a channel. Drives the dot on the Settings item.
-    pub fn needs_attention(&self) -> bool {
+    /// Why the owner has to do something about the account for content to work (sign in again
+    /// or pick a channel), as the accessible name of the dot on the Settings item.
+    pub fn attention(&self) -> Option<&'static str> {
         match self.screen() {
-            Screen::SignedOut { error } => error == Some(SignInError::Expired),
-            Screen::Choose(_) => true,
-            _ => false,
+            Screen::SignedOut {
+                error: Some(SignInError::Expired),
+            } => Some("Session expired"),
+            Screen::Choose(_) => Some("Choose account"),
+            _ => None,
+        }
+    }
+
+    /// The decoded picture for `url`, once it has been fetched.
+    pub fn avatar(&self, url: &str) -> Option<Arc<RenderImage>> {
+        match self.avatars.get(url) {
+            Some(AvatarSlot::Ready(image)) => image.clone(),
+            _ => None,
         }
     }
 
@@ -325,7 +369,43 @@ impl AccountModel {
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.view = self.service.view();
+        self.load_avatars(cx);
         cx.notify();
+    }
+
+    /// Fetches the pictures of the accounts on show, once each. Nothing is kept once no
+    /// account is held.
+    fn load_avatars(&mut self, cx: &mut Context<Self>) {
+        let urls: Vec<String> = match &self.view.identity {
+            IdentityState::None => Vec::new(),
+            IdentityState::Selected(i) => i.avatar_url.iter().cloned().collect(),
+            IdentityState::Ambiguous(v) | IdentityState::Changed(v) => {
+                v.iter().filter_map(|i| i.avatar_url.clone()).collect()
+            }
+        };
+        self.avatars.retain(|url, _| urls.contains(url));
+        for url in urls {
+            if self.avatars.contains_key(&url) {
+                continue;
+            }
+            self.avatars.insert(url.clone(), AvatarSlot::Loading);
+            let source = self.avatar_source.clone();
+            cx.spawn(async move |this, cx| {
+                let fetch = url.clone();
+                let image = cx
+                    .background_executor()
+                    .spawn(async move { source.fetch(&fetch).map(|art| art.render_image()) })
+                    .await;
+                let _ = this.update(cx, |m, cx| {
+                    // Only if it is still wanted (the account may have gone meanwhile).
+                    if let Some(slot) = m.avatars.get_mut(&url) {
+                        *slot = AvatarSlot::Ready(image);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
     }
 
     // ---- sign in ----------------------------------------------------------
@@ -470,6 +550,7 @@ mod tests {
         Identity {
             name: format!("Channel {n}"),
             handle: Some(format!("@c{n}")),
+            avatar_url: None,
             page_id: Some(format!("PAGE{n}")),
             selected_by_service: n == 0,
         }
@@ -487,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn a_valid_selected_identity_is_signed_in_with_the_premium_label() {
+    fn a_valid_selected_identity_is_signed_in_without_hedged_premium_text() {
         let v = view(SessionState::Valid, IdentityState::Selected(ident(0)));
         let Screen::SignedIn {
             who,
@@ -499,18 +580,20 @@ mod tests {
         };
         assert_eq!(who.name, "Channel 0");
         assert_eq!(who.handle.as_deref(), Some("@c0"));
-        assert_eq!(premium, "Premium assumed");
+        assert_eq!(premium, None);
         assert_eq!(notice, None);
     }
 
     #[test]
-    fn undeclared_premium_is_not_called_assumed() {
-        let mut v = view(SessionState::Valid, IdentityState::Selected(ident(0)));
-        v.premium = PremiumEvidence::Undeclared;
-        let Screen::SignedIn { premium, .. } = at_rest(&v) else {
-            panic!("signed in");
-        };
-        assert_eq!(premium, "Premium not declared");
+    fn premium_shows_nothing_until_the_account_check_confirms_it() {
+        for evidence in [PremiumEvidence::OwnerDeclared, PremiumEvidence::Undeclared] {
+            let mut v = view(SessionState::Valid, IdentityState::Selected(ident(0)));
+            v.premium = evidence;
+            let Screen::SignedIn { premium, .. } = at_rest(&v) else {
+                panic!("signed in");
+            };
+            assert_eq!(premium, None, "{evidence:?}");
+        }
     }
 
     #[test]

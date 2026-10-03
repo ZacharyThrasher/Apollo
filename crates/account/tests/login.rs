@@ -98,6 +98,7 @@ impl AccountValidator for AlwaysValid {
             identities: vec![Identity {
                 name: "Owner".into(),
                 handle: None,
+                avatar_url: None,
                 page_id: Some("PAGE0".into()),
                 selected_by_service: true,
             }],
