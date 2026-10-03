@@ -45,6 +45,14 @@ client API 2.5) and the owned fixtures in `fixtures/audio/`.
 7. `LoadId` has a private constructor, so tests mint ids by driving `Coordinator`
    (`tests/support::mint_loads`). A `LoadId::for_tests` would be simpler (domain change, not made).
 
+## Test-harness lesson
+
+An early run of the failure tests was flaky (up to 8 of 10 runs). The cause was the loopback test
+server, not the engine: on Windows an accepted socket inherits the listener's non-blocking mode,
+so a read that raced the request hung up without answering, which mpv reported as "Failure when
+receiving data from the peer". Fixed in `tests/support` (`set_nonblocking(false)`); 0 failures in
+15 consecutive runs afterwards.
+
 ## Tests (all against real libmpv, `ao=null`, loopback server)
 
 | Test | Covers |

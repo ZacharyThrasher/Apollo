@@ -92,7 +92,7 @@ impl Drop for TestServer {
 }
 
 fn read_request(conn: &mut TcpStream) -> Option<(String, Vec<(String, String)>)> {
-    conn.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    conn.set_read_timeout(Some(Duration::from_secs(30))).ok()?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -117,32 +117,41 @@ fn read_request(conn: &mut TcpStream) -> Option<(String, Vec<(String, String)>)>
     Some((path, headers))
 }
 
-fn respond(conn: &mut TcpStream, status: &str, extra: &[(&str, String)], body: &[u8]) {
-    let mut head = format!("HTTP/1.1 {status}\r\nConnection: close\r\n");
+fn respond(conn: &mut TcpStream, status: &str, extra: &[(&str, String)], body: &[u8]) -> bool {
+    // HTTP/1.1 keep-alive like a real server: the connection stays open for further requests.
+    let mut head = format!("HTTP/1.1 {status}\r\n");
     for (n, v) in extra {
         head.push_str(&format!("{n}: {v}\r\n"));
     }
     head.push_str("\r\n");
-    let _ = conn.write_all(head.as_bytes());
-    let _ = conn.write_all(body);
-    let _ = conn.flush();
-    // Close politely (FIN, then drain) so the client never sees a connection reset.
-    let _ = conn.shutdown(std::net::Shutdown::Write);
-    let _ = conn.set_read_timeout(Some(Duration::from_millis(300)));
-    let mut sink = [0u8; 256];
-    while matches!(conn.read(&mut sink), Ok(n) if n > 0) {}
+    let ok = conn.write_all(head.as_bytes()).is_ok() && conn.write_all(body).is_ok();
+    ok && conn.flush().is_ok()
 }
 
-fn handle(
-    mut conn: TcpStream,
-    log: Arc<Mutex<Vec<Req>>>,
-    stop: Arc<AtomicBool>,
-) -> Option<()> {
-    let (path, headers) = read_request(&mut conn)?;
-    log.lock().unwrap().push(Req {
-        path: path.clone(),
-        headers: headers.clone(),
-    });
+fn handle(mut conn: TcpStream, log: Arc<Mutex<Vec<Req>>>, stop: Arc<AtomicBool>) -> Option<()> {
+    // On Windows an accepted socket inherits the listener's non-blocking mode; undo that, or a
+    // read that races the request returns WouldBlock and we hang up without answering.
+    conn.set_nonblocking(false).ok()?;
+    while !stop.load(Ordering::Relaxed) {
+        let (path, headers) = read_request(&mut conn)?;
+        log.lock().unwrap().push(Req {
+            path: path.clone(),
+            headers: headers.clone(),
+        });
+        if !serve_one(&mut conn, &path, &headers, &stop)? {
+            return Some(());
+        }
+    }
+    Some(())
+}
+
+/// Serve one request. `Some(true)` = keep the connection, `Some(false)` = close it.
+fn serve_one(
+    conn: &mut TcpStream,
+    path: &str,
+    headers: &[(String, String)],
+    stop: &Arc<AtomicBool>,
+) -> Option<bool> {
     let range = headers
         .iter()
         .find(|(n, _)| n.eq_ignore_ascii_case("range"))
@@ -154,50 +163,46 @@ fn handle(
 
     if let Some(code) = path.strip_prefix("/status/") {
         let code: u16 = code.parse().ok()?;
-        respond(
-            &mut conn,
+        return Some(respond(
+            conn,
             &format!("{code} X"),
             &[("Content-Length", "4".into()), ("Content-Type", "text/plain".into())],
             b"nope",
-        );
-        return Some(());
+        ));
     }
     if let Some(to) = path.strip_prefix("/redirect?to=") {
-        respond(
-            &mut conn,
+        return Some(respond(
+            conn,
             "302 Found",
             &[("Location", to.to_string()), ("Content-Length", "0".into())],
             b"",
-        );
-        return Some(());
+        ));
     }
     if path == "/garbage" {
-        respond(
-            &mut conn,
+        return Some(respond(
+            conn,
             "200 OK",
             &[("Content-Length", "4096".into())],
             &vec![0x5au8; 4096],
-        );
-        return Some(());
+        ));
     }
     if path == "/truncated" {
-        // Promise far more than we send, then hang up.
+        // Promise the whole file, send 2000 bytes, then hang up.
         let data = std::fs::read(fixtures_dir().join("tone_aac.m4a")).ok()?;
-        let promised = data.len();
         respond(
-            &mut conn,
+            conn,
             "200 OK",
-            &[("Content-Length", promised.to_string())],
+            &[("Content-Length", data.len().to_string())],
             &data[..2000],
         );
-        return Some(());
+        return Some(false);
     }
     if path == "/hang" {
         let t0 = Instant::now();
         while !stop.load(Ordering::Relaxed) && t0.elapsed() < Duration::from_secs(60) {
             thread::sleep(Duration::from_millis(50));
         }
-        return Some(());
+        return Some(false);
     }
     // /slow/<ms>/<file> delays, then serves the file.
     let (delay_ms, file) = match path.strip_prefix("/slow/") {
@@ -213,8 +218,7 @@ fn handle(
     let data = match std::fs::read(fixtures_dir().join(&file)) {
         Ok(d) => d,
         Err(_) => {
-            respond(&mut conn, "404 Not Found", &[("Content-Length", "0".into())], b"");
-            return Some(());
+            return Some(respond(conn, "404 Not Found", &[("Content-Length", "0".into())], b""));
         }
     };
     let ctype = if file.ends_with(".m4a") {
@@ -224,12 +228,12 @@ fn handle(
     } else {
         "audio/ogg"
     };
-    match range {
+    Some(match range {
         Some((start, end)) if start < data.len() => {
             let end = end.unwrap_or(data.len() - 1).min(data.len() - 1);
             let body = &data[start..=end];
             respond(
-                &mut conn,
+                conn,
                 "206 Partial Content",
                 &[
                     ("Content-Type", ctype.into()),
@@ -238,10 +242,10 @@ fn handle(
                     ("Content-Range", format!("bytes {start}-{end}/{}", data.len())),
                 ],
                 body,
-            );
+            )
         }
         _ => respond(
-            &mut conn,
+            conn,
             "200 OK",
             &[
                 ("Content-Type", ctype.into()),
@@ -250,8 +254,7 @@ fn handle(
             ],
             &data,
         ),
-    }
-    Some(())
+    })
 }
 
 // ------------------------------------------------------------------- the rig
