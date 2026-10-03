@@ -319,22 +319,21 @@ mod imp {
         // ------------------------------------------------- 6. worker settings compared
         out.say("\n[6] AFTER, tuned: which yt-dlp setting makes a cold click fastest? (a fresh worker per setting, started before the first click; cold clicks on distinct tracks)");
         let skip: (&str, &[&str]) = ("player_skip", &["webpage", "initial_data"]);
-        let skip_all: (&str, &[&str]) = ("player_skip", &["webpage", "initial_data", "configs"]);
-        let variants: Vec<(&str, Vec<(&str, &[&str])>)> = vec![
-            ("yt-dlp defaults", vec![]),
-            ("skip page+initial", vec![skip]),
-            ("skip page+initial+configs", vec![skip_all]),
-            ("skip all + embedded,tv", vec![skip_all, ("player_client", &["web_embedded", "tv_downgraded"])]),
-            ("skip page+initial + embedded,tv", vec![skip, ("player_client", &["web_embedded", "tv_downgraded"])]),
-            ("skip page+initial + creator,tv,music", vec![skip, ("player_client", &["web_creator", "tv_downgraded", "web_music"])]),
+        let variants: Vec<(&str, Vec<(&str, &[&str])>, bool)> = vec![
+            ("yt-dlp defaults", vec![], false),
+            ("skip page+initial", vec![skip], false),
+            ("skip + www watch URL", vec![skip], true),
+            ("skip + www + embedded,tv", vec![skip, ("player_client", &["web_embedded", "tv_downgraded"])], true),
+            ("skip + www + embedded only", vec![skip, ("player_client", &["web_embedded"])], true),
         ];
         let mut tuned: Vec<(String, Vec<u64>, usize)> = Vec::new();
-        for (name, args) in variants {
+        for (name, args, www) in variants {
             let mut cfg = base.clone();
             cfg.cache = None;
             if let Some(w) = cfg.warm.as_mut() {
                 w.prewarm = 1;
                 w.foreground_youtube_args = None; // each setting is measured as-is
+                w.watch_url = www;
                 w.youtube_args = args.iter().map(|(k, v)| ((*k).to_owned(), v.iter().map(|x| (*x).to_owned()).collect())).collect();
             }
             let mut r = rig(cfg, &account);

@@ -724,6 +724,11 @@ impl Inner {
             (Some(a), true) => a,
             _ => &cfg.youtube_args,
         };
+        let watch_url = if fast && cfg.foreground_youtube_args.is_some() {
+            cfg.foreground_watch_url
+        } else {
+            cfg.watch_url
+        };
         let extractor_args = {
             let youtube: serde_json::Map<String, Value> = args.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
             json!({ "youtube": youtube })
@@ -753,7 +758,8 @@ impl Inner {
             }
             let w = co.worker();
             let sent = Instant::now();
-            let msg = json!({"op": "resolve", "video_id": video_id.as_str(), "extractor_args": extractor_args});
+            let msg = json!({"op": "resolve", "video_id": video_id.as_str(), "extractor_args": extractor_args,
+                "site": if watch_url { "www" } else { "music" }});
             let reply = match w.request(msg, cfg.request_timeout, &closed) {
                 Ok(v) => v,
                 Err(WorkerError::Timeout) => {
