@@ -91,7 +91,8 @@ when another client's stream is the one used. Resolving the plain watch URL inst
 | watch URL, embedded + tv clients | 0.81 s | opus 251, ~130 kbps |
 | watch URL, embedded client only | 0.63 s | opus 251, ~130 kbps |
 
-Production clicks use "watch URL, embedded + tv clients" (tv covers some embedding-restricted
+(Superseded by the owner's "always best" choice on 2026-10-03, see below; this profile is
+`WarmConfig::fast_clicks()` and stays opt-in.) Production clicks used "watch URL, embedded + tv clients" (tv covers some embedding-restricted
 tracks for 0.2 s); a click with no stream is retried with the defaults. Anything resolved ahead
 keeps the defaults (Premium stream). The remaining time is one embedded player-API call (about
 0.15 s), the tv call and the JS solve (about 0.15 s).
@@ -103,3 +104,9 @@ audibly for roughly 0.1 to 0.4 s; loadfile/start= cannot crossfade. A seamless s
 second engine with a crossfade (or an EDL timeline) and a coordinator effect so it does not look
 like a track change. It would only help the one cold-clicked track per start. Not measured on the
 PC; revisit if the ~130 kbps stream bothers the owner.
+
+## Owner decision: always best (2026-10-03)
+Every request, clicks included, is resolved with yt-dlp's defaults for the Premium stream
+(opus 774, about 256 kbps). Cold click is back to about 3.3 s; prepared tracks stay at 0 s. Bench
+section [6] now compares settings that might keep the Premium stream faster (tv client only,
+watch URL, no page); the winner, if any, becomes the production default.
