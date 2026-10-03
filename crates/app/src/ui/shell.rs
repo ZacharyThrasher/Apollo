@@ -1,6 +1,7 @@
 //! The window's root view: title bar, nav rail, page and player bar.
 
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use apollo_theme::tokens::{layout, spacing, typography};
@@ -12,6 +13,7 @@ use gpui::{
 use crate::account::AccountModel;
 use crate::motion::PanelSlide;
 use crate::player::PlayerModel;
+use crate::search::{SearchModel, SearchSource};
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
 use crate::ui::library::{self, LibraryView};
@@ -19,8 +21,10 @@ use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::queue_panel::QueuePanel;
+use crate::ui::search_page::{self, SearchPage};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
 use crate::ui::titlebar::TitleBar;
+use crate::url_thumbs::{ThumbSource, ThumbStore};
 
 actions!(
     apollo,
@@ -31,6 +35,7 @@ actions!(
         CloseNowPlaying,
         FocusNextControl,
         FocusPreviousControl,
+        FocusSearch,
         Quit
     ]
 );
@@ -47,10 +52,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", CloseNowPlaying, Some(KEY_CONTEXT)),
         KeyBinding::new("tab", FocusNextControl, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-tab", FocusPreviousControl, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-k", FocusSearch, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-f", FocusSearch, Some(KEY_CONTEXT)),
         KeyBinding::new("left", StepBack, Some(crate::ui::slider::KEY_CONTEXT)),
         KeyBinding::new("right", StepForward, Some(crate::ui::slider::KEY_CONTEXT)),
     ]);
     crate::ui::queue_panel::bind_keys(cx);
+    crate::ui::text_field::bind_keys(cx);
+    search_page::bind_keys(cx);
     library::bind_keys(cx);
 }
 
@@ -71,6 +80,9 @@ pub struct Shell {
     now_playing_open: bool,
     now_playing: Entity<NowPlaying>,
     root_focus: FocusHandle,
+    search: Entity<SearchPage>,
+    search_model: Entity<SearchModel>,
+    thumbs: Entity<ThumbStore>,
     nav_toggle: FocusHandle,
     nav_items: [FocusHandle; 4],
     bar: BarFocus,
@@ -123,8 +135,8 @@ impl Shell {
                 player.clone(),
                 {
                     let weak = weak.clone();
-                    move |_, cx| {
-                        let _ = weak.update(cx, |s, cx| s.show_route(Route::Search, cx));
+                    move |window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.open_search(window, cx));
                     }
                 },
                 cx,
@@ -149,8 +161,8 @@ impl Shell {
                 player.clone(),
                 {
                     let weak = weak.clone();
-                    move |_, cx| {
-                        let _ = weak.update(cx, |s, cx| s.show_route(Route::Search, cx));
+                    move |window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.open_search(window, cx));
                     }
                 },
                 cx,
@@ -161,6 +173,17 @@ impl Shell {
             .detach();
         cx.observe(&progress, |_, _, cx| cx.notify()).detach();
         cx.observe(&volume, |_, _, cx| cx.notify()).detach();
+        let search_model = cx.new(|_| SearchModel::new());
+        let thumbs = cx.new(|_| ThumbStore::new());
+        let search = cx.new(|cx| {
+            SearchPage::new(
+                player.clone(),
+                search_model.clone(),
+                thumbs.clone(),
+                root_focus.clone(),
+                cx,
+            )
+        });
         let mut shell = Self {
             player,
             account,
@@ -176,6 +199,9 @@ impl Shell {
             now_playing_open: false,
             now_playing,
             root_focus,
+            search,
+            search_model,
+            thumbs,
             nav_toggle,
             nav_items,
             bar,
@@ -247,6 +273,34 @@ impl Shell {
         cx.notify();
     }
 
+    /// The backend is ready: search and artwork start answering (a query typed earlier goes out).
+    pub fn install_search(
+        &mut self,
+        search: Arc<dyn SearchSource>,
+        thumbs: Arc<dyn ThumbSource>,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_model.update(cx, |m, cx| m.install(search, cx));
+        self.thumbs.update(cx, |t, cx| t.install(thumbs, cx));
+    }
+
+    pub fn search_page(&self) -> &Entity<SearchPage> {
+        &self.search
+    }
+
+    pub fn search_model(&self) -> &Entity<SearchModel> {
+        &self.search_model
+    }
+
+    /// Show Search with the caret in its field.
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.route = Route::Search;
+        self.now_playing_open = false;
+        let field = self.search.read(cx).field().clone();
+        crate::ui::text_field::focus(&field, window, cx);
+        cx.notify();
+    }
+
     /// Put keyboard focus on the root so shortcuts work before anything is clicked.
     pub fn focus_root(&self, window: &mut Window, cx: &mut App) {
         window.focus(&self.root_focus, cx);
@@ -295,7 +349,11 @@ impl Render for Shell {
                     if route == Route::Library && s.route == Route::Library {
                         s.library.update(cx, |l, cx| l.go_home(window, cx));
                     }
-                    s.show_route(route, cx);
+                    if route == Route::Search {
+                        s.open_search(window, cx);
+                    } else {
+                        s.show_route(route, cx);
+                    }
                 });
             }
         });
@@ -346,6 +404,11 @@ impl Render for Shell {
                 )
         });
 
+        let page = match self.route {
+            Route::Search if !self.now_playing_open => self.search.clone().into_any_element(),
+            _ => page.into_any_element(),
+        };
+
         let bar = PlayerBar {
             player: self.player.clone(),
             view,
@@ -388,6 +451,9 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|_, _: &FocusNextControl, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &FocusPreviousControl, window, cx| window.focus_prev(cx)))
+            .on_action(
+                cx.listener(|this, _: &FocusSearch, window, cx| this.open_search(window, cx)),
+            )
             .size_full()
             .flex()
             .flex_col()

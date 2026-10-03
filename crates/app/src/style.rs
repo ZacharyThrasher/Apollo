@@ -123,6 +123,9 @@ pub mod color {
     pub fn border_strong() -> Hsla {
         hsla(t::BORDER_STRONG)
     }
+    pub fn skeleton() -> Hsla {
+        hsla(t::SKELETON)
+    }
     pub fn text_primary() -> Hsla {
         hsla(t::TEXT_PRIMARY)
     }
@@ -134,9 +137,6 @@ pub mod color {
     }
     pub fn text_disabled() -> Hsla {
         hsla(t::TEXT_DISABLED)
-    }
-    pub fn skeleton() -> Hsla {
-        hsla(t::SKELETON)
     }
     pub fn error() -> Hsla {
         hsla(t::ERROR)

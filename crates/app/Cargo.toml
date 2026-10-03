@@ -28,7 +28,6 @@ real-services = [
 # The InnerTube-backed library source (cross-platform; `real-services` turns it on).
 provider = [
     "dep:apollo-innertube",
-    "dep:apollo-provider",
     "dep:ureq",
     "tokio/rt-multi-thread",
 ]
@@ -37,7 +36,7 @@ provider = [
 apollo-account = { path = "../account" }
 apollo-domain = { path = "../domain" }
 apollo-innertube = { path = "../innertube", optional = true }
-apollo-provider = { path = "../provider", optional = true }
+apollo-provider = { path = "../provider" }
 apollo-runtime = { path = "../runtime" }
 apollo-services-common = { path = "../services-common" }
 apollo-store = { path = "../store" }
@@ -45,7 +44,8 @@ apollo-theme = { path = "../theme" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f37989fbdf840b308892af66516c2b9c3ef3853a" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f37989fbdf840b308892af66516c2b9c3ef3853a" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "time", "net"] }
+unicode-segmentation = "1"
 ureq = { version = "3", optional = true }
 
 [target.'cfg(windows)'.dependencies]

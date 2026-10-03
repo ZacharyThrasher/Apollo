@@ -10,8 +10,10 @@ use gpui::{
 use crate::account::{AccountModel, AccountPorts};
 use crate::backend::{channel_sink, Mode};
 use crate::player::PlayerModel;
+use crate::search::Unavailable;
 use crate::settings::{SqliteVolume as SettingsVolume, VolumeStore};
 use crate::ui::shell::{self, Quit, Shell};
+use crate::url_thumbs::NoThumbs;
 
 /// Smallest window that still fits the player bar's three columns at their minimum widths.
 const MIN_WIDTH: f32 = crate::ui::player_bar::MIN_BAR_WIDTH;
@@ -31,7 +33,15 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     let ports = mode.account_ports();
     let account = cx.new(|cx| AccountModel::new(ports.clone(), cx));
     let window = open_window(cx, player.clone(), account.clone());
-    start_services(cx, mode, player.clone(), account, ports, volume_store);
+    start_services(
+        cx,
+        mode,
+        player.clone(),
+        window,
+        account,
+        ports,
+        volume_store,
+    );
 
     cx.on_app_quit(move |cx| {
         player.update(cx, |m, _| m.shutdown());
@@ -76,6 +86,7 @@ fn start_services(
     cx: &mut App,
     mode: Mode,
     player: gpui::Entity<PlayerModel>,
+    window: WindowHandle<Shell>,
     account: gpui::Entity<AccountModel>,
     ports: AccountPorts,
     volume_store: Option<Arc<dyn VolumeStore>>,
@@ -105,13 +116,19 @@ fn start_services(
             .await;
         match prepared {
             Ok(prepared) => {
+                let (search, thumbs) = (prepared.search.clone(), prepared.thumbs.clone());
                 let _ = weak.update(cx, |m, cx| {
                     m.restore_volume(saved_volume);
                     m.install(prepared, cx);
                 });
+                let _ = window.update(cx, |shell, _, cx| shell.install_search(search, thumbs, cx));
             }
             Err(err) => {
                 let _ = weak.update(cx, |m, cx| m.fail(&err, cx));
+                // Search shows its own short error instead of waiting for a backend that is not coming.
+                let _ = window.update(cx, |shell, _, cx| {
+                    shell.install_search(Arc::new(Unavailable), Arc::new(NoThumbs), cx)
+                });
                 return;
             }
         }

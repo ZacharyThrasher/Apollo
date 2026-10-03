@@ -18,11 +18,16 @@ use apollo_services_common::EventSink;
 use crate::account::AccountPorts;
 use crate::art::ArtSource;
 use crate::library::LibrarySource;
+use crate::search::SearchSource;
+use crate::url_thumbs::ThumbSource;
 
 pub mod account;
 #[cfg(all(windows, feature = "real-services"))]
 pub mod real;
+#[cfg(feature = "real-services")]
+pub mod real_search;
 pub mod sim;
+mod sim_search;
 
 /// A track to queue plus where its artwork lives (resolved by the backend's [`ArtSource`]).
 #[derive(Clone, Debug)]
@@ -41,6 +46,9 @@ pub struct Prepared {
     pub ports: Ports,
     pub queue: Vec<LibraryTrack>,
     pub art: Arc<dyn ArtSource>,
+    pub search: Arc<dyn SearchSource>,
+    /// Artwork for list rows (search results, later the library), by thumbnail URL.
+    pub thumbs: Arc<dyn ThumbSource>,
     /// What the library screen lists and opens.
     pub library: Arc<dyn LibrarySource>,
 }

@@ -37,6 +37,8 @@ fn prepared() -> Prepared {
             track: Track::new("startTrack01", "Start"),
         }],
         art: Arc::new(TestArt),
+        search: Arc::new(apollo_app::search::Unavailable),
+        thumbs: Arc::new(apollo_app::url_thumbs::NoThumbs),
         library: Arc::new(SimLibrary::instant()),
     }
 }

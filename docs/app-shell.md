@@ -33,19 +33,26 @@ fallback), no art, and a 25 s track to watch the end-of-track advance.
 | Tab / Shift+Tab | move between controls (accent focus ring, keyboard focus only) |
 | Enter | activate the focused control |
 | Left / Right on a slider | seek 5 s / volume 5% |
+| Ctrl+K or Ctrl+F | open Search and focus its field |
+| Down / Up in the search field | move the selection through results |
+| Enter in the search field | search now, or play the selected song |
+| Ctrl+Enter in the search field | add the selected song to the queue |
+| Escape in the search field | clear the field, then leave it |
 
-Space is bound at the root (`Shell` key context), so a future text field has to claim it in its
-own context.
+Space is bound at the root (`Shell` key context); the text field claims it in its own context
+(`InsertSpace`), so typing a space never toggles playback.
 
 ## Layout of the code
 
 | Module | Role |
 |---|---|
-| `backend/` | `Prepared` = ports + starting queue + artwork source. `sim` and `real` implement it. |
+| `backend/` | `Prepared` = ports + starting queue + artwork, search and thumbnail sources. `sim` and `real` implement it. |
 | `settings.rs` | Saved settings (volume) in the SQLite store under `%LOCALAPPDATA%\Apollo\app`. |
 | `player.rs` | `PlayerModel`: owns the `Driver`, turns adapter completions into coordinator events, keeps volume (a user setting sent straight to the engine port; default 70, saved through `settings.rs`), exposes a `PlayerView` snapshot. |
 | `art.rs`, `accent_anim.rs` | artwork decode / square crop, `accent_from_artwork`, 400 ms OKLCH crossfade |
-| `ui/` | `shell`, `titlebar`, `nav`, `player_bar`, `button`, `slider`, `tooltip` |
+| `search.rs` | `SearchModel`: normalise, 400 ms debounce, 2-character minimum, newest query wins, answered queries are not re-asked. `SearchSource` is the port. |
+| `thumbs.rs` | `ThumbStore`: bounded, deduplicated list artwork by URL. |
+| `ui/` | `shell`, `titlebar`, `nav`, `player_bar`, `button`, `slider`, `tooltip`, `search_page`, `text_field`, `text_button` |
 
 ## Tests
 
@@ -56,10 +63,17 @@ They do not cover pixels; screenshots on Windows do.
 
 ## Not in this slice
 
-Sign-in/account UI, search, library pages, queue panel (the queue button only toggles its own
-state), Now Playing, tray, SMTC wiring beyond what exists. The account is re-validated by a
+Album, artist and playlist pages (their search cards are inert), tray, SMTC wiring beyond what
+exists. The account is re-validated by a
 background thread (about every 30 minutes) in real mode; re-validating immediately after a
 `SessionExpired` playback failure is not wired yet.
+
+## Search
+
+Search runs through the signed-in account: anonymous InnerTube search is not usable, and the
+service records signed-in searches in the account's history, hence the debounce and minimum
+length. Songs play now (inserted next, then advance, so the queue is kept) or are added to the
+queue; albums, artists and playlists are shown but do nothing until their pages exist.
 
 ## Library page (M3, slice 2)
 

@@ -218,6 +218,7 @@ dependencies = [
  "image",
  "tempfile",
  "tokio",
+ "unicode-segmentation",
  "ureq",
 ]
 
