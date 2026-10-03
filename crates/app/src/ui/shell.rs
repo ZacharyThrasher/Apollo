@@ -10,6 +10,7 @@ use gpui::{
 
 use crate::player::PlayerModel;
 use crate::style::{self, color};
+use crate::ui::library::{self, LibraryEvent, LibraryView};
 use crate::ui::nav::{NavRail, Route};
 use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
@@ -41,6 +42,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("left", StepBack, Some(crate::ui::slider::KEY_CONTEXT)),
         KeyBinding::new("right", StepForward, Some(crate::ui::slider::KEY_CONTEXT)),
     ]);
+    library::bind_keys(cx);
 }
 
 pub struct Shell {
@@ -49,6 +51,7 @@ pub struct Shell {
     nav_expanded: bool,
     nav_toggled: bool,
     queue_open: bool,
+    library: Entity<LibraryView>,
     root_focus: FocusHandle,
     nav_toggle: FocusHandle,
     nav_items: [FocusHandle; 3],
@@ -82,8 +85,17 @@ impl Shell {
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&progress, |_, _, cx| cx.notify()).detach();
         cx.observe(&volume, |_, _, cx| cx.notify()).detach();
+        let library = cx.new(|cx| LibraryView::new(player.clone(), cx));
+        cx.subscribe(&library, |this, _, event: &LibraryEvent, cx| match event {
+            LibraryEvent::OpenSearch => {
+                this.route = Route::Search;
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             player,
+            library,
             route: Route::Home,
             nav_expanded: false,
             nav_toggled: false,
@@ -99,6 +111,16 @@ impl Shell {
 
     pub fn route(&self) -> Route {
         self.route
+    }
+
+    /// Switch page (also what the nav rail and the library's empty-state action do).
+    pub fn go_to(&mut self, route: Route, cx: &mut Context<Self>) {
+        self.route = route;
+        cx.notify();
+    }
+
+    pub fn library(&self) -> &Entity<LibraryView> {
+        &self.library
     }
 
     pub fn nav_expanded(&self) -> bool {
@@ -150,8 +172,12 @@ impl Render for Shell {
         })
         .on_route({
             let shell = shell.clone();
-            move |route, _, cx| {
+            move |route, window, cx| {
                 shell.update(cx, |s, cx| {
+                    // Choosing Library while on Library returns to its lists.
+                    if route == Route::Library && s.route == Route::Library {
+                        s.library.update(cx, |l, cx| l.go_home(window, cx));
+                    }
                     s.route = route;
                     cx.notify();
                 });
@@ -163,14 +189,17 @@ impl Render for Shell {
             .flex_1()
             .min_w_0()
             .h_full()
-            .overflow_y_scroll()
             .px(px(spacing::S8))
-            .pt(px(spacing::S6))
-            .child(
+            .pt(px(spacing::S6));
+        let page = match self.route {
+            // The library's lists scroll themselves (virtualized), so the page does not.
+            Route::Library => page.child(self.library.clone()),
+            _ => page.overflow_y_scroll().child(
                 style::text_style(div(), typography::PAGE_TITLE, cx)
                     .text_color(color::text_primary())
                     .child(self.route.title()),
-            );
+            ),
+        };
 
         let bar = PlayerBar {
             player: self.player.clone(),

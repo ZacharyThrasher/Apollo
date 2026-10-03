@@ -16,6 +16,7 @@ use apollo_runtime::{MediaEngine, Resolver};
 use apollo_services_common::EventSink;
 
 use crate::art::ArtSource;
+use crate::library::LibrarySource;
 
 #[cfg(all(windows, feature = "real-services"))]
 pub mod real;
@@ -38,6 +39,8 @@ pub struct Prepared {
     pub ports: Ports,
     pub queue: Vec<LibraryTrack>,
     pub art: Arc<dyn ArtSource>,
+    /// What the library screen lists and opens.
+    pub library: Arc<dyn LibrarySource>,
 }
 
 /// Which backend to run, from the command line / build features.

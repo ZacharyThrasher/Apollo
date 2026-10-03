@@ -32,6 +32,7 @@ use apollo_services_common::{EventSink, LeaseStore};
 
 use super::{LibraryTrack, Ports, Prepared};
 use crate::art::{ArtSource, DecodedArt};
+use crate::library::live::InnerTubeLibrary;
 use crate::player::DEFAULT_VOLUME;
 
 /// Windows Credential Manager service name for the app's vault key.
@@ -124,6 +125,15 @@ pub fn prepare(opts: Options, sink: EventSink) -> Result<Prepared, String> {
     )
     .map_err(|e| e.to_string())?;
 
+    // The library screen reads the account's playlists and albums through InnerTube. For a login
+    // that can act as several channels the selected one's id addresses it.
+    let channel = match account.view().identity {
+        IdentityState::Selected(identity) => identity.page_id,
+        _ => None,
+    };
+    let library = InnerTubeLibrary::new(Arc::new(account.clone()), channel)
+        .map_err(|e| format!("library source: {e}"))?;
+
     let listed = list_liked_music(&rcfg, &account, opts.tracks)
         .map_err(|f| format!("Liked Music listing failed: {f:?}"))?;
     let mut queue = Vec::new();
@@ -160,6 +170,7 @@ pub fn prepare(opts: Options, sink: EventSink) -> Result<Prepared, String> {
         },
         queue,
         art: Arc::new(HttpArt::new(thumbs)),
+        library: Arc::new(library),
     })
 }
 

@@ -7,7 +7,7 @@ mod map;
 mod source;
 
 pub use map::{
-    account_validation, classify, page_from_album, page_from_continuation, page_from_playlist,
-    track_from_song, ListedTrack,
+    account_validation, classify, collection_from_card, collections_from_grid, page_from_album,
+    page_from_continuation, page_from_playlist, track_from_song, ListedTrack,
 };
 pub use source::InnerTubeSource;

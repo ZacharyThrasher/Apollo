@@ -52,6 +52,8 @@ icons! {
     MusicNote => "music-note-regular",
     Warning => "warning-regular",
     Spinner => "spinner",
+    ArrowLeft => "arrow-left-regular",
+    HeartFilled => "heart-filled",
 }
 
 pub struct Assets;
