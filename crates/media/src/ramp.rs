@@ -73,7 +73,9 @@ impl GainRamp {
         let due = match self.sent_db {
             None => true,
             // Always deliver the final value exactly, even when the last step is tiny.
-            Some(sent) => (self.current_db - sent).abs() >= EPSILON_DB || (settled && sent != self.current_db),
+            Some(sent) => {
+                (self.current_db - sent).abs() >= EPSILON_DB || (settled && sent != self.current_db)
+            }
         };
         due.then(|| {
             self.sent_db = Some(self.current_db);
@@ -122,7 +124,10 @@ mod tests {
         assert!((at + 5.0).abs() < 1e-4);
         r.glide(t0 + MS(50), 0.0, MS(100));
         let back = r.step(t0 + MS(100)).unwrap();
-        assert!((back + 2.5).abs() < 1e-3, "from -5 toward 0, halfway: {back}");
+        assert!(
+            (back + 2.5).abs() < 1e-3,
+            "from -5 toward 0, halfway: {back}"
+        );
     }
 
     #[test]
@@ -144,6 +149,9 @@ mod tests {
         let before = r.step(t0 + MS(150)).unwrap();
         r.glide(t0 + MS(150), -6.0, MS(300));
         let after = r.step(t0 + MS(300)).unwrap();
-        assert!(after < before, "kept going down, did not restart: {before} -> {after}");
+        assert!(
+            after < before,
+            "kept going down, did not restart: {before} -> {after}"
+        );
     }
 }

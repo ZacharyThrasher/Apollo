@@ -12,7 +12,7 @@ use crate::account::{AccountModel, AccountPorts};
 use crate::backend::{channel_sink, Mode};
 use crate::player::PlayerModel;
 use crate::search::Unavailable;
-use crate::settings::{AutoplayStore, QueueStore, SqliteSettings, VolumeStore};
+use crate::settings::{AutoplayStore, NormalizeStore, QueueStore, SqliteSettings, VolumeStore};
 use crate::ui::shell::{self, Quit, Shell};
 use crate::url_thumbs::NoThumbs;
 
@@ -43,6 +43,7 @@ pub fn follow_reduced_motion(cx: &mut App, animations_enabled: impl Fn() -> bool
 struct Stores {
     volume: Option<Arc<dyn VolumeStore>>,
     autoplay: Option<Arc<dyn AutoplayStore>>,
+    normalize: Option<Arc<dyn NormalizeStore>>,
     queue: Option<Arc<dyn QueueStore>>,
 }
 
@@ -52,6 +53,7 @@ impl Stores {
             Some(db) => Self {
                 volume: Some(db.clone()),
                 autoplay: Some(db.clone()),
+                normalize: Some(db.clone()),
                 queue: Some(db),
             },
             None => Self::default(),
@@ -80,6 +82,7 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     player.update(cx, |m, _| {
         m.set_volume_store(stores.volume.clone());
         m.set_autoplay_store(stores.autoplay.clone());
+        m.set_normalize_store(stores.normalize.clone());
         m.set_latency_log(crate::latency::default_log());
     });
     let ports = mode.account_ports();
@@ -142,6 +145,7 @@ fn open_window(
 struct Saved {
     volume: Option<u8>,
     autoplay: Option<bool>,
+    normalize: Option<bool>,
     queue: Option<(apollo_domain::queue::Queue, u64)>,
     queue_store: Option<Arc<dyn QueueStore>>,
     key: Option<String>,
@@ -181,6 +185,7 @@ fn start_services(
                 let saved = Saved {
                     volume: stores.volume.and_then(|s| s.load()),
                     autoplay: stores.autoplay.and_then(|s| s.load()),
+                    normalize: stores.normalize.and_then(|s| s.load()),
                     queue: key
                         .as_deref()
                         .zip(stores.queue.as_ref())
@@ -197,6 +202,7 @@ fn start_services(
                 let _ = weak.update(cx, |m, cx| {
                     m.restore_volume(saved.volume);
                     m.restore_autoplay(saved.autoplay);
+                    m.restore_normalize(saved.normalize);
                     m.set_queue_store(saved.queue_store, saved.key);
                     m.install_with(prepared, saved.queue, cx);
                 });

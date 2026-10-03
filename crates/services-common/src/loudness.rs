@@ -276,15 +276,11 @@ mod tests {
     }
 
     impl Scripted {
-        fn new(
-            answers: &[(&str, Result<Option<f32>, LoudnessError>)],
-        ) -> (Self, Arc<AtomicUsize>) {
+        fn new(answers: &[(&str, Result<Option<f32>, LoudnessError>)]) -> (Self, Arc<AtomicUsize>) {
             let calls = Arc::new(AtomicUsize::new(0));
             (
                 Self {
-                    answers: Mutex::new(
-                        answers.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
-                    ),
+                    answers: Mutex::new(answers.iter().map(|(k, v)| (k.to_string(), *v)).collect()),
                     calls: calls.clone(),
                 },
                 calls,
@@ -295,7 +291,12 @@ mod tests {
     impl LoudnessSource for Scripted {
         fn fetch(&self, id: &str) -> Result<Option<f32>, LoudnessError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.answers.lock().unwrap().get(id).copied().unwrap_or(Err(LoudnessError))
+            self.answers
+                .lock()
+                .unwrap()
+                .get(id)
+                .copied()
+                .unwrap_or(Err(LoudnessError))
         }
     }
 
@@ -311,17 +312,18 @@ mod tests {
         }
     }
 
-    fn inner(
-        source: Scripted,
-        cache: MemCache,
-    ) -> (Inner, LoudnessTable) {
+    fn inner(source: Scripted, cache: MemCache) -> (Inner, LoudnessTable) {
         let table = LoudnessTable::new();
         (
             Inner {
                 table: table.clone(),
                 source: Box::new(source),
                 cache: Box::new(cache),
-                queue: Mutex::new(Queue { items: VecDeque::new(), queued: HashSet::new(), closed: false }),
+                queue: Mutex::new(Queue {
+                    items: VecDeque::new(),
+                    queued: HashSet::new(),
+                    closed: false,
+                }),
                 wake: Condvar::new(),
                 failed: Mutex::new(HashMap::new()),
             },
@@ -366,10 +368,20 @@ mod tests {
     fn a_remembered_measurement_needs_no_request() {
         let (src, calls) = Scripted::new(&[]);
         let cache = MemCache::default();
-        cache.put("a", CachedLoudness { loudness_db: Some(-2.0), fetched_unix: 1 });
+        cache.put(
+            "a",
+            CachedLoudness {
+                loudness_db: Some(-2.0),
+                fetched_unix: 1,
+            },
+        );
         let (inner, table) = inner(src, cache);
         inner.resolve("a");
-        assert_eq!(table.get("a"), Some(-2.0), "an old known value is still good");
+        assert_eq!(
+            table.get("a"),
+            Some(-2.0),
+            "an old known value is still good"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -382,11 +394,25 @@ mod tests {
         assert_eq!(table.get("a"), None);
         assert_eq!(cache.get("a").unwrap().loudness_db, None);
         inner.resolve("a");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "fresh 'unknown' is believed");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "fresh 'unknown' is believed"
+        );
 
-        cache.put("a", CachedLoudness { loudness_db: None, fetched_unix: 1 });
+        cache.put(
+            "a",
+            CachedLoudness {
+                loudness_db: None,
+                fetched_unix: 1,
+            },
+        );
         inner.resolve("a");
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "a stale 'unknown' is asked again");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a stale 'unknown' is asked again"
+        );
     }
 
     #[test]
@@ -398,7 +424,10 @@ mod tests {
         inner.resolve("a");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "backs off after a failure");
         assert_eq!(table.get("a"), None);
-        assert!(cache.get("a").is_none(), "a failure says nothing about the track");
+        assert!(
+            cache.get("a").is_none(),
+            "a failure says nothing about the track"
+        );
     }
 
     #[test]
@@ -420,12 +449,22 @@ mod tests {
     fn an_urgent_request_goes_ahead_of_the_lookahead() {
         let (src, _) = Scripted::new(&[]);
         let (inner, _) = inner(src, MemCache::default());
-        let fetcher = LoudnessFetcher { inner: Arc::new(inner) }; // no worker: inspect the queue
+        let fetcher = LoudnessFetcher {
+            inner: Arc::new(inner),
+        }; // no worker: inspect the queue
         fetcher.want("later", false);
         fetcher.want("sooner", false);
         fetcher.want("now", true);
         fetcher.want("sooner", true);
-        let order: Vec<_> = fetcher.inner.queue.lock().unwrap().items.iter().cloned().collect();
+        let order: Vec<_> = fetcher
+            .inner
+            .queue
+            .lock()
+            .unwrap()
+            .items
+            .iter()
+            .cloned()
+            .collect();
         assert_eq!(order, ["sooner", "now", "later"]);
     }
 }

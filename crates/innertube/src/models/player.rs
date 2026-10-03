@@ -1,8 +1,8 @@
 //! The one thing Apollo reads from a `player` response: how loud the track is.
 //!
-//! Streams come from yt-dlp, so everything else in the response (`streamingData`, the playback
-//! tracking URLs, `videoDetails`) is ignored here and never leaves this module. In particular
-//! `playbackTracking` is not read: Apollo does not report plays.
+//! Streams come from yt-dlp, so everything else in the response (stream URLs and ciphers, the
+//! playback tracking URLs, `videoDetails`) is ignored here and never leaves this module. In
+//! particular `playbackTracking` is not read: Apollo does not report plays.
 
 use serde_json::Value;
 
@@ -30,8 +30,21 @@ pub fn parse_player_loudness(value: &Value) -> PlayerLoudness {
             .filter(|n| n.is_finite())
             .map(|n| n as f32)
     };
+    // The audio formats repeat the measurement (`loudnessDb` beside `audioQuality`); read it from
+    // the first one that has it when the audio config does not. Only the number is read: the
+    // format's URL and cipher are never touched.
+    let from_formats = || {
+        value
+            .pointer("/streamingData/adaptiveFormats")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter(|f| f.get("audioQuality").is_some())
+            .find_map(|f| f.get("loudnessDb").and_then(Value::as_f64))
+            .filter(|n| n.is_finite())
+            .map(|n| n as f32)
+    };
     PlayerLoudness {
-        loudness_db: number("loudnessDb"),
+        loudness_db: number("loudnessDb").or_else(from_formats),
         perceptual_loudness_db: number("perceptualLoudnessDb"),
     }
 }
@@ -55,6 +68,28 @@ mod tests {
         let l = parse_player_loudness(&v);
         assert!((l.loudness_db.unwrap() - 4.12).abs() < 1e-4);
         assert_eq!(l.perceptual_loudness_db, Some(-9.5));
+    }
+
+    #[test]
+    fn the_audio_formats_are_the_fallback_when_the_config_has_no_number() {
+        let v = json!({
+            "playerConfig": {"audioConfig": {}},
+            "streamingData": {"adaptiveFormats": [
+                {"itag": 137, "mimeType": "video/mp4", "loudnessDb": 99.0},
+                {"itag": 251, "audioQuality": "AUDIO_QUALITY_MEDIUM", "loudnessDb": 2.5},
+                {"itag": 140, "audioQuality": "AUDIO_QUALITY_MEDIUM", "loudnessDb": 2.6}
+            ]}
+        });
+        assert_eq!(
+            parse_player_loudness(&v).loudness_db,
+            Some(2.5),
+            "first audio format, not video"
+        );
+        let both = json!({
+            "playerConfig": {"audioConfig": {"loudnessDb": 1.0}},
+            "streamingData": {"adaptiveFormats": [{"audioQuality": "AUDIO_QUALITY_LOW", "loudnessDb": 9.0}]}
+        });
+        assert_eq!(parse_player_loudness(&both).loudness_db, Some(1.0), "the config wins");
     }
 
     #[test]

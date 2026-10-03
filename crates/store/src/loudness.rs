@@ -62,31 +62,66 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(store.get_loudness("a").unwrap(), None);
         store
-            .put_loudness("a", LoudnessRow { loudness_db: Some(-3.25), fetched_unix: 100 })
+            .put_loudness(
+                "a",
+                LoudnessRow {
+                    loudness_db: Some(-3.25),
+                    fetched_unix: 100,
+                },
+            )
             .unwrap();
         store
-            .put_loudness("b", LoudnessRow { loudness_db: None, fetched_unix: 200 })
+            .put_loudness(
+                "b",
+                LoudnessRow {
+                    loudness_db: None,
+                    fetched_unix: 200,
+                },
+            )
             .unwrap();
         assert_eq!(
             store.get_loudness("a").unwrap(),
-            Some(LoudnessRow { loudness_db: Some(-3.25), fetched_unix: 100 })
+            Some(LoudnessRow {
+                loudness_db: Some(-3.25),
+                fetched_unix: 100
+            })
         );
         assert_eq!(
             store.get_loudness("b").unwrap(),
-            Some(LoudnessRow { loudness_db: None, fetched_unix: 200 })
+            Some(LoudnessRow {
+                loudness_db: None,
+                fetched_unix: 200
+            })
         );
     }
 
     #[test]
     fn a_newer_answer_replaces_the_old_one() {
         let store = Store::open_in_memory().unwrap();
-        store.put_loudness("a", LoudnessRow { loudness_db: None, fetched_unix: 1 }).unwrap();
         store
-            .put_loudness("a", LoudnessRow { loudness_db: Some(2.0), fetched_unix: 9 })
+            .put_loudness(
+                "a",
+                LoudnessRow {
+                    loudness_db: None,
+                    fetched_unix: 1,
+                },
+            )
+            .unwrap();
+        store
+            .put_loudness(
+                "a",
+                LoudnessRow {
+                    loudness_db: Some(2.0),
+                    fetched_unix: 9,
+                },
+            )
             .unwrap();
         assert_eq!(
             store.get_loudness("a").unwrap(),
-            Some(LoudnessRow { loudness_db: Some(2.0), fetched_unix: 9 })
+            Some(LoudnessRow {
+                loudness_db: Some(2.0),
+                fetched_unix: 9
+            })
         );
     }
 
@@ -97,14 +132,22 @@ mod tests {
             store
                 .put_loudness(
                     &format!("v{i}"),
-                    LoudnessRow { loudness_db: Some(1.0), fetched_unix: i },
+                    LoudnessRow {
+                        loudness_db: Some(1.0),
+                        fetched_unix: i,
+                    },
                 )
                 .unwrap();
         }
-        let count: i64 =
-            store.conn.query_row("SELECT COUNT(*) FROM loudness", [], |r| r.get(0)).unwrap();
+        let count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM loudness", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, MAX_ROWS);
         assert_eq!(store.get_loudness("v0").unwrap(), None);
-        assert!(store.get_loudness(&format!("v{}", MAX_ROWS as u64 + 19)).unwrap().is_some());
+        assert!(store
+            .get_loudness(&format!("v{}", MAX_ROWS as u64 + 19))
+            .unwrap()
+            .is_some());
     }
 }

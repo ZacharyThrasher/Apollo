@@ -21,7 +21,7 @@ use crate::latency::Latency;
 use crate::library::LibrarySource;
 use crate::os_media::{MediaState, MediaTrack, OsCommand};
 use crate::persist::QueueSaver;
-use crate::settings::{AutoplayStore, QueueStore, VolumeStore};
+use crate::settings::{AutoplayStore, NormalizeStore, QueueStore, VolumeStore};
 use crate::thumbs::Thumbs;
 
 type AppDriver =
@@ -140,6 +140,9 @@ pub struct PlayerModel {
     intent: Option<String>,
     autoplay: bool,
     autoplay_store: Option<Arc<dyn AutoplayStore>>,
+    /// Volume normalization (Settings > Playback): on by default.
+    normalize: bool,
+    normalize_store: Option<Arc<dyn NormalizeStore>>,
     /// Writes the queue and position down; present while someone is signed in.
     saver: Option<QueueSaver>,
     /// What the saved queue was made from, to tell a changed queue from a moved position.
@@ -173,6 +176,8 @@ impl PlayerModel {
             intent: None,
             autoplay: true,
             autoplay_store: None,
+            normalize: true,
+            normalize_store: None,
             saver: None,
             saved_fp: None,
             saved_row: false,
@@ -223,6 +228,7 @@ impl PlayerModel {
             }
         };
         driver.engine.set_volume(self.effective_volume());
+        driver.engine.set_normalization(self.normalize);
         // The queue starts paused on its current track: have it ready so the first Play is instant.
         let first = driver.coordinator().queue().current().map(|e| e.track.clone());
         self.saved_fp = Some(queue_fingerprint(driver.coordinator().queue()));
@@ -260,6 +266,37 @@ impl PlayerModel {
             std::thread::spawn(move || store.save(on));
         }
         self.sync(cx);
+    }
+
+    /// Where the volume-normalization switch is saved between runs (none in tests and the
+    /// headless harness).
+    pub fn set_normalize_store(&mut self, store: Option<Arc<dyn NormalizeStore>>) {
+        self.normalize_store = store;
+    }
+
+    /// Apply the normalization setting saved by a previous run (on when none was saved), before
+    /// the backend installs.
+    pub fn restore_normalize(&mut self, saved: Option<bool>) {
+        if let Some(on) = saved {
+            self.normalize = on;
+        }
+    }
+
+    pub fn normalize(&self) -> bool {
+        self.normalize
+    }
+
+    /// Turn volume normalization on or off and remember the choice. It applies to the track that
+    /// is playing, not just the next one.
+    pub fn set_normalize(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.normalize = on;
+        if let Some(d) = self.driver.as_mut() {
+            d.engine.set_normalization(on);
+        }
+        if let Some(store) = self.normalize_store.clone() {
+            std::thread::spawn(move || store.save(on));
+        }
+        cx.notify();
     }
 
     /// Start saving the queue under `account_key` (an opaque id of the signed-in account). With

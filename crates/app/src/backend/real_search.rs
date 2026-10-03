@@ -22,16 +22,19 @@ use crate::search::SearchSource;
 const HOST: &str = "music.youtube.com";
 
 /// What one request needs from the account, taken at one epoch.
-struct RequestSession {
-    epoch: u64,
+pub(super) struct RequestSession {
+    pub(super) epoch: u64,
     jar: CookieJar,
-    header: String,
+    pub(super) header: String,
     /// Only for a channel the owner chose that is not the login's default one. The default needs
     /// none, which is also how the account's own validation talks to the service.
     data_sync_id: Option<String>,
 }
 
-fn request_session(account: &AccountService, now: u64) -> Result<RequestSession, LoadFailure> {
+pub(super) fn request_session(
+    account: &AccountService,
+    now: u64,
+) -> Result<RequestSession, LoadFailure> {
     let Some(snapshot) = account.snapshot() else {
         // A session the service has not confirmed yet is "try again", not "sign in again".
         return Err(match account.unavailable_reason() {
@@ -58,7 +61,7 @@ fn request_session(account: &AccountService, now: u64) -> Result<RequestSession,
 
 /// Offer the cookies the service changed during a request back to the account. `false` when
 /// nothing changed or the account has moved on (its epoch no longer matches).
-fn hand_back_rotation(
+pub(super) fn hand_back_rotation(
     account: &AccountService,
     session: &RequestSession,
     header_now: &str,
@@ -74,31 +77,19 @@ struct Synced {
     source: InnerTubeSource,
 }
 
-pub struct AccountSearch {
-    account: AccountService,
-    /// One worker: searches are I/O and the UI never waits on them.
-    runtime: tokio::runtime::Runtime,
+/// The provider source for the account's current session, shared by the requests that use it.
+/// Reused while the account's epoch is unchanged (it may hold a cookie the service just
+/// rotated), pointed at the new jar when the epoch moved.
+#[derive(Default)]
+pub(super) struct SyncedSource {
     synced: Mutex<Option<Synced>>,
 }
 
-impl AccountSearch {
-    pub fn new(account: AccountService) -> Result<Self, String> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .thread_name("apollo-search")
-            .enable_all()
-            .build()
-            .map_err(|e| e.to_string())?;
-        Ok(Self {
-            account,
-            runtime,
-            synced: Mutex::new(None),
-        })
-    }
-
-    /// The provider source for `session`: reused while the account's epoch is unchanged (it may
-    /// hold a cookie the service just rotated), pointed at the new jar when the epoch moved.
-    fn source_for(&self, session: &RequestSession) -> Result<InnerTubeSource, LoadFailure> {
+impl SyncedSource {
+    pub(super) fn source_for(
+        &self,
+        session: &RequestSession,
+    ) -> Result<InnerTubeSource, LoadFailure> {
         let mut synced = self.synced.lock().unwrap();
         match synced.as_mut() {
             Some(s) if s.epoch == session.epoch => {}
@@ -123,10 +114,33 @@ impl AccountSearch {
     }
 }
 
+pub struct AccountSearch {
+    account: AccountService,
+    /// One worker: searches are I/O and the UI never waits on them.
+    runtime: tokio::runtime::Runtime,
+    sources: SyncedSource,
+}
+
+impl AccountSearch {
+    pub fn new(account: AccountService) -> Result<Self, String> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("apollo-search")
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            account,
+            runtime,
+            sources: SyncedSource::default(),
+        })
+    }
+}
+
 impl SearchSource for AccountSearch {
     fn search(&self, query: &str) -> Result<SearchResults, LoadFailure> {
         let session = request_session(&self.account, unix_now())?;
-        let source = self.source_for(&session)?;
+        let source = self.sources.source_for(&session)?;
         let result = self.runtime.block_on(async {
             source.bootstrap_visitor_data().await;
             source.search(query).await

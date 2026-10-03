@@ -32,6 +32,9 @@ pub struct LabeledSwitch {
     id: ElementId,
     focus: FocusHandle,
     label: SharedString,
+    /// The label is only the accessible name: the caller draws its own text elsewhere (a settings
+    /// row with its label on the left).
+    label_hidden: bool,
     on: bool,
     enabled: bool,
     accent: Accent,
@@ -50,11 +53,18 @@ impl LabeledSwitch {
             id: id.into(),
             focus: focus.clone(),
             label: label.into(),
+            label_hidden: false,
             on,
             enabled: true,
             accent,
             on_toggle: None,
         }
+    }
+
+    /// Draws the pill alone; the label stays as its accessible name.
+    pub fn label_hidden(mut self) -> Self {
+        self.label_hidden = true;
+        self
     }
 
     pub fn enabled(mut self, enabled: bool) -> Self {
@@ -165,11 +175,13 @@ impl RenderOnce for LabeledSwitch {
                             .bg(knob_color),
                     ),
             )
-            .child(
-                style::text_style(div(), typography::BODY, cx)
-                    .text_color(label_color)
-                    .child(self.label.clone()),
-            )
+            .when(!self.label_hidden, |d| {
+                d.child(
+                    style::text_style(div(), typography::BODY, cx)
+                        .text_color(label_color)
+                        .child(self.label.clone()),
+                )
+            })
             .when(ring, |d| d.child(focus_ring(accent, radius::SMALL)))
     }
 }
