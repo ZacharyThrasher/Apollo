@@ -206,6 +206,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "apollo-media"
+version = "0.0.0"
+dependencies = [
+ "apollo-domain",
+ "apollo-runtime",
+ "apollo-services-common",
+ "libmpv2",
+ "libmpv2-sys",
+]
+
+[[package]]
 name = "apollo-runtime"
 version = "0.0.0"
 dependencies = [
