@@ -1,0 +1,25 @@
+[package]
+name = "apollo-services-common"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Ports and Windows primitives shared by the service adapters (media, resolver, account)"
+
+[dependencies]
+apollo-domain = { path = "../domain" }
+zeroize = "1"
+getrandom = "0.3"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_System_Memory",
+  "Win32_System_IO",
+]
