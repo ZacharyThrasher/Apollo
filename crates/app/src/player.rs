@@ -2,13 +2,14 @@
 //! adapter completions into coordinator events, and exposes a plain snapshot for rendering.
 //! Volume is a user setting kept here and sent straight to the engine port.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use apollo_domain::model::{QueueEntryId, Track};
 use apollo_domain::playback::{EngineEvent, Event, Failure, Intent, Phase};
-use apollo_domain::queue::{QueueEntry, Repeat};
+use apollo_domain::queue::{Queue, QueueEntry, Repeat};
 use apollo_runtime::Driver;
 use apollo_theme::Accent;
 use gpui::{Context, RenderImage, SharedString};
@@ -19,7 +20,8 @@ use crate::backend::{LibraryTrack, Ports, Prepared};
 use crate::latency::Latency;
 use crate::library::LibrarySource;
 use crate::os_media::{MediaState, MediaTrack, OsCommand};
-use crate::settings::VolumeStore;
+use crate::persist::QueueSaver;
+use crate::settings::{AutoplayStore, QueueStore, VolumeStore};
 use crate::thumbs::Thumbs;
 
 type AppDriver =
@@ -35,6 +37,19 @@ const INTENT_DELAY: Duration = Duration::from_millis(250);
 /// Tracks after the one that starts that are resolved right away, so the first Next is instant
 /// (the coordinator itself only preloads the next track once the current one has loaded).
 const LOOKAHEAD: usize = 2;
+
+/// Autoplay asks for more once this few tracks are left up next, so the next song is already
+/// resolved when the last one of the list ends.
+const RADIO_LOW_WATER: usize = 2;
+
+/// Most tracks one radio answer adds to the queue.
+const RADIO_APPEND: usize = 25;
+
+/// A radio that failed (or added nothing) is asked for again after this long, not on every tick.
+const RADIO_RETRY: Duration = Duration::from_secs(30);
+
+/// How often the playing position is saved between queue changes.
+const CHECKPOINT_EVERY: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -99,6 +114,8 @@ pub struct PlayerView {
     pub duration_ms: Option<u64>,
     pub shuffle: bool,
     pub repeat: Repeat,
+    /// Autoplay: a radio continues the queue when it would end.
+    pub autoplay: bool,
     pub volume: u8,
     pub muted: bool,
     pub error: Option<Failure>,
@@ -121,6 +138,21 @@ pub struct PlayerModel {
     latency: Latency,
     /// The track the user last showed interest in (hover/selection), for the prefetch debounce.
     intent: Option<String>,
+    autoplay: bool,
+    autoplay_store: Option<Arc<dyn AutoplayStore>>,
+    /// Writes the queue and position down; present while someone is signed in.
+    saver: Option<QueueSaver>,
+    /// What the saved queue was made from, to tell a changed queue from a moved position.
+    saved_fp: Option<u64>,
+    /// Whether a queue is saved at all (a fresh default queue is only saved once it is used).
+    saved_row: bool,
+    last_checkpoint: Instant,
+    /// The position is worth saving right now (a pause, a seek).
+    checkpoint_now: bool,
+    radio_inflight: bool,
+    /// The last track a radio was asked for. Not asked again until the queue's tail changes or
+    /// [`RADIO_RETRY`] has passed, so a failure is not retried on every tick.
+    radio_tried: Option<String>,
 }
 
 impl PlayerModel {
@@ -139,12 +171,33 @@ impl PlayerModel {
             shuffle_seed: seed_from_clock(),
             latency: Latency::default(),
             intent: None,
+            autoplay: true,
+            autoplay_store: None,
+            saver: None,
+            saved_fp: None,
+            saved_row: false,
+            last_checkpoint: Instant::now(),
+            checkpoint_now: false,
+            radio_inflight: false,
+            radio_tried: None,
         }
     }
 
     /// Wire a prepared backend into the model. The queue loads paused: nothing plays until the
     /// user asks (never autoplay).
     pub fn install(&mut self, prepared: Prepared, cx: &mut Context<Self>) {
+        self.install_with(prepared, None, cx);
+    }
+
+    /// [`install`](Self::install) with the queue a previous run saved: it comes back as it was
+    /// (current track, what is up next, shuffle and repeat), paused at the saved position. Without
+    /// a usable saved queue the backend's own starting queue is used.
+    pub fn install_with(
+        &mut self,
+        prepared: Prepared,
+        saved: Option<(Queue, u64)>,
+        cx: &mut Context<Self>,
+    ) {
         let Prepared {
             ports: Ports { resolver, engine },
             queue,
@@ -152,17 +205,27 @@ impl PlayerModel {
             library,
             ..
         } = prepared;
-        let mut driver = Driver::new(resolver, engine);
+        let mut driver = match saved.filter(|(q, _)| q.current().is_some()) {
+            Some((queue, position_ms)) => {
+                self.saved_row = true;
+                Driver::restored(resolver, engine, queue, position_ms)
+            }
+            None => {
+                let mut driver = Driver::new(resolver, engine);
+                let tracks = queue
+                    .into_iter()
+                    .map(|LibraryTrack { track }| track)
+                    .collect();
+                driver.edit_queue(|q| {
+                    q.play_context(tracks, 0);
+                });
+                driver
+            }
+        };
         driver.engine.set_volume(self.effective_volume());
-        let tracks = queue
-            .into_iter()
-            .map(|LibraryTrack { track }| track)
-            .collect();
-        driver.edit_queue(|q| {
-            q.play_context(tracks, 0);
-        });
-        // The queue starts paused on its first track: have it ready so the first Play is instant.
+        // The queue starts paused on its current track: have it ready so the first Play is instant.
         let first = driver.coordinator().queue().current().map(|e| e.track.clone());
+        self.saved_fp = Some(queue_fingerprint(driver.coordinator().queue()));
         self.driver = Some(driver);
         self.art_source = Some(art);
         self.library = Some(library);
@@ -171,6 +234,48 @@ impl PlayerModel {
             self.prefetch(&track);
         }
         self.sync(cx);
+    }
+
+    /// Where the autoplay switch is saved between runs (none in tests and the headless harness).
+    pub fn set_autoplay_store(&mut self, store: Option<Arc<dyn AutoplayStore>>) {
+        self.autoplay_store = store;
+    }
+
+    /// Apply the autoplay setting saved by a previous run (on when none was saved).
+    pub fn restore_autoplay(&mut self, saved: Option<bool>) {
+        if let Some(on) = saved {
+            self.autoplay = on;
+        }
+    }
+
+    pub fn autoplay(&self) -> bool {
+        self.autoplay
+    }
+
+    /// Turn autoplay on or off and remember the choice. What is already queued stays.
+    pub fn set_autoplay(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.autoplay = on;
+        self.radio_tried = None;
+        if let Some(store) = self.autoplay_store.clone() {
+            std::thread::spawn(move || store.save(on));
+        }
+        self.sync(cx);
+    }
+
+    /// Start saving the queue under `account_key` (an opaque id of the signed-in account). With
+    /// no key, or no store, nothing is saved.
+    pub fn set_queue_store(&mut self, store: Option<Arc<dyn QueueStore>>, account_key: Option<String>) {
+        self.saver = store.zip(account_key).map(|(s, key)| QueueSaver::new(s, key));
+    }
+
+    /// Sign-out: delete the saved queue and stop saving.
+    pub fn forget_saved_queue(&mut self) {
+        if let Some(saver) = self.saver.take() {
+            saver.forget();
+            // Waits for the delete: nothing of the account may outlive its sign-out.
+            saver.flush();
+        }
+        self.saved_row = false;
     }
 
     /// Where the "time to first audio" lines go (none in tests).
@@ -278,8 +383,14 @@ impl PlayerModel {
         self.library.clone()
     }
 
-    /// Silence the engine and drop the adapters (which reap their helper processes).
+    /// Silence the engine and drop the adapters (which reap their helper processes). The queue
+    /// and position are written down first (stopping resets the position).
     pub fn shutdown(&mut self) {
+        self.checkpoint_now = true;
+        self.persist();
+        if let Some(saver) = self.saver.as_ref() {
+            saver.flush();
+        }
         if let Some(mut d) = self.driver.take() {
             d.handle(Event::Stop);
         }
@@ -294,6 +405,7 @@ impl PlayerModel {
     /// `handle`, naming what the user did for the latency log (`None` = derived from the event).
     fn handle_as(&mut self, kind: Option<&'static str>, event: Event, cx: &mut Context<Self>) {
         self.trace(kind, &event);
+        self.checkpoint_now |= matches!(event, Event::Pause | Event::Seek { .. });
         if let Some(d) = self.driver.as_mut() {
             d.handle(event);
         }
@@ -548,7 +660,137 @@ impl PlayerModel {
             self.accent
                 .retarget(Instant::now(), Accent::fallback(), !cx.reduce_motion());
         }
+        self.persist();
+        self.top_up_radio(cx);
         cx.notify();
+    }
+
+    // ---- saving the queue --------------------------------------------------
+
+    /// Hand the saver what changed: the whole queue when it is different from what was saved
+    /// (or when nothing is saved yet and something is playing), otherwise only the position, at
+    /// most every [`CHECKPOINT_EVERY`] while playing and at once after a pause or a seek.
+    fn persist(&mut self) {
+        let (Some(saver), Some(d)) = (self.saver.as_ref(), self.driver.as_ref()) else {
+            return;
+        };
+        let c = d.coordinator();
+        let queue = c.queue();
+        let fp = queue_fingerprint(queue);
+        let now = Instant::now();
+        let playing = c.intent() == Intent::Playing;
+        let position = c.position_ms();
+        if self.saved_fp != Some(fp) || (!self.saved_row && playing) {
+            saver.save(queue.snapshot(), position);
+            self.saved_fp = Some(fp);
+            self.saved_row = true;
+            self.last_checkpoint = now;
+        } else if self.saved_row
+            && (self.checkpoint_now
+                || (playing && now.duration_since(self.last_checkpoint) >= CHECKPOINT_EVERY))
+        {
+            saver.checkpoint(position);
+            self.last_checkpoint = now;
+        }
+        self.checkpoint_now = false;
+    }
+
+    // ---- autoplay ----------------------------------------------------------
+
+    /// When the queue is about to run out (and the user is listening), ask for a radio seeded by
+    /// the last track and queue it behind everything else. Repeat-all wins: it loops the queue,
+    /// so there is nothing to run out of.
+    fn top_up_radio(&mut self, cx: &mut Context<Self>) {
+        if !self.autoplay || self.radio_inflight {
+            return;
+        }
+        let (Some(d), Some(library)) = (self.driver.as_ref(), self.library.clone()) else {
+            return;
+        };
+        let c = d.coordinator();
+        let queue = c.queue();
+        if c.intent() != Intent::Playing
+            || queue.repeat() == Repeat::All
+            || queue.upcoming().take(RADIO_LOW_WATER).count() >= RADIO_LOW_WATER
+        {
+            return;
+        }
+        let Some(seed) = queue_tail(queue) else {
+            return;
+        };
+        if self.radio_tried.as_deref() == Some(seed.as_str()) {
+            return;
+        }
+        self.radio_inflight = true;
+        self.radio_tried = Some(seed.clone());
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn({
+                    let seed = seed.clone();
+                    async move { library.radio(&seed) }
+                })
+                .await;
+            let _ = this.update(cx, |m, cx| m.radio_loaded(seed, found, cx));
+        })
+        .detach();
+    }
+
+    fn radio_loaded(
+        &mut self,
+        seed: String,
+        found: Result<Vec<crate::library::TrackRow>, apollo_domain::listing::LoadFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        self.radio_inflight = false;
+        let Ok(rows) = found else {
+            self.retry_radio_later(cx);
+            return;
+        };
+        let Some(d) = self.driver.as_ref() else { return };
+        let queue = d.coordinator().queue();
+        // The queue moved on while the radio was coming (a new list, a repeat-all, autoplay
+        // turned off): this answer is for a tail that is no longer the tail.
+        if !self.autoplay || queue.repeat() == Repeat::All || queue_tail(queue) != Some(seed) {
+            return;
+        }
+        let mut known: HashSet<String> = queue
+            .history()
+            .iter()
+            .chain(queue.current())
+            .chain(queue.upcoming())
+            .map(|e| e.track.video_id.as_str().to_owned())
+            .collect();
+        let mut tracks = Vec::new();
+        for row in rows {
+            if tracks.len() == RADIO_APPEND {
+                break;
+            }
+            if known.insert(row.track.video_id.as_str().to_owned()) {
+                self.hint_art(row.track.video_id.as_str(), row.thumbnail.as_deref());
+                tracks.push(row.track);
+            }
+        }
+        if tracks.is_empty() {
+            self.retry_radio_later(cx);
+            return;
+        }
+        self.edit_queue(cx, |q| {
+            q.append_radio(tracks);
+        });
+        self.prefetch_upcoming();
+    }
+
+    /// Forget that the tail was tried after [`RADIO_RETRY`], and look again then.
+    fn retry_radio_later(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RADIO_RETRY).await;
+            let _ = this.update(cx, |m, cx| {
+                m.radio_tried = None;
+                m.sync(cx);
+            });
+        })
+        .detach();
     }
 
     fn art_loaded(
@@ -665,6 +907,7 @@ impl PlayerModel {
             duration_ms: None,
             shuffle: false,
             repeat: Repeat::Off,
+            autoplay: self.autoplay,
             volume: self.volume,
             muted: self.muted,
             error: None,
@@ -769,6 +1012,30 @@ impl Default for PlayerModel {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The video that plays last as the queue stands: the last one up next, else the current one.
+fn queue_tail(queue: &Queue) -> Option<String> {
+    queue
+        .upcoming()
+        .last()
+        .or_else(|| queue.current())
+        .map(|e| e.track.video_id.as_str().to_owned())
+}
+
+/// A fingerprint of everything the saved queue holds, so a changed queue is told from a moved
+/// position without copying it.
+fn queue_fingerprint(queue: &Queue) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for e in queue.history() {
+        e.id.get().hash(&mut h);
+    }
+    queue.current().map(|e| e.id.get()).hash(&mut h);
+    for e in queue.upcoming() {
+        e.id.get().hash(&mut h);
+    }
+    (queue.shuffle(), queue.repeat() as u8).hash(&mut h);
+    h.finish()
 }
 
 fn seed_from_clock() -> u64 {

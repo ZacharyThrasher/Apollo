@@ -69,6 +69,12 @@ pub trait LibrarySource: Send + Sync {
         Err(LoadFailure::Other)
     }
 
+    /// What plays after `video_id` when the queue runs out: the song's radio, without the seed
+    /// itself. Autoplay appends these to the queue.
+    fn radio(&self, _video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
     /// Cover art for a thumbnail URL a collection or row carried.
     fn artwork(&self, url: &str) -> Option<DecodedArt>;
 
