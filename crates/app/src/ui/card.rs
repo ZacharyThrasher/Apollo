@@ -104,6 +104,9 @@ pub struct Card {
     focus: FocusHandle,
     accent: Accent,
     on_open: Rc<dyn Fn(&mut Window, &mut App) + 'static>,
+    /// Called when the pointer arrives: the card plays something, so the player can start
+    /// resolving it before the click.
+    on_intent: Option<Rc<dyn Fn(&mut App) + 'static>>,
 }
 
 impl Card {
@@ -125,6 +128,7 @@ impl Card {
             focus: focus.clone(),
             accent,
             on_open: Rc::new(on_open),
+            on_intent: None,
         }
     }
 }
@@ -133,6 +137,12 @@ impl Card {
     /// Draws the artwork as a circle (an artist).
     pub fn circular(mut self, circle: bool) -> Self {
         self.circle = circle;
+        self
+    }
+
+    /// Runs when the pointer arrives on the card (see `PlayerModel::hint_play`).
+    pub fn on_intent(mut self, f: impl Fn(&mut App) + 'static) -> Self {
+        self.on_intent = Some(Rc::new(f));
         self
     }
 }
@@ -152,6 +162,7 @@ impl RenderOnce for Card {
             None => self.title.clone(),
         };
         let open = self.on_open;
+        let on_intent = self.on_intent;
         let open_key = open.clone();
         let title = self.title.clone();
         let id = self.id.clone();
@@ -176,6 +187,11 @@ impl RenderOnce for Card {
             .role(gpui::Role::Button)
             .aria_label(label)
             .on_hover(move |hovered, _, cx| {
+                if *hovered {
+                    if let Some(f) = &on_intent {
+                        f(cx);
+                    }
+                }
                 fade.update(cx, |s, cx| {
                     s.set(*hovered, Instant::now(), animations);
                     cx.notify();

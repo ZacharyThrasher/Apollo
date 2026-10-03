@@ -101,13 +101,22 @@ def _enable_player_cache():
         return False
 
 
+def _client_of(url):
+    """The YouTube client that produced a stream URL (its `c=` query value, e.g. WEB_REMIX)."""
+    try:
+        from urllib.parse import parse_qs, urlsplit
+        return (parse_qs(urlsplit(url).query).get('c') or [''])[0][:24]
+    except Exception:
+        return ''
+
+
 def _jar_text(ydl):
     buf = io.StringIO()
     ydl.cookiejar.save(buf, ignore_discard=True, ignore_expires=True)
     return buf.getvalue()
 
 
-def _make_ydl(deno, log):
+def _make_ydl(deno, log, extractor_args=None):
     import yt_dlp
     params = dict(
         logger=log,
@@ -124,6 +133,8 @@ def _make_ydl(deno, log):
     )
     if deno:
         params['js_runtimes'] = {'deno': {'path': deno}}
+    if isinstance(extractor_args, dict):
+        params['extractor_args'] = extractor_args
     ydl = yt_dlp.YoutubeDL(params)
     ydl.cache = _MemCache()
     return ydl
@@ -155,7 +166,7 @@ def serve():
             break
         try:
             if op == 'init':
-                ydl = _make_ydl(req.get('deno'), log)
+                ydl = _make_ydl(req.get('deno'), log, req.get('extractor_args'))
                 jar_seen = _jar_text(ydl)
                 _reply(out, {
                     'event': 'ready',
@@ -185,6 +196,7 @@ def serve():
                     continue
                 reply = {
                     'id': rid, 'ok': True,
+                    'client': _client_of(info.get('url')),
                     'info': {k: info[k] for k in _INFO_KEYS if k in info},
                     'phases': log.phases,
                     'ms': int((time.monotonic() - t0) * 1000),

@@ -316,6 +316,48 @@ mod imp {
             }
         }
 
+        // ------------------------------------------------- 6. worker settings compared
+        out.say("\n[6] AFTER, tuned: which yt-dlp setting makes a cold click fastest? (a fresh worker per setting, started before the first click; cold clicks on distinct tracks)");
+        let skip: (&str, &[&str]) = ("player_skip", &["webpage", "initial_data"]);
+        let variants: Vec<(&str, Vec<(&str, &[&str])>)> = vec![
+            ("yt-dlp defaults", vec![]),
+            ("skip page + initial data", vec![skip]),
+            ("skip + web_music only", vec![skip, ("player_client", &["web_music"])]),
+            ("skip + tv_downgraded only", vec![skip, ("player_client", &["tv_downgraded"])]),
+            ("skip + web_creator only", vec![skip, ("player_client", &["web_creator"])]),
+        ];
+        let mut tuned: Vec<(String, Vec<u64>, usize)> = Vec::new();
+        for (name, args) in variants {
+            let mut cfg = base.clone();
+            cfg.cache = None;
+            if let Some(w) = cfg.warm.as_mut() {
+                w.prewarm = 1;
+                w.youtube_args = args.iter().map(|(k, v)| ((*k).to_owned(), v.iter().map(|x| (*x).to_owned()).collect())).collect();
+            }
+            let mut r = rig(cfg, &account);
+            let t0 = Instant::now();
+            while r.resolver.warm_status().map_or(true, |(_, idle, _, _)| idle < 1) && t0.elapsed() < Duration::from_secs(40) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let mut times = Vec::new();
+            let mut failed = 0usize;
+            for req in mint(&main_ids[..main_ids.len().min(4)], 1) {
+                let (ms, res) = click(&mut r, req);
+                match res {
+                    Ok(_) => times.push(ms),
+                    Err(e) => {
+                        failed += 1;
+                        out.say(format!("  {name}: a request failed: {e:?}"));
+                    }
+                }
+            }
+            out.say(format!("  {name}: click -> stream ready: {} (failed: {failed})", stats(&times)));
+            for line in r.resolver.diagnostics().iter().filter(|l| l.contains("src=warm")).take(4) {
+                out.say(format!("    {line}"));
+            }
+            tuned.push((name.to_owned(), times, failed));
+        }
+
         // ------------------------------------------------------------- summary
         out.say("\n=== SUMMARY (click -> playable stream URL) ===");
         out.say(format!("BEFORE  one yt-dlp per track        median {}", secs(median(&legacy))));
@@ -331,6 +373,9 @@ mod imp {
         }
         if let Some((o, a)) = engine_ms {
             out.say(format!("then    libmpv open {o} ms, audio moving {a} ms"));
+        }
+        for (name, times, failed) in &tuned {
+            out.say(format!("TUNED   {name:<28} median {} (failed {failed})", secs(median(times))));
         }
         let _ = worker_ready_ms;
         finish(&out, &out_path);
