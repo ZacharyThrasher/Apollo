@@ -4,3 +4,6 @@
 pub mod model;
 pub mod playback;
 pub mod queue;
+
+#[cfg(test)]
+mod fuzz_tests;

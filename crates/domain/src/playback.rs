@@ -143,7 +143,8 @@ struct Active {
     entry: QueueEntryId,
     /// Began from automatic progression (not a direct user request).
     auto: bool,
-    opened_paused: bool,
+    /// What the engine was last told (via Open/Pause/Resume) about pausing.
+    engine_paused: bool,
     reresolved: bool,
     pending_start_ms: u64,
 }
@@ -226,6 +227,14 @@ impl Coordinator {
     /// The load that currently owns audio output, if any.
     pub fn active_load(&self) -> Option<LoadId> {
         self.active.as_ref().map(|a| a.load)
+    }
+    /// The queue entry the active load belongs to.
+    pub fn active_entry(&self) -> Option<QueueEntryId> {
+        self.active.as_ref().map(|a| a.entry)
+    }
+    #[cfg(test)]
+    pub(crate) fn repeat_is_one_with_preload(&self) -> bool {
+        self.queue.repeat() == crate::queue::Repeat::One && self.preload.is_some()
     }
     pub fn preload_load(&self) -> Option<LoadId> {
         self.preload.as_ref().map(|p| p.load)
@@ -333,7 +342,7 @@ impl Coordinator {
                     load: p.load,
                     entry: entry_id,
                     auto,
-                    opened_paused: self.intent == Intent::Paused,
+                    engine_paused: self.intent == Intent::Paused,
                     reresolved: false,
                     pending_start_ms: resume_ms,
                 };
@@ -342,7 +351,7 @@ impl Coordinator {
                         fx.push(Effect::Open {
                             load: p.load,
                             lease,
-                            start_paused: a.opened_paused,
+                            start_paused: a.engine_paused,
                             start_ms: a.pending_start_ms,
                         });
                         a.pending_start_ms = 0;
@@ -361,7 +370,7 @@ impl Coordinator {
             load,
             entry: entry_id,
             auto,
-            opened_paused: false,
+            engine_paused: false,
             reresolved: false,
             pending_start_ms: resume_ms,
         });
@@ -375,12 +384,22 @@ impl Coordinator {
     }
 
     fn on_play(&mut self, fx: &mut Vec<Effect>) {
+        let was_paused = self.intent == Intent::Paused;
         self.intent = Intent::Playing;
         match self.phase {
             Phase::Paused => {
-                if let Some(a) = &self.active {
+                if let Some(a) = &mut self.active {
                     fx.push(Effect::Resume { load: a.load });
+                    a.engine_paused = false;
                     self.phase = Phase::Playing;
+                }
+            }
+            // Pause was applied to the engine before the seek finished; undo it now,
+            // otherwise Seeked would report Playing while the engine stays paused.
+            Phase::Seeking if was_paused => {
+                if let Some(a) = &mut self.active {
+                    fx.push(Effect::Resume { load: a.load });
+                    a.engine_paused = false;
                 }
             }
             Phase::Idle | Phase::Failed if self.queue.current().is_some() => {
@@ -398,14 +417,16 @@ impl Coordinator {
         self.intent = Intent::Paused;
         match self.phase {
             Phase::Playing | Phase::Buffering => {
-                if let Some(a) = &self.active {
+                if let Some(a) = &mut self.active {
                     fx.push(Effect::Pause { load: a.load });
+                    a.engine_paused = true;
                     self.phase = Phase::Paused;
                 }
             }
             Phase::Seeking => {
-                if let Some(a) = &self.active {
+                if let Some(a) = &mut self.active {
                     fx.push(Effect::Pause { load: a.load });
+                    a.engine_paused = true;
                 }
             }
             // Loading: intent is applied when the engine reports Opened.
@@ -451,11 +472,11 @@ impl Coordinator {
                 if a.load == load {
                     match result {
                         Ok(lease) => {
-                            a.opened_paused = self.intent == Intent::Paused;
+                            a.engine_paused = self.intent == Intent::Paused;
                             fx.push(Effect::Open {
                                 load,
                                 lease,
-                                start_paused: a.opened_paused,
+                                start_paused: a.engine_paused,
                                 start_ms: a.pending_start_ms,
                             });
                             a.pending_start_ms = 0;
@@ -541,12 +562,13 @@ impl Coordinator {
         self.failures = 0;
         let want_paused = self.intent == Intent::Paused;
         // A pause/play pressed while loading must win over what Open requested.
-        if want_paused != a.opened_paused {
+        if want_paused != a.engine_paused {
             fx.push(if want_paused {
                 Effect::Pause { load: a.load }
             } else {
                 Effect::Resume { load: a.load }
             });
+            a.engine_paused = want_paused;
         }
         self.phase = if want_paused {
             Phase::Paused
@@ -565,8 +587,9 @@ impl Coordinator {
             Failure::Device => {
                 // Pause conservatively; a device event is not an instruction to skip.
                 self.intent = Intent::Paused;
-                if let Some(a) = &self.active {
+                if let Some(a) = &mut self.active {
                     fx.push(Effect::Pause { load: a.load });
+                    a.engine_paused = true;
                 }
                 if self.is_loaded() {
                     self.phase = Phase::Paused;
@@ -616,15 +639,29 @@ impl Coordinator {
                 load: p.load,
                 entry: id,
                 auto: true,
-                opened_paused: false,
+                engine_paused: false,
                 reresolved: false,
                 pending_start_ms: 0,
             });
-            self.phase = Phase::Playing;
             self.position_ms = 0;
             self.duration_ms = None;
             self.failures = 0;
+            // The engine moved on by itself and is playing; honor a pause the user
+            // asked for in the meantime.
+            if self.intent == Intent::Paused {
+                fx.push(Effect::Pause { load: p.load });
+                if let Some(a) = &mut self.active {
+                    a.engine_paused = true;
+                }
+                self.phase = Phase::Paused;
+            } else {
+                self.phase = Phase::Playing;
+            }
             self.maybe_preload(fx);
+        } else {
+            // Cannot happen when the preload matched `peek_next`; fail safe.
+            self.phase = Phase::Idle;
+            self.intent = Intent::Paused;
         }
     }
 
