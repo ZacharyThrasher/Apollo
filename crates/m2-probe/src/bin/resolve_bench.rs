@@ -319,12 +319,15 @@ mod imp {
         // ------------------------------------------------- 6. worker settings compared
         out.say("\n[6] AFTER, tuned: which yt-dlp setting makes a cold click fastest? (a fresh worker per setting, started before the first click; cold clicks on distinct tracks)");
         let skip: (&str, &[&str]) = ("player_skip", &["webpage", "initial_data"]);
+        // The owner chose "always best" (the Premium opus, format 774, about 256 kbps): which
+        // settings still get it, and how fast?
         let variants: Vec<(&str, Vec<(&str, &[&str])>, bool)> = vec![
             ("yt-dlp defaults", vec![], false),
-            ("skip page+initial", vec![skip], false),
-            ("skip + www watch URL", vec![skip], true),
-            ("skip + www + embedded,tv", vec![skip, ("player_client", &["web_embedded", "tv_downgraded"])], true),
-            ("skip + www + embedded only", vec![skip, ("player_client", &["web_embedded"])], true),
+            ("watch URL only", vec![], true),
+            ("skip + watch URL + tv only", vec![skip, ("player_client", &["tv_downgraded"])], true),
+            ("skip + watch URL + tv,creator", vec![skip, ("player_client", &["tv_downgraded", "web_creator"])], true),
+            ("skip + music URL + tv,music", vec![skip, ("player_client", &["tv_downgraded", "web_music"])], false),
+            ("page + tv,music clients", vec![("player_client", &["tv_downgraded", "web_music"])], false),
         ];
         let mut tuned: Vec<(String, Vec<u64>, usize)> = Vec::new();
         for (name, args, www) in variants {

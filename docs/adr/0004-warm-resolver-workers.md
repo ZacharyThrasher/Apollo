@@ -69,3 +69,8 @@ the fast path, and it only runs because the music URL adds that client. Clicks n
 plain watch URL with the embedded and tv clients only: about 0.8 s cold, measured. Requests
 carry `site` (`www` or `music`) and the arguments; the defaults (music URL, all clients) remain
 for background work and for the retry.
+
+Decision 2026-10-03 (owner): "always best". Production resolves every request, clicks included, with
+yt-dlp's defaults and the Premium stream; `WarmConfig::fast_clicks()` stays in the code as an opt-in
+profile (cold click about 0.8 s at about 130 kbps). The bench now searches for settings that keep
+the Premium stream and are faster than the defaults.

@@ -53,7 +53,8 @@ pub struct WarmConfig {
 }
 
 impl WarmConfig {
-    /// Production defaults. A click (someone is waiting) asks only the embedded and tv clients
+    /// A faster, lower-quality profile for clicks (not the production default: the owner chose
+    /// "always best", 2026-10-03). A click (someone is waiting) asks only the embedded and tv clients
     /// about the plain watch URL and skips yt-dlp's page and initial-data requests: about 0.8 s
     /// instead of 3 to 4 s, measured on the owner's PC, at the price of the plain ~130 kbps opus
     /// stream. Everything resolved ahead of time (queue, hover, page open) keeps yt-dlp's
@@ -160,7 +161,7 @@ impl ResolverConfig {
             max_concurrent: 2,
             max_stdout_bytes: 8 * 1024 * 1024,
             url_policy: UrlPolicy::production(),
-            warm: Some(WarmConfig::fast_clicks()),
+            warm: Some(WarmConfig::default()),
             cache: Some(CacheConfig::default()),
             pinned: Some(PinnedTools::m0_baseline()),
             #[cfg(feature = "test-support")]
@@ -182,12 +183,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_clicks_are_fast_and_background_work_keeps_the_defaults() {
+    fn production_uses_yt_dlp_defaults_for_every_request_and_fast_clicks_stay_opt_in() {
         let w = ResolverConfig::production(Path::new("t"), PathBuf::from("r")).warm.unwrap();
-        assert!(w.youtube_args.is_empty() && !w.watch_url, "background: yt-dlp defaults");
-        let fast = w.foreground_youtube_args.expect("clicks use their own arguments");
-        assert!(fast.iter().any(|(k, v)| k == "player_skip" && v.contains(&"webpage".to_owned())));
-        assert!(w.foreground_watch_url);
+        assert!(w.youtube_args.is_empty() && !w.watch_url);
+        assert!(w.foreground_youtube_args.is_none() && !w.foreground_watch_url);
+        let fast = WarmConfig::fast_clicks();
+        let args = fast.foreground_youtube_args.expect("the opt-in profile has click arguments");
+        assert!(args.iter().any(|(k, v)| k == "player_skip" && v.contains(&"webpage".to_owned())));
+        assert!(fast.foreground_watch_url);
         assert!(ResolverConfig::production(Path::new("t"), PathBuf::from("r")).legacy().warm.is_none());
     }
 }
