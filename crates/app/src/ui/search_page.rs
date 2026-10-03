@@ -218,14 +218,19 @@ impl SearchPage {
 
     fn play_selected(&mut self, _: &PlaySelected, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
-            self.player.update(cx, |m, cx| m.play_now(song.track, cx));
+            self.player.update(cx, |m, cx| {
+                m.hint_art(song.track.video_id.as_str(), song.thumbnail.as_deref());
+                m.play_now(song.track, cx)
+            });
         }
     }
 
     fn queue_selected(&mut self, _: &QueueSelected, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
-            self.player
-                .update(cx, |m, cx| m.add_to_queue(song.track, cx));
+            self.player.update(cx, |m, cx| {
+                m.hint_art(song.track.video_id.as_str(), song.thumbnail.as_deref());
+                m.add_to_queue(song.track, cx)
+            });
         }
     }
 
@@ -422,15 +427,23 @@ impl SearchPage {
                         selected: list_focused && self.selected == Some(index),
                         accent,
                         on_play: {
-                            let (player, track) = (self.player.clone(), song.track.clone());
+                            let (player, track, thumb) =
+                                (self.player.clone(), song.track.clone(), song.thumbnail.clone());
                             Box::new(move |_, cx| {
-                                player.update(cx, |m, cx| m.play_now(track.clone(), cx))
+                                player.update(cx, |m, cx| {
+                                    m.hint_art(track.video_id.as_str(), thumb.as_deref());
+                                    m.play_now(track.clone(), cx)
+                                })
                             })
                         },
                         on_queue: {
-                            let (player, track) = (self.player.clone(), song.track.clone());
+                            let (player, track, thumb) =
+                                (self.player.clone(), song.track.clone(), song.thumbnail.clone());
                             Box::new(move |_, cx| {
-                                player.update(cx, |m, cx| m.add_to_queue(track.clone(), cx))
+                                player.update(cx, |m, cx| {
+                                    m.hint_art(track.video_id.as_str(), thumb.as_deref());
+                                    m.add_to_queue(track.clone(), cx)
+                                })
                             })
                         },
                     }

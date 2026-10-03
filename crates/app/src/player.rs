@@ -255,6 +255,14 @@ impl PlayerModel {
         seed
     }
 
+    /// Tells the artwork source where a listing keeps a track's thumbnail, ahead of the track
+    /// being queued (a row that has none is simply not hinted).
+    pub fn hint_art(&self, video_id: &str, thumbnail: Option<&str>) {
+        if let (Some(source), Some(url)) = (self.art_source.as_ref(), thumbnail) {
+            source.hint(video_id, url);
+        }
+    }
+
     /// Replace the queue with `tracks` and start playing. `start` is the first track's index
     /// (default: the first, or a random one when shuffling); `shuffle` sets the queue's shuffle
     /// on or off, `None` keeping the current setting.

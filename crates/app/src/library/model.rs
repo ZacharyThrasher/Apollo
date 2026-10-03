@@ -591,7 +591,16 @@ impl LibraryModel {
         if tracks.is_empty() {
             return;
         }
+        let thumbs: Vec<(String, String)> = detail
+            .listing
+            .items()
+            .iter()
+            .filter_map(|row| Some((row.track.video_id.as_str().to_owned(), row.thumbnail.clone()?)))
+            .collect();
         self.player.update(cx, |p, cx| {
+            for (id, url) in &thumbs {
+                p.hint_art(id, Some(url));
+            }
             p.play_tracks(tracks, request.start, request.shuffle, cx)
         });
     }
