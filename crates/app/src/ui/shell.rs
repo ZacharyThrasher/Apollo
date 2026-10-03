@@ -8,8 +8,10 @@ use gpui::{
     ParentElement, Render, Styled, Window,
 };
 
+use crate::account::AccountModel;
 use crate::player::PlayerModel;
 use crate::style::{self, color};
+use crate::ui::account_page::AccountPage;
 use crate::ui::nav::{NavRail, Route};
 use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
@@ -45,26 +47,44 @@ pub fn bind_keys(cx: &mut App) {
 
 pub struct Shell {
     player: Entity<PlayerModel>,
+    account: Entity<AccountModel>,
+    account_page: Entity<AccountPage>,
+    /// The first time the account turns out to be signed out, the window opens on Settings.
+    routed_to_sign_in: bool,
     route: Route,
     nav_expanded: bool,
     nav_toggled: bool,
     queue_open: bool,
     root_focus: FocusHandle,
     nav_toggle: FocusHandle,
-    nav_items: [FocusHandle; 3],
+    nav_items: [FocusHandle; 4],
     bar: BarFocus,
     progress: Entity<SliderState>,
     volume: Entity<SliderState>,
 }
 
 impl Shell {
+    /// A shell over the simulated account, already signed in (windows that only care about the
+    /// player, and tests).
     pub fn new(player: Entity<PlayerModel>, cx: &mut Context<Self>) -> Self {
+        let ports = crate::backend::account::ports();
+        crate::backend::account::start(&ports, true);
+        let account = cx.new(|cx| AccountModel::new(ports, cx));
+        account.update(cx, |m, cx| m.startup_finished(cx));
+        Self::with_account(player, account, cx)
+    }
+
+    pub fn with_account(
+        player: Entity<PlayerModel>,
+        account: Entity<AccountModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Tab order: nav toggle, nav items, then the player bar left to right.
         let stop = |cx: &mut Context<Self>, index: isize| {
             cx.focus_handle().tab_index(index).tab_stop(true)
         };
         let nav_toggle = stop(cx, 1);
-        let nav_items = [stop(cx, 2), stop(cx, 3), stop(cx, 4)];
+        let nav_items = [stop(cx, 2), stop(cx, 3), stop(cx, 4), stop(cx, 5)];
         let bar = BarFocus {
             shuffle: stop(cx, 10),
             previous: stop(cx, 11),
@@ -79,11 +99,17 @@ impl Shell {
         };
         let progress = cx.new(|_| SliderState::default());
         let volume = cx.new(|_| SliderState::default());
+        let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
+        cx.observe(&account, |this, _, cx| this.account_changed(cx))
+            .detach();
         cx.observe(&progress, |_, _, cx| cx.notify()).detach();
         cx.observe(&volume, |_, _, cx| cx.notify()).detach();
-        Self {
+        let mut shell = Self {
             player,
+            account,
+            account_page,
+            routed_to_sign_in: false,
             route: Route::Home,
             nav_expanded: false,
             nav_toggled: false,
@@ -94,7 +120,18 @@ impl Shell {
             bar,
             progress,
             volume,
+        };
+        shell.account_changed(cx);
+        shell
+    }
+
+    /// Opens Settings once if the startup check ends with nobody signed in.
+    fn account_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.routed_to_sign_in && self.account.read(cx).is_signed_out() {
+            self.routed_to_sign_in = true;
+            self.route = Route::Settings;
         }
+        cx.notify();
     }
 
     pub fn route(&self) -> Route {
@@ -148,6 +185,7 @@ impl Render for Shell {
                 });
             }
         })
+        .attention(self.account.read(cx).needs_attention())
         .on_route({
             let shell = shell.clone();
             move |route, _, cx| {
@@ -170,7 +208,10 @@ impl Render for Shell {
                 style::text_style(div(), typography::PAGE_TITLE, cx)
                     .text_color(color::text_primary())
                     .child(self.route.title()),
-            );
+            )
+            .when(self.route == Route::Settings, |page| {
+                page.child(self.account_page.clone())
+            });
 
         let bar = PlayerBar {
             player: self.player.clone(),

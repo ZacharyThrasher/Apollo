@@ -33,6 +33,8 @@ icons! {
     SearchFilled => "search-filled",
     LibraryRegular => "library-regular",
     LibraryFilled => "library-filled",
+    SettingsRegular => "settings-regular",
+    SettingsFilled => "settings-filled",
     Navigation => "navigation-regular",
     Previous => "previous-regular",
     Next => "next-regular",
