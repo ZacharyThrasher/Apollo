@@ -1,4 +1,5 @@
 pub mod account_page;
+pub mod anchor;
 pub mod art_tile;
 pub mod button;
 pub mod card;

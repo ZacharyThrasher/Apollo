@@ -24,6 +24,7 @@ use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::search::{failure_text, SearchModel, SearchState};
 use crate::style::{self, color};
+use crate::ui::anchor;
 use crate::ui::button::{focus_ring, keyboard_focused, IconButton};
 use crate::ui::card::{grid, heading, tile, Card};
 use crate::ui::playlist_picker::PlaylistPicker;
@@ -263,10 +264,12 @@ impl SearchPage {
         cx: &mut Context<Self>,
     ) {
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
+            let at = playlist_anchor(self.selected.unwrap_or_default());
             self.picker.update(cx, |p, cx| {
-                p.open(
+                p.open_at(
                     song.track.video_id.as_str(),
                     song.track.title.clone(),
+                    &at,
                     window,
                     cx,
                 )
@@ -437,6 +440,11 @@ impl SearchPage {
     }
 }
 
+/// Where the add-to-playlist popover of song row `index` is anchored.
+fn playlist_anchor(index: usize) -> String {
+    format!("song-playlist-{index}")
+}
+
 impl SearchPage {
     fn results_list(
         &self,
@@ -480,7 +488,13 @@ impl SearchPage {
                             let (picker, track) = (self.picker.clone(), song.track.clone());
                             Box::new(move |window, cx| {
                                 picker.update(cx, |p, cx| {
-                                    p.open(track.video_id.as_str(), track.title.clone(), window, cx)
+                                    p.open_at(
+                                        track.video_id.as_str(),
+                                        track.title.clone(),
+                                        &playlist_anchor(index),
+                                        window,
+                                        cx,
+                                    )
                                 })
                             })
                         },
@@ -759,7 +773,7 @@ impl RenderOnce for SongRow {
             });
 
         // Like and add to playlist: their room is always there too; the heart stays once liked.
-        let slot = || div().size(px(ACTION_SIZE)).flex_none();
+        let slot = || div().relative().size(px(ACTION_SIZE)).flex_none();
         let like = slot()
             .debug_selector(move || format!("song-like-{id}"))
             .when(active || liked, |d| {
@@ -769,6 +783,7 @@ impl RenderOnce for SongRow {
             });
         let playlist = slot()
             .debug_selector(move || format!("song-playlist-{id}"))
+            .child(anchor::probe(playlist_anchor(id)))
             .when(active, |d| {
                 d.child(playlist_action(("song-playlist", id), move |w, cx| {
                     on_playlist(w, cx)

@@ -93,5 +93,13 @@ Applied to the pages opened from Search cards and artist pages (`ui/library.rs`,
 5. **States:** the shared skeleton while loading; an error is "Couldn't load this artist" (or album, playlist) with Retry; an artist page with nothing on it says "Nothing to show" with Back.
 6. **Keyboard:** Search cards and artist-page cards are tab stops; Enter opens the focused card (its own key context, so a list's Enter does not play the selected row instead). Space stays play/pause.
 
+## Like and playlist decisions (coordinator, 2026-10-03)
+Applied to the heart and add-to-playlist actions (`ui/row_actions.rs`, `ui/playlist_picker.rs`, `ui/toast.rs`, `ui/queue_panel.rs`).
+1. **Heart:** filled Fluent heart in text.primary when liked, outline in text.secondary when not (the shuffle and repeat on/off pair). It sits leftmost in the player bar's right-hand block, and on Now Playing's title line with add-to-playlist beside it. The bar has no add-to-playlist (width).
+2. **Rows:** track rows in the Library, Search and the queue panel reserve a 32px slot for the heart so nothing shifts. It shows on hover or under the keyboard cursor and stays once the track is liked. Library and Search rows add an add-to-playlist action beside it; queue rows have the heart only. Keys on a list: `l` likes the selected row, `p` adds it to a playlist (not in the queue).
+3. **Playlist picker:** an anchored popover, not a modal. It opens under the button that opened it with the right edges lined up (the `p` key anchors to the selected row's action), above it when there is no room below, and centred only with no anchor. 280px wide, 320px at most with scroll, bg.overlay, 8px radius, border.subtle, 40px rows without art, no scrim. Esc or a click outside closes it.
+4. **Rows in the picker:** a playlist that already holds the track shows a check in text.secondary and does nothing when chosen. Adding a duplicate is skipped silently. No playlists: "No playlists yet" with no action. Load failure: "Couldn't load playlists" with Retry.
+5. **Errors:** a failed like or add rolls back and leaves a toast above the player bar: warning icon and up to six words on bg.overlay in text.secondary. It stays 4 s or until clicked, and fades in and out over 150 ms (appears and goes at once under reduced motion).
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

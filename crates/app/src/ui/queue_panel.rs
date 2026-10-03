@@ -1,9 +1,9 @@
 //! Queue panel: a 320px right panel with what has played, what is playing and what is up next.
 //!
 //! The list is virtual (a queue can hold thousands of tracks) and keyboard-first: the list is
-//! one tab stop with an arrow-key cursor. Enter plays, Delete removes, Alt+Up/Down reorders;
+//! one tab stop with an arrow-key cursor. Enter plays, L likes, Delete removes, Alt+Up/Down reorders;
 //! the mouse can click a row to play it, drag an up-next row to reorder, or use the row's
-//! remove button.
+//! heart and remove button.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -19,12 +19,14 @@ use gpui::{
 };
 
 use crate::assets::Icon;
+use crate::library::LibraryWrites;
 use crate::player::{format_time, PlayerModel, QueueRow, QueueView, Status};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::player_bar::text_line;
 use crate::ui::playing_row;
+use crate::ui::row_actions::{heart_action, ACTION_SIZE};
 use crate::ui::transport::on_off;
 
 actions!(
@@ -34,6 +36,7 @@ actions!(
         CursorDown,
         PlayCursor,
         RemoveCursor,
+        LikeCursor,
         MoveCursorUp,
         MoveCursorDown
     ]
@@ -64,6 +67,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", PlayCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("delete", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("backspace", RemoveCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", MoveCursorDown, Some(KEY_CONTEXT)),
     ]);
@@ -127,6 +131,14 @@ impl QueueView {
         }
     }
 
+    fn row_by_id(&self, id: QueueEntryId) -> Option<&QueueRow> {
+        self.history
+            .iter()
+            .chain(self.current.iter())
+            .chain(self.upcoming.iter())
+            .find(|r| r.id == id)
+    }
+
     /// Entry ids in the order the cursor visits them.
     fn ordered_ids(&self) -> Vec<QueueEntryId> {
         self.history
@@ -187,6 +199,7 @@ impl Render for DragGhost {
 
 pub struct QueuePanel {
     player: Entity<PlayerModel>,
+    writes: Entity<LibraryWrites>,
     focus_shuffle: FocusHandle,
     focus_repeat: FocusHandle,
     focus_clear: FocusHandle,
@@ -205,6 +218,7 @@ pub struct QueuePanel {
 impl QueuePanel {
     pub fn new(
         player: Entity<PlayerModel>,
+        writes: Entity<LibraryWrites>,
         on_search: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -212,6 +226,7 @@ impl QueuePanel {
             cx.focus_handle().tab_index(index).tab_stop(true)
         };
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
+        cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         Self {
             focus_shuffle: stop(cx, TAB_SHUFFLE),
             focus_repeat: stop(cx, TAB_REPEAT),
@@ -219,6 +234,7 @@ impl QueuePanel {
             focus_list: stop(cx, TAB_LIST),
             focus_search: stop(cx, TAB_SEARCH),
             player,
+            writes,
             scroll: UniformListScrollHandle::new(),
             cursor: None,
             view: QueueView::default(),
@@ -317,6 +333,18 @@ impl QueuePanel {
     fn remove_cursor(&mut self, cx: &mut Context<Self>) {
         if let Some(id) = self.cursor {
             self.remove(id, cx);
+        }
+    }
+
+    /// Like or unlike the track under the cursor.
+    fn like_cursor(&mut self, cx: &mut Context<Self>) {
+        let view = self.fresh_view(cx);
+        let Some(id) = self.cursor else {
+            return;
+        };
+        let video = view.row_by_id(id).map(|r| r.video_id.clone());
+        if let Some(video) = video {
+            self.writes.update(cx, |w, cx| w.toggle_like(&video, cx));
         }
     }
 
@@ -494,6 +522,21 @@ impl QueuePanel {
                     .text_color(color::text_secondary()),
             );
 
+        // The heart: room is always reserved; it shows on hover or under the cursor, and stays
+        // once the track is liked.
+        let liked = self.writes.read(cx).is_liked(&row.video_id);
+        let heart = div()
+            .debug_selector(|| format!("queue-like-{ix}"))
+            .flex_none()
+            .size(px(ACTION_SIZE))
+            .when(!(liked || at_cursor), |d| {
+                d.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
+            })
+            .child(heart_action(("queue-like", ix), liked, {
+                let (writes, video) = (self.writes.clone(), row.video_id.clone());
+                move |_, cx| writes.update(cx, |w, cx| w.toggle_like(&video, cx))
+            }));
+
         let surface = div()
             .id(("queue-row", ix))
             .debug_selector(|| format!("queue-row-{ix}"))
@@ -558,6 +601,7 @@ impl QueuePanel {
                         cx,
                     )),
             )
+            .child(heart)
             .child(
                 div()
                     .relative()
@@ -729,6 +773,7 @@ impl Render for QueuePanel {
             .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &PlayCursor, _, cx| this.play_cursor(cx)))
             .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
+            .on_action(cx.listener(|this, _: &LikeCursor, _, cx| this.like_cursor(cx)))
             .on_action(cx.listener(|this, _: &MoveCursorUp, _, cx| this.move_cursor(-1, cx)))
             .on_action(cx.listener(|this, _: &MoveCursorDown, _, cx| this.move_cursor(1, cx)))
             .flex_1()
