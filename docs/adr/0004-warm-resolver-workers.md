@@ -51,3 +51,15 @@ memory and a few extra requests to hide that wait.
 
 ## Measurements
 See `docs/resolver-speed.md` (run `apollo-resolve-bench.exe` on the PC).
+
+## Addendum 2026-10-03: fast clicks, full-quality background work
+Measured on the owner's PC (bench section [6], `docs/resolver-speed.md`): skipping yt-dlp's watch-page
+and initial-data requests takes a cold click from about 3.3 s to about 1.9 s, but the embedded
+client then serves the plain opus stream (itag 251, about 130 kbps) where yt-dlp's defaults get
+the Premium opus stream (itag 774, about 256 kbps) from the web music client. So
+`WarmConfig::fast_clicks()` (production) uses the skip arguments only when someone is waiting on
+the result (a click); everything resolved ahead (queue lookahead, hover, page open) and the
+fallback keep the defaults. A click that gets no usable stream with the fast arguments (for
+example an embedding-restricted track) is retried once with the defaults. The arguments travel
+with each resolve request, so one worker serves both kinds. Skipping client configs, or limiting
+the clients, gave no playable format in the measurements and is not used.

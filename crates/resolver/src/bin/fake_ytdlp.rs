@@ -89,6 +89,8 @@ fn serve(args: &[String]) {
             "resolve" => {
                 let vid = req["video_id"].as_str().unwrap_or("").to_owned();
                 log_line(format!("SERVE RESOLVE START {vid} t={}", millis()));
+                let skipping = req["extractor_args"].to_string().contains("player_skip");
+                log_line(format!("SERVE RESOLVE ARGS {vid} skip={skipping}"));
                 if mode == "crash-always" {
                     std::process::exit(9);
                 }
@@ -111,6 +113,8 @@ fn serve(args: &[String]) {
                 let mut v = match mode.as_str() {
                     "wrong-id" => serde_json::json!({"id": id, "ok": true, "info": doc_for("zzzzzzzzzzz", "")}),
                     "drm" => serde_json::json!({"id": id, "ok": true, "info": doc_for(&vid, r#","_has_drm":true"#)}),
+                    "skip-unsupported" if skipping => serde_json::json!({"id": id, "ok": false,
+                        "error": format!("ERROR: [youtube] {vid}: Requested format is not available")}),
                     "fail-bot" => serde_json::json!({"id": id, "ok": false,
                         "error": format!("ERROR: [youtube] {vid}: Sign in to confirm you're not a bot")}),
                     _ => serde_json::json!({"id": id, "ok": true, "info": doc_for(&vid, "")}),

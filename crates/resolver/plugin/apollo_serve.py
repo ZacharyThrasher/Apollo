@@ -184,6 +184,9 @@ def serve():
                 if not _ID_RE.match(vid):
                     _reply(out, {'id': rid, 'ok': False, 'error': 'bad video id'})
                     continue
+                if isinstance(req.get('extractor_args'), dict):
+                    # Per request, so a click can use faster settings than background work.
+                    ydl.params['extractor_args'] = req['extractor_args']
                 log.reset()
                 t0 = time.monotonic()
                 try:

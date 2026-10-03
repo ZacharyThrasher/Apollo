@@ -334,6 +334,7 @@ mod imp {
             cfg.cache = None;
             if let Some(w) = cfg.warm.as_mut() {
                 w.prewarm = 1;
+                w.foreground_youtube_args = None; // each setting is measured as-is
                 w.youtube_args = args.iter().map(|(k, v)| ((*k).to_owned(), v.iter().map(|x| (*x).to_owned()).collect())).collect();
             }
             let mut r = rig(cfg, &account);
