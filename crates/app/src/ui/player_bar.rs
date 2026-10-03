@@ -13,7 +13,7 @@ use gpui::{
 use crate::assets::Icon;
 use crate::player::{failure_text, format_time, PlayerModel, PlayerView, Status};
 use crate::style::{self, color};
-use crate::ui::button::{Handler, IconButton};
+use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::slider::{Slider, SliderState};
 use crate::ui::tooltip::Tooltip;
 
@@ -21,9 +21,13 @@ use crate::ui::tooltip::Tooltip;
 const SEEK_STEP_MS: f64 = 5_000.0;
 const VOLUME_WIDTH: f32 = 96.0;
 const TIME_WIDTH: f32 = spacing::S12;
-/// Widest the centre column grows; it takes 40% of the bar below that.
+/// The centre column takes 40% of the bar, between these bounds.
 const CENTER_MAX: f32 = 640.0;
 const CENTER_MIN: f32 = 320.0;
+/// Smallest window width at which both side blocks keep their minimum and the centre fits:
+/// two sides, the centre, the bar's side padding and the gaps between the columns.
+pub const MIN_BAR_WIDTH: f32 =
+    2.0 * layout::PLAYER_BAR_SIDE_MIN + CENTER_MIN + 2.0 * spacing::S4 + 2.0 * spacing::S4;
 
 #[derive(Clone)]
 pub struct BarFocus {
@@ -36,6 +40,8 @@ pub struct BarFocus {
     pub queue: FocusHandle,
     pub progress: FocusHandle,
     pub volume: FocusHandle,
+    /// Replaces the progress row while an error shows; shares its place in the tab order.
+    pub retry: FocusHandle,
 }
 
 #[derive(IntoElement)]
@@ -71,69 +77,46 @@ impl RenderOnce for PlayerBar {
         let art = div()
             .size(px(layout::PLAYER_BAR_ART))
             .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
             .rounded(px(radius::MEDIUM))
             .overflow_hidden()
             .bg(color::bg_overlay())
-            .when_some(v.art.clone(), |d, image| {
-                d.child(
+            .map(|d| match v.art.clone() {
+                Some(image) => d.child(
                     img(ImageSource::Render(image))
                         .size_full()
                         .object_fit(ObjectFit::Cover),
-                )
+                ),
+                // No artwork: a quiet music note. A decorative glyph, not text, so
+                // text.tertiary on bg.overlay (4.19:1) clears the 3:1 non-text minimum.
+                None => d.child(
+                    gpui::svg()
+                        .path(Icon::MusicNote.path())
+                        .size(px(layout::ICON_SIZE))
+                        .flex_none()
+                        .text_color(color::text_tertiary()),
+                ),
             });
 
         let player = self.player.clone();
-        let second_line = match (&v.status, v.error) {
-            (Status::Unavailable(text), _) => Some((text.clone(), true)),
-            (_, Some(failure)) => Some((SharedString::from(failure_text(failure)), true)),
-            _ => None,
-        };
-        let artist_line = match second_line {
-            Some((text, _)) => div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(spacing::S2))
-                .child(
-                    style::text_style(div(), typography::BODY, cx)
-                        .truncate()
-                        .text_color(color::error())
-                        .child(text),
-                )
-                .when(v.error.is_some(), |d| {
-                    let player = player.clone();
-                    d.child(
-                        style::text_style(div(), typography::BODY_STRONG, cx)
-                            .id("retry")
-                            .flex_none()
-                            .px(px(spacing::S2))
-                            .rounded(px(radius::SMALL))
-                            .cursor_pointer()
-                            .text_color(color::text_primary())
-                            .hover(|s| s.bg(color::state_hover()))
-                            .on_click(move |_, _, cx| {
-                                player.update(cx, |m, cx| m.retry(cx));
-                            })
-                            .child("Retry"),
-                    )
-                })
-                .into_any_element(),
-            None => text_line(
-                "artist",
-                v.artist.clone(),
-                typography::BODY,
-                color::text_secondary(),
-                cx,
-            )
-            .into_any_element(),
-        };
+        let artist_line = text_line(
+            "artist",
+            v.artist.clone(),
+            typography::BODY,
+            color::text_secondary(),
+            cx,
+        );
         let left = div()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(spacing::S3))
-            .flex_1()
-            .min_w_0()
+            .flex_none()
+            .w(relative(layout::PLAYER_BAR_SIDE_FRACTION))
+            .min_w(px(layout::PLAYER_BAR_SIDE_MIN))
+            .max_w(px(layout::PLAYER_BAR_SIDE_MAX))
             .child(art)
             .child(
                 div()
@@ -284,6 +267,66 @@ impl RenderOnce for PlayerBar {
                 .when(right, |d| d.text_right())
                 .child(text)
         };
+        let error_text: Option<SharedString> = match (&v.status, v.error) {
+            (Status::Unavailable(text), _) => Some(text.clone()),
+            (_, Some(failure)) => Some(SharedString::from(failure_text(failure))),
+            _ => None,
+        };
+        // While an error shows, one row replaces the times and the slider: a warning icon,
+        // the short reason, and Retry when retrying makes sense.
+        let error_row = error_text.clone().map(|text| {
+            let retry = v.error.is_some().then(|| {
+                let focus = self.focus.retry.clone();
+                let ring = keyboard_focused(&focus, window);
+                let player = player.clone();
+                style::text_style(div(), typography::BODY_STRONG, cx)
+                    .id("retry")
+                    .relative()
+                    .flex_none()
+                    .px(px(spacing::S2))
+                    .rounded(px(radius::SMALL))
+                    .cursor_pointer()
+                    .track_focus(&focus)
+                    .role(gpui::Role::Button)
+                    .aria_label("Retry")
+                    .text_color(color::text_primary())
+                    .hover(|s| s.underline())
+                    .on_click(move |event, _, cx| {
+                        // Space is the global play/pause key.
+                        if let gpui::ClickEvent::Keyboard(k) = event {
+                            if k.button == gpui::KeyboardButton::Space {
+                                return;
+                            }
+                        }
+                        player.update(cx, |m, cx| m.retry(cx));
+                    })
+                    .child("Retry")
+                    .when(ring, |d| d.child(focus_ring(accent_hsla, radius::SMALL)))
+            });
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap(px(spacing::S2))
+                .w_full()
+                .h(px(crate::ui::slider::HIT_HEIGHT))
+                .child(
+                    gpui::svg()
+                        .path(Icon::Warning.path())
+                        .size(px(layout::ICON_SIZE))
+                        .flex_none()
+                        .text_color(color::warning()),
+                )
+                .child(
+                    style::text_style(div(), typography::BODY, cx)
+                        .id("error-text")
+                        .truncate()
+                        .text_color(color::text_secondary())
+                        .child(text),
+                )
+                .children(retry)
+        });
         let progress = div()
             .flex()
             .flex_row()
@@ -336,7 +379,10 @@ impl RenderOnce for PlayerBar {
             .min_w(px(CENTER_MIN))
             .max_w(px(CENTER_MAX))
             .child(transport)
-            .child(progress);
+            .child(match error_row {
+                Some(row) => row.into_any_element(),
+                None => progress.into_any_element(),
+            });
 
         // ---- right: volume, queue toggle --------------------------------------------
         let volume_value = if v.muted {
@@ -350,8 +396,10 @@ impl RenderOnce for PlayerBar {
             .items_center()
             .justify_end()
             .gap(px(spacing::S2))
-            .flex_1()
-            .min_w_0()
+            .flex_none()
+            .w(relative(layout::PLAYER_BAR_SIDE_FRACTION))
+            .min_w(px(layout::PLAYER_BAR_SIDE_MIN))
+            .max_w(px(layout::PLAYER_BAR_SIDE_MAX))
             .child(
                 button(
                     "mute",
@@ -371,12 +419,18 @@ impl RenderOnce for PlayerBar {
                 div().w(px(VOLUME_WIDTH)).flex_none().child(
                     Slider::new("volume", &self.volume, &self.focus.volume, "Volume", accent)
                         .value(volume_value)
+                        .fill(color::text_secondary())
                         .enabled(ready)
                         .on_change({
                             let p = player.clone();
-                            move |frac, _, _, cx| {
+                            move |frac, committed, _, cx| {
                                 let percent = (frac * 100.0).round() as u8;
-                                p.update(cx, |m, cx| m.set_volume(percent, cx));
+                                p.update(cx, |m, cx| {
+                                    m.set_volume(percent, cx);
+                                    if committed {
+                                        m.save_volume();
+                                    }
+                                });
                             }
                         }),
                 ),
@@ -401,13 +455,14 @@ impl RenderOnce for PlayerBar {
                 }),
             );
 
-        let _ = window;
         div()
             .id("player-bar")
             .flex()
             .flex_row()
             .flex_none()
             .items_center()
+            // Equal side blocks keep the transport centred on the window.
+            .justify_between()
             .gap(px(spacing::S4))
             .w_full()
             .h(px(layout::PLAYER_BAR_HEIGHT))

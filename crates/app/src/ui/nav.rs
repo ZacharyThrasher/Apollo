@@ -255,8 +255,14 @@ impl RenderOnce for NavItem {
                     .text_color(icon_color),
             )
             .when(self.expanded, |d| {
+                // Selected: body-strong in text.primary. Unselected: body in text.secondary.
+                let label_style = if self.active {
+                    typography::BODY_STRONG
+                } else {
+                    typography::BODY
+                };
                 d.child(
-                    style::text_style(div(), typography::BODY_STRONG, cx)
+                    style::text_style(div(), label_style, cx)
                         .whitespace_nowrap()
                         .text_color(icon_color)
                         .child(label.clone()),

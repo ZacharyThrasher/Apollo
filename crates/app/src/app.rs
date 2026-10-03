@@ -1,5 +1,7 @@
 //! Application bootstrap: window, shortcuts, and the bridge from the service adapters to the UI.
 
+use std::sync::Arc;
+
 use gpui::{
     px, size, App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
     WindowHandle, WindowOptions,
@@ -7,10 +9,11 @@ use gpui::{
 
 use crate::backend::{channel_sink, Mode};
 use crate::player::PlayerModel;
+use crate::settings::{SqliteVolume as SettingsVolume, VolumeStore};
 use crate::ui::shell::{self, Quit, Shell};
 
-/// Smallest window that still fits the player bar's three columns.
-const MIN_WIDTH: f32 = 720.0;
+/// Smallest window that still fits the player bar's three columns at their minimum widths.
+const MIN_WIDTH: f32 = crate::ui::player_bar::MIN_BAR_WIDTH;
 const MIN_HEIGHT: f32 = 480.0;
 
 pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
@@ -20,9 +23,12 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     shell::bind_keys(cx);
     cx.on_action(|_: &Quit, cx| cx.quit());
 
+    let volume_store: Option<Arc<dyn VolumeStore>> =
+        SettingsVolume::default_location().map(|s| Arc::new(s) as Arc<dyn VolumeStore>);
     let player = cx.new(|_| PlayerModel::new());
+    player.update(cx, |m, _| m.set_volume_store(volume_store.clone()));
     let window = open_window(cx, player.clone());
-    start_services(cx, mode, player.clone());
+    start_services(cx, mode, player.clone(), volume_store);
 
     cx.on_app_quit(move |cx| {
         player.update(cx, |m, _| m.shutdown());
@@ -59,17 +65,28 @@ fn open_window(cx: &mut App, player: gpui::Entity<PlayerModel>) -> WindowHandle<
 
 /// Prepares the backend off the UI thread, installs it, then feeds adapter completions to the
 /// model until the window goes away.
-fn start_services(cx: &mut App, mode: Mode, player: gpui::Entity<PlayerModel>) {
+fn start_services(
+    cx: &mut App,
+    mode: Mode,
+    player: gpui::Entity<PlayerModel>,
+    volume_store: Option<Arc<dyn VolumeStore>>,
+) {
     let (sink, mut rx) = channel_sink();
     let weak = player.downgrade();
     cx.spawn(async move |cx| {
-        let prepared = cx
+        let (prepared, saved_volume) = cx
             .background_executor()
-            .spawn(async move { mode.prepare(sink) })
+            .spawn(async move {
+                let saved = volume_store.and_then(|s| s.load());
+                (mode.prepare(sink), saved)
+            })
             .await;
         match prepared {
             Ok(prepared) => {
-                let _ = weak.update(cx, |m, cx| m.install(prepared, cx));
+                let _ = weak.update(cx, |m, cx| {
+                    m.restore_volume(saved_volume);
+                    m.install(prepared, cx);
+                });
             }
             Err(err) => {
                 let _ = weak.update(cx, |m, cx| m.fail(&err, cx));

@@ -41,6 +41,11 @@ pub mod color {
     pub const ERROR: Rgba = Rgba::hex(0xFF6B6B);
     pub const WARNING: Rgba = Rgba::hex(0xF5C26B);
 
+    // Close caption button: native Windows 11 red, white glyph; pressed is 90% of it.
+    pub const CLOSE_HOVER: Rgba = Rgba::hex(0xC42B1C);
+    pub const CLOSE_PRESSED: Rgba = CLOSE_HOVER.with_alpha_pct(90);
+    pub const CLOSE_FG: Rgba = Rgba::hex(0xFFFFFF);
+
     /// accent.fg: text/icons on the accent.
     pub const ACCENT_FG: Rgba = BG_BASE;
 }
@@ -158,6 +163,10 @@ pub mod layout {
     pub const NAV_RAIL_EXPANDED: f32 = 220.0;
     pub const PLAYER_BAR_HEIGHT: f32 = 80.0;
     pub const PLAYER_BAR_ART: f32 = 56.0;
+    /// Player bar left block: 30% of the window, clamped.
+    pub const PLAYER_BAR_SIDE_FRACTION: f32 = 0.3;
+    pub const PLAYER_BAR_SIDE_MIN: f32 = 240.0;
+    pub const PLAYER_BAR_SIDE_MAX: f32 = 360.0;
     pub const PLAY_BUTTON: f32 = 40.0;
     pub const QUEUE_PANEL_WIDTH: f32 = 320.0;
     /// Now Playing art is `min(50vh, NOW_PLAYING_ART_MAX)`.

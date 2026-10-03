@@ -209,10 +209,12 @@ dependencies = [
  "apollo-resolver",
  "apollo-runtime",
  "apollo-services-common",
+ "apollo-store",
  "apollo-theme",
  "gpui",
  "gpui_platform",
  "image",
+ "tempfile",
  "tokio",
  "ureq",
 ]

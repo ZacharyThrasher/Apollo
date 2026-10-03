@@ -138,6 +138,18 @@ pub mod color {
     pub fn error() -> Hsla {
         hsla(t::ERROR)
     }
+    pub fn warning() -> Hsla {
+        hsla(t::WARNING)
+    }
+    pub fn close_hover() -> Hsla {
+        hsla(t::CLOSE_HOVER)
+    }
+    pub fn close_pressed() -> Hsla {
+        hsla(t::CLOSE_PRESSED)
+    }
+    pub fn close_fg() -> Hsla {
+        hsla(t::CLOSE_FG)
+    }
     pub fn accent(a: apollo_theme::Accent) -> Hsla {
         hsla(a.rgb)
     }

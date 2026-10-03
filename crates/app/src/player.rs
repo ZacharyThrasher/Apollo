@@ -15,13 +15,13 @@ use gpui::{Context, RenderImage, SharedString};
 use crate::accent_anim::AccentAnim;
 use crate::art::{ArtSource, DecodedArt};
 use crate::backend::{LibraryTrack, Ports, Prepared};
+use crate::settings::VolumeStore;
 
 type AppDriver =
     Driver<Box<dyn apollo_runtime::Resolver + Send>, Box<dyn apollo_runtime::MediaEngine + Send>>;
 
-/// Volume the app starts at. A conservative level: the engine is not loud at 100, but nothing
-/// should blast when a queue first plays.
-pub const DEFAULT_VOLUME: u8 = 50;
+/// Volume the app starts at when none was saved (coordinator decision).
+pub const DEFAULT_VOLUME: u8 = 70;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -69,6 +69,7 @@ pub struct PlayerModel {
     accent: AccentAnim,
     volume: u8,
     muted: bool,
+    volume_store: Option<Arc<dyn VolumeStore>>,
     shuffle_seed: u64,
 }
 
@@ -82,6 +83,7 @@ impl PlayerModel {
             accent: AccentAnim::new(Accent::fallback()),
             volume: DEFAULT_VOLUME,
             muted: false,
+            volume_store: None,
             shuffle_seed: seed_from_clock(),
         }
     }
@@ -196,6 +198,27 @@ impl PlayerModel {
         self.muted = self.muted && self.volume == 0;
         self.push_volume();
         cx.notify();
+    }
+
+    /// Where the volume is saved between runs (none in tests and the headless harness).
+    pub fn set_volume_store(&mut self, store: Option<Arc<dyn VolumeStore>>) {
+        self.volume_store = store;
+    }
+
+    /// Apply the volume saved by a previous run, before the backend installs.
+    pub fn restore_volume(&mut self, saved: Option<u8>) {
+        if let Some(v) = saved {
+            self.volume = v.min(100);
+        }
+    }
+
+    /// Save the current volume off the UI thread. Call when a change is final (slider released,
+    /// key step), not for every drag position.
+    pub fn save_volume(&self) {
+        if let Some(store) = self.volume_store.clone() {
+            let volume = self.volume;
+            std::thread::spawn(move || store.save(volume));
+        }
     }
 
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {

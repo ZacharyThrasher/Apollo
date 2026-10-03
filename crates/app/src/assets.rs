@@ -49,6 +49,8 @@ icons! {
     VolumeMute => "volume-mute-regular",
     QueueRegular => "queue-regular",
     QueueFilled => "queue-filled",
+    MusicNote => "music-note-regular",
+    Warning => "warning-regular",
     Spinner => "spinner",
 }
 

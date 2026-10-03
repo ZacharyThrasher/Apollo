@@ -72,6 +72,7 @@ impl Shell {
             next: stop(cx, 13),
             repeat: stop(cx, 14),
             progress: stop(cx, 15),
+            retry: stop(cx, 15),
             mute: stop(cx, 16),
             volume: stop(cx, 17),
             queue: stop(cx, 18),
@@ -163,7 +164,8 @@ impl Render for Shell {
             .min_w_0()
             .h_full()
             .overflow_y_scroll()
-            .p(px(spacing::S6))
+            .px(px(spacing::S8))
+            .pt(px(spacing::S6))
             .child(
                 style::text_style(div(), typography::PAGE_TITLE, cx)
                     .text_color(color::text_primary())

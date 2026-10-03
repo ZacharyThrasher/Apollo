@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use apollo_app::art::{ArtSource, DecodedArt, SyntheticArt};
 use apollo_app::backend::{LibraryTrack, Ports, Prepared};
-use apollo_app::player::PlayerModel;
+use apollo_app::player::{PlayerModel, Status};
+use apollo_app::settings::VolumeStore;
 use apollo_app::style::Fonts;
 use apollo_app::ui::nav::Route;
 use apollo_app::ui::shell::{self, Shell};
@@ -159,4 +160,64 @@ fn shell_starts_on_home_with_the_rail_collapsed(cx: &mut TestAppContext) {
         assert_eq!(s.route(), Route::Home);
         assert!(!s.nav_expanded());
     });
+}
+
+#[gpui::test]
+fn volume_defaults_to_70_and_restores_a_saved_level(cx: &mut TestAppContext) {
+    let (player, _shell, vcx) = setup(cx);
+    assert_eq!(player.read_with(vcx, |m, _| m.view().volume), 70);
+    player.update(vcx, |m, _| m.restore_volume(Some(35)));
+    assert_eq!(player.read_with(vcx, |m, _| m.view().volume), 35);
+    player.update(vcx, |m, _| m.restore_volume(None));
+    assert_eq!(player.read_with(vcx, |m, _| m.view().volume), 35);
+    player.update(vcx, |m, _| m.restore_volume(Some(250)));
+    assert_eq!(player.read_with(vcx, |m, _| m.view().volume), 100);
+}
+
+#[gpui::test]
+fn committed_volume_is_saved_and_drag_positions_are_not(cx: &mut TestAppContext) {
+    struct Recorder(std::sync::mpsc::Sender<u8>);
+    impl VolumeStore for Recorder {
+        fn load(&self) -> Option<u8> {
+            None
+        }
+        fn save(&self, percent: u8) {
+            let _ = self.0.send(percent);
+        }
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (player, _shell, vcx) = setup(cx);
+    player.update(vcx, |m, _| m.set_volume_store(Some(Arc::new(Recorder(tx)))));
+    player.update(vcx, |m, cx| m.set_volume(42, cx));
+    assert!(
+        rx.try_recv().is_err(),
+        "setting the level alone saves nothing"
+    );
+    player.update(vcx, |m, _| m.save_volume());
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(42));
+}
+
+#[gpui::test]
+fn a_startup_failure_renders_the_error_row_without_controls(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        Fonts::install(cx);
+        shell::bind_keys(cx);
+    });
+    let player = cx.new(|_| PlayerModel::new());
+    let (_shell, vcx) = cx.add_window_view({
+        let player = player.clone();
+        move |_, cx| Shell::new(player, cx)
+    });
+    player.update(vcx, |m, cx| m.fail("test", cx));
+    vcx.run_until_parked();
+    assert!(matches!(
+        player.read_with(vcx, |m, _| m.view().status),
+        Status::Unavailable(_)
+    ));
+}
+
+#[test]
+fn the_minimum_window_fits_both_side_blocks_and_the_centre() {
+    // 240 + 320 + 240 plus the bar padding and the gaps between the columns.
+    assert_eq!(apollo_app::ui::player_bar::MIN_BAR_WIDTH, 864.0);
 }

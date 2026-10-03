@@ -61,6 +61,7 @@ pub struct Slider {
     step: f32,
     enabled: bool,
     accent: Accent,
+    fill: Option<gpui::Hsla>,
     on_change: Option<ChangeHandler>,
 }
 
@@ -81,12 +82,19 @@ impl Slider {
             step: 0.05,
             enabled: true,
             accent,
+            fill: None,
             on_change: None,
         }
     }
 
     pub fn value(mut self, value: f32) -> Self {
         self.value = value.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Fill color of the played part of the track; the accent when unset.
+    pub fn fill(mut self, fill: gpui::Hsla) -> Self {
+        self.fill = Some(fill);
         self
     }
 
@@ -119,6 +127,7 @@ impl RenderOnce for Slider {
         let enabled = self.enabled;
         let kb_focus = enabled && keyboard_focused(&self.focus, window);
         let accent = color::accent(self.accent);
+        let fill = self.fill.unwrap_or(accent);
         let on_change = self.on_change.clone().filter(|_| enabled);
         let step = self.step;
         let value = self.value;
@@ -271,7 +280,7 @@ impl RenderOnce for Slider {
                             .w(relative(shown))
                             .rounded_full()
                             .bg(if enabled {
-                                accent
+                                fill
                             } else {
                                 color::text_disabled()
                             }),

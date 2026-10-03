@@ -42,7 +42,8 @@ own context.
 | Module | Role |
 |---|---|
 | `backend/` | `Prepared` = ports + starting queue + artwork source. `sim` and `real` implement it. |
-| `player.rs` | `PlayerModel`: owns the `Driver`, turns adapter completions into coordinator events, keeps volume (a user setting sent straight to the engine port), exposes a `PlayerView` snapshot. |
+| `settings.rs` | Saved settings (volume) in the SQLite store under `%LOCALAPPDATA%\Apollo\app`. |
+| `player.rs` | `PlayerModel`: owns the `Driver`, turns adapter completions into coordinator events, keeps volume (a user setting sent straight to the engine port; default 70, saved through `settings.rs`), exposes a `PlayerView` snapshot. |
 | `art.rs`, `accent_anim.rs` | artwork decode / square crop, `accent_from_artwork`, 400 ms OKLCH crossfade |
 | `ui/` | `shell`, `titlebar`, `nav`, `player_bar`, `button`, `slider`, `tooltip` |
 

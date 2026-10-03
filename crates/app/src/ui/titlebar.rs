@@ -53,7 +53,7 @@ fn caption_font() -> &'static str {
     "Segoe Fluent Icons"
 }
 
-#[derive(IntoElement, Clone, Copy)]
+#[derive(IntoElement, Clone, Copy, PartialEq, Eq)]
 enum CaptionButton {
     Minimize,
     Maximize,
@@ -110,9 +110,14 @@ impl RenderOnce for CaptionButton {
             } else {
                 color::text_disabled()
             })
-            .when(enabled, |d| {
+            .when(enabled && self != Self::Close, |d| {
                 d.hover(|s| s.bg(color::state_hover()))
                     .active(|s| s.bg(color::state_pressed()))
+            })
+            // Close keeps the native Windows 11 red with a white glyph.
+            .when(self == Self::Close, |d| {
+                d.hover(|s| s.bg(color::close_hover()).text_color(color::close_fg()))
+                    .active(|s| s.bg(color::close_pressed()).text_color(color::close_fg()))
             })
             .window_control_area(self.area())
             .child(self.glyph())
