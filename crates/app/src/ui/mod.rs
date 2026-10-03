@@ -7,6 +7,7 @@ pub mod now_playing;
 pub mod player_bar;
 pub mod queue_panel;
 pub mod shell;
+pub mod skeleton;
 pub mod slider;
 pub mod text_button;
 pub mod titlebar;

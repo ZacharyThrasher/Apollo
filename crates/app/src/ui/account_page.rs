@@ -3,15 +3,14 @@
 //! helper copy, only the state and what to do about it.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use apollo_domain::playback::Event;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
-    div, img, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Entity,
-    FocusHandle, ImageSource, IntoElement, ObjectFit, ParentElement, PathPromptOptions, Render,
-    RenderImage, SharedString, Styled, Window,
+    div, img, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, ImageSource,
+    IntoElement, ObjectFit, ParentElement, PathPromptOptions, Render, RenderImage, SharedString,
+    Styled, Window,
 };
 
 use crate::account::{AccountModel, Method, Notice, Screen, SignInError, Who};
@@ -19,6 +18,7 @@ use crate::assets::Icon;
 use crate::player::PlayerModel;
 use crate::style::{self, color};
 use crate::ui::button::{focus_ring, keyboard_focused};
+use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::tooltip::Tooltip;
 
@@ -28,9 +28,6 @@ pub const TAB_INDEX: isize = 6;
 const MAX_WIDTH: f32 = 560.0;
 const TILE: f32 = 56.0;
 const ROW_TILE: f32 = 40.0;
-/// A subtle pulse: opacity swings between 0.85 and 1.0 over 1.2 s.
-const SKELETON_PERIOD: Duration = Duration::from_millis(1200);
-const SKELETON_MIN_OPACITY: f32 = 0.85;
 
 pub struct AccountPage {
     model: Entity<AccountModel>,
@@ -477,17 +474,7 @@ fn skeleton(animate: bool) -> AnyElement {
             Some(w) => el.w(px(w)),
             None => el.size(px(h)),
         };
-        if animate {
-            el.with_animation(id, Animation::new(SKELETON_PERIOD).repeat(), |el, t| {
-                el.opacity(
-                    SKELETON_MIN_OPACITY
-                        + (1.0 - SKELETON_MIN_OPACITY) * (1.0 - (2.0 * t - 1.0).abs()),
-                )
-            })
-            .into_any_element()
-        } else {
-            el.into_any_element()
-        }
+        skeleton::pulse(el, id, animate)
     };
     div()
         .id("account-skeleton")

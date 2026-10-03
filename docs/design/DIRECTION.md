@@ -76,5 +76,13 @@ Applied to the queue panel (`ui/queue_panel.rs`) and Now Playing (`ui/now_playin
 6. **No-art glyph:** 20px on tiles up to 56px; a quarter of the tile size above that.
 7. **Now Playing:** opened from the player bar's art/title block, closed with Esc, the chevron, or navigating. Art `min(50vh, 480px)`, title in the 40px style, then one line of artist name(s) and album separated by " · " at 18px regular in text.secondary, 8px below the title, truncating with an ellipsis. The progress row and transport sit below, shared with the player bar. Ambient art is blurred at 15% opacity (inside the 12-18% range) and sits only behind this view.
 
+## Library decisions (coordinator, 2026-10-03)
+Applied to the Library page (`ui/library.rs`).
+1. **Tabs:** Playlists and Albums use the nav's selected-tint pattern (selected item on the tint, text.primary; others text.secondary). No accent underline; accent stays reserved.
+2. **Loading:** skeleton rows at final size use the shared pulse (`ui/skeleton.rs`: opacity 0.85 to 1.0, 1.2 s, static under reduced motion). No separate shimmer on any screen.
+3. **Liked Music:** a filled heart in text.secondary on the standard no-art tile, no accent. Everything else without a cover uses the music-note tile.
+4. **Playing row:** the nav's selected-row marker (3px accent bar, selected background, body-strong title), the same as the queue panel.
+5. **Icons:** Fluent System Icons only, 20px grid, taken from the Fluent set (regular for outlines, filled for the heart). Do not hand-draw icons.
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

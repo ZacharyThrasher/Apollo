@@ -8,16 +8,16 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use apollo_domain::library::{Collection, CollectionKind};
 use apollo_domain::listing::LoadFailure;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
-    actions, div, prelude::*, px, uniform_list, Animation, AnimationExt, AnyElement, App, Context,
-    ElementId, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, ParentElement, Render,
-    SharedString, Styled, UniformListScrollHandle, Window,
+    actions, div, prelude::*, px, uniform_list, AnyElement, App, Context, ElementId, Entity,
+    FocusHandle, Focusable, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
+    UniformListScrollHandle, Window,
 };
 
 use crate::assets::Icon;
@@ -28,6 +28,7 @@ use crate::player::{format_time, PlayerModel};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
+use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::tooltip::Tooltip;
 
@@ -80,8 +81,6 @@ const ALBUM_COLUMN_MIN_WINDOW: f32 = 1000.0;
 const PLAYING_BAR: f32 = 3.0;
 /// Skeleton rows drawn while loading: enough to fill a tall window.
 const SKELETON_ROWS: usize = 12;
-/// One pulse of the skeleton shimmer.
-const SHIMMER: Duration = Duration::from_millis(1600);
 
 #[derive(Clone)]
 struct Focus {
@@ -417,17 +416,7 @@ impl LibraryView {
                 )
         });
         let column = div().flex().flex_col().w_full().children(rows);
-        if animations {
-            column
-                .with_animation(
-                    "skeleton-shimmer",
-                    Animation::new(SHIMMER).repeat(),
-                    |el, t| el.opacity(0.65 + 0.35 * (t * std::f32::consts::TAU).sin().abs()),
-                )
-                .into_any_element()
-        } else {
-            column.into_any_element()
-        }
+        skeleton::pulse(column, "library-skeleton", animations)
     }
 
     /// One short line and one action: the shape of every empty and error state.
