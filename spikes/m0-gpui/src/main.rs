@@ -23,14 +23,27 @@ use gpui::{
 };
 use gpui_platform::application;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
+use souvlaki::{
+    MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
     apollo_m0,
     [
-        Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, Paste, Cut,
-        Copy, Quit,
+        Backspace,
+        Delete,
+        Left,
+        Right,
+        SelectLeft,
+        SelectRight,
+        SelectAll,
+        Home,
+        End,
+        Paste,
+        Cut,
+        Copy,
+        Quit,
     ]
 );
 
@@ -793,7 +806,9 @@ fn main() {
         // awaits `recv()` (runtime-agnostic) and mutates the entity on the UI thread.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Tick>();
         let runtime = ServiceRuntime::start(tx);
-        let root = window.update(cx, |_, _, cx| cx.entity()).expect("root entity");
+        let root = window
+            .update(cx, |_, _, cx| cx.entity())
+            .expect("root entity");
         let weak_root = root.downgrade();
         cx.spawn(async move |cx| {
             while let Some(tick) = rx.recv().await {
@@ -852,7 +867,10 @@ fn main() {
             while let Some(cmd) = media_rx.recv().await {
                 println!("os media command reached app: {cmd}");
                 if let Some(path) = &event_log
-                    && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+                    && let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
                 {
                     let _ = writeln!(f, "{cmd}");
                 }

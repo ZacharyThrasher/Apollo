@@ -56,7 +56,8 @@ fn run_ytdlp(root: &Path, auth: &Auth, extra: &[&str], timeout: Duration) -> Run
         "--skip-download",
         "--no-playlist",
     ]);
-    cmd.arg("--js-runtimes").arg(format!("deno:{}", root.join(DENO).display()));
+    cmd.arg("--js-runtimes")
+        .arg(format!("deno:{}", root.join(DENO).display()));
     match auth {
         Auth::CookieFile(p) => {
             cmd.arg("--cookies").arg(p);
@@ -67,13 +68,21 @@ fn run_ytdlp(root: &Path, auth: &Auth, extra: &[&str], timeout: Duration) -> Run
         Auth::None => {}
     }
     cmd.args(extra);
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let started = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return Run { code: None, stdout: vec![], stderr: format!("spawn failed: {e}"), timed_out: false, secs: 0.0 };
+            return Run {
+                code: None,
+                stdout: vec![],
+                stderr: format!("spawn failed: {e}"),
+                timed_out: false,
+                secs: 0.0,
+            };
         }
     };
     let pid = child.id();
@@ -99,7 +108,10 @@ fn run_ytdlp(root: &Path, auth: &Auth, extra: &[&str], timeout: Duration) -> Run
                 if started.elapsed() > timeout {
                     timed_out = true;
                     // Kill the whole tree (the one-file exe spawns a child).
-                    let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).creation_flags(0x0800_0000).output();
+                    let _ = Command::new("taskkill")
+                        .args(["/PID", &pid.to_string(), "/T", "/F"])
+                        .creation_flags(0x0800_0000)
+                        .output();
                     let _ = child.wait();
                     break None;
                 }
@@ -110,7 +122,13 @@ fn run_ytdlp(root: &Path, auth: &Auth, extra: &[&str], timeout: Duration) -> Run
     };
     let stdout = orx.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
     let stderr = erx.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
-    Run { code, stdout, stderr, timed_out, secs: started.elapsed().as_secs_f64() }
+    Run {
+        code,
+        stdout,
+        stderr,
+        timed_out,
+        secs: started.elapsed().as_secs_f64(),
+    }
 }
 
 /// Coarse, redacted classification of yt-dlp's diagnostic text. Raw text is never printed.
@@ -164,7 +182,9 @@ fn clients_used(stderr: &str) -> String {
 }
 
 fn host_ok(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("https://") else { return false };
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
     let host = rest.split(['/', '?', ':']).next().unwrap_or("");
     host == "googlevideo.com" || host.ends_with(".googlevideo.com")
 }
@@ -178,14 +198,25 @@ struct Resolved {
 
 fn resolve(root: &Path, auth: &Auth, id: &str) -> Result<Resolved, String> {
     let watch = format!("https://music.youtube.com/watch?v={id}");
-    let r = run_ytdlp(root, auth, &["-f", "bestaudio", "-J", &watch], Duration::from_secs(120));
+    let r = run_ytdlp(
+        root,
+        auth,
+        &["-f", "bestaudio", "-J", &watch],
+        Duration::from_secs(120),
+    );
     if r.timed_out {
         return Err("resolver timed out (process tree killed)".into());
     }
     let cats = classify(&r.stderr);
     let json: serde_json::Value = match serde_json::from_slice(&r.stdout) {
         Ok(j) => j,
-        Err(_) => return Err(format!("no JSON (exit {:?}); categories={cats:?}; {}", r.code, clients_used(&r.stderr))),
+        Err(_) => {
+            return Err(format!(
+                "no JSON (exit {:?}); categories={cats:?}; {}",
+                r.code,
+                clients_used(&r.stderr)
+            ));
+        }
     };
     let id_ok = json["id"].as_str() == Some(id);
     let url = json["url"].as_str().unwrap_or("").to_string();
@@ -201,7 +232,9 @@ fn resolve(root: &Path, auth: &Auth, id: &str) -> Result<Resolved, String> {
     let mut premium_note = false;
     if let Some(fmts) = json["formats"].as_array() {
         for f in fmts {
-            if f["acodec"].as_str().is_some_and(|a| a != "none") && f["vcodec"].as_str() == Some("none") {
+            if f["acodec"].as_str().is_some_and(|a| a != "none")
+                && f["vcodec"].as_str() == Some("none")
+            {
                 let note = f["format_note"].as_str().unwrap_or("");
                 if note.contains("Premium") {
                     premium_note = true;
@@ -209,7 +242,12 @@ fn resolve(root: &Path, auth: &Auth, id: &str) -> Result<Resolved, String> {
                 offered.insert(format!(
                     "{}:{}@{}k/{}",
                     f["format_id"].as_str().unwrap_or("?"),
-                    f["acodec"].as_str().unwrap_or("?").split('.').next().unwrap_or("?"),
+                    f["acodec"]
+                        .as_str()
+                        .unwrap_or("?")
+                        .split('.')
+                        .next()
+                        .unwrap_or("?"),
                     f["abr"].as_f64().unwrap_or(0.0).round(),
                     f["protocol"].as_str().unwrap_or("?")
                 ));
@@ -234,10 +272,17 @@ fn resolve(root: &Path, auth: &Auth, id: &str) -> Result<Resolved, String> {
     if !problems.is_empty() {
         return Err(format!("rejected: {problems:?}; {summary}"));
     }
-    let user_agent = json["http_headers"]["User-Agent"].as_str().map(str::to_string);
+    let user_agent = json["http_headers"]["User-Agent"]
+        .as_str()
+        .map(str::to_string);
     println!("    resolve {:.1}s: {summary}", r.secs);
     println!("    offered audio formats: {:?}", offered);
-    Ok(Resolved { url, user_agent, duration, summary })
+    Ok(Resolved {
+        url,
+        user_agent,
+        duration,
+        summary,
+    })
 }
 
 fn play(res: &Resolved, full_realtime: bool) -> bool {
@@ -276,7 +321,16 @@ fn play(res: &Resolved, full_realtime: bool) -> bool {
     }
     let dur = res.duration;
     #[derive(PartialEq, Debug, Clone, Copy)]
-    enum P { Loading, P1, SeekStart, P2, SeekMid, P3, SeekEnd, Eof }
+    enum P {
+        Loading,
+        P1,
+        SeekStart,
+        P2,
+        SeekMid,
+        P3,
+        SeekEnd,
+        Eof,
+    }
     let mut p = P::Loading;
     let mut since = Instant::now();
     let mut first_audio: Option<f64> = None;
@@ -288,7 +342,11 @@ fn play(res: &Resolved, full_realtime: bool) -> bool {
     let mut last_pos = -1.0f64;
     let mut last_adv = Instant::now();
     let mut eof = String::from("none");
-    let hard_limit = if full_realtime { Duration::from_secs_f64(dur + 120.0) } else { Duration::from_secs(150) };
+    let hard_limit = if full_realtime {
+        Duration::from_secs_f64(dur + 120.0)
+    } else {
+        Duration::from_secs(150)
+    };
     let loop_start = Instant::now();
     let mut seek_pending_label = "";
     loop {
@@ -336,13 +394,18 @@ fn play(res: &Resolved, full_realtime: bool) -> bool {
             last_pos = pos;
             last_adv = Instant::now();
         }
-        if matches!(p, P::P1 | P::P2 | P::P3 | P::Eof) && last_adv.elapsed() > Duration::from_secs(20) && !mpv.get_property::<bool>("pause").unwrap_or(false) {
+        if matches!(p, P::P1 | P::P2 | P::P3 | P::Eof)
+            && last_adv.elapsed() > Duration::from_secs(20)
+            && !mpv.get_property::<bool>("pause").unwrap_or(false)
+        {
             ok = false;
             results.push(format!("stalled >20s at {pos:.1}s"));
             break;
         }
         match p {
-            P::P1 | P::P2 | P::P3 if since.elapsed() >= Duration::from_millis(2000) && pos >= 0.0 => {
+            P::P1 | P::P2 | P::P3
+                if since.elapsed() >= Duration::from_millis(2000) && pos >= 0.0 =>
+            {
                 target = match p {
                     P::P1 => 0.5,
                     P::P2 => dur / 2.0,
@@ -363,12 +426,20 @@ fn play(res: &Resolved, full_realtime: bool) -> bool {
                     _ => P::SeekEnd,
                 };
             }
-            P::SeekStart | P::SeekMid | P::SeekEnd if restart_after_seek && pos >= 0.0 || (matches!(p, P::SeekStart | P::SeekMid | P::SeekEnd) && seek_at.elapsed() > Duration::from_secs(15)) => {
+            P::SeekStart | P::SeekMid | P::SeekEnd
+                if restart_after_seek && pos >= 0.0
+                    || (matches!(p, P::SeekStart | P::SeekMid | P::SeekEnd)
+                        && seek_at.elapsed() > Duration::from_secs(15)) =>
+            {
                 let good = restart_after_seek && pos >= target - 0.1 && pos <= target + 3.0;
                 if !good {
                     ok = false;
                 }
-                results.push(format!("{seek_pending_label}={} (target {target:.1}s -> pos {pos:.1}s, {:.1}s)", if good { "ok" } else { "FAIL" }, seek_at.elapsed().as_secs_f64()));
+                results.push(format!(
+                    "{seek_pending_label}={} (target {target:.1}s -> pos {pos:.1}s, {:.1}s)",
+                    if good { "ok" } else { "FAIL" },
+                    seek_at.elapsed().as_secs_f64()
+                ));
                 last_pos = pos;
                 last_adv = Instant::now();
                 since = Instant::now();
@@ -392,7 +463,9 @@ fn play(res: &Resolved, full_realtime: bool) -> bool {
     }
     println!(
         "    play: first_audio={} {} eof={eof} wall={:.1}s",
-        first_audio.map(|s| format!("{s:.2}s")).unwrap_or_else(|| "never".into()),
+        first_audio
+            .map(|s| format!("{s:.2}s"))
+            .unwrap_or_else(|| "never".into()),
         results.join(" "),
         loop_start.elapsed().as_secs_f64()
     );
@@ -404,11 +477,17 @@ fn play(res: &Resolved, full_realtime: bool) -> bool {
 
 fn video_id(s: &str) -> Option<String> {
     let s = s.trim();
-    if s.len() == 11 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if s.len() == 11
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Some(s.to_string());
     }
     let i = s.find("v=")?;
-    let id: String = s[i + 2..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    let id: String = s[i + 2..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
     (id.len() == 11).then_some(id)
 }
 
@@ -417,25 +496,50 @@ fn pick_from_liked(root: &Path, auth: &Auth, n: usize) -> Result<Vec<String>, St
     let r = run_ytdlp(
         root,
         auth,
-        &["--flat-playlist", "--playlist-end", "300", "--yes-playlist", "-J", "https://music.youtube.com/playlist?list=LM"],
+        &[
+            "--flat-playlist",
+            "--playlist-end",
+            "300",
+            "--yes-playlist",
+            "-J",
+            "https://music.youtube.com/playlist?list=LM",
+        ],
         Duration::from_secs(180),
     );
     if r.timed_out {
         return Err("liked-music listing timed out".into());
     }
-    let j: serde_json::Value = serde_json::from_slice(&r.stdout)
-        .map_err(|_| format!("no JSON from liked-music listing; categories={:?}", classify(&r.stderr)))?;
+    let j: serde_json::Value = serde_json::from_slice(&r.stdout).map_err(|_| {
+        format!(
+            "no JSON from liked-music listing; categories={:?}",
+            classify(&r.stderr)
+        )
+    })?;
     let entries = j["entries"].as_array().cloned().unwrap_or_default();
-    println!("  liked-music listing: {} entries visible to this session", entries.len());
+    println!(
+        "  liked-music listing: {} entries visible to this session",
+        entries.len()
+    );
     if entries.is_empty() {
-        return Err(format!("empty liked-music listing (not authenticated, or no likes); categories={:?}", classify(&r.stderr)));
+        return Err(format!(
+            "empty liked-music listing (not authenticated, or no likes); categories={:?}",
+            classify(&r.stderr)
+        ));
     }
     let mut seen = BTreeSet::new();
     let mut cand: Vec<(f64, String)> = Vec::new();
     for e in &entries {
         let dur = e["duration"].as_f64().unwrap_or(0.0);
-        let chan = e["channel"].as_str().or(e["uploader"].as_str()).unwrap_or("").to_string();
-        if let Some(id) = e["id"].as_str() && dur > 45.0 && dur < 900.0 && seen.insert(chan) {
+        let chan = e["channel"]
+            .as_str()
+            .or(e["uploader"].as_str())
+            .unwrap_or("")
+            .to_string();
+        if let Some(id) = e["id"].as_str()
+            && dur > 45.0
+            && dur < 900.0
+            && seen.insert(chan)
+        {
             cand.push((dur, id.to_string()));
         }
     }
@@ -446,7 +550,11 @@ fn pick_from_liked(root: &Path, auth: &Auth, n: usize) -> Result<Vec<String>, St
     }
     let mut out = Vec::new();
     for k in 0..n.min(cand.len()) {
-        let idx = if n <= 1 { 0 } else { k * (cand.len() - 1) / (n.min(cand.len()) - 1).max(1) };
+        let idx = if n <= 1 {
+            0
+        } else {
+            k * (cand.len() - 1) / (n.min(cand.len()) - 1).max(1)
+        };
         let id = cand[idx].1.clone();
         if !out.contains(&id) {
             out.push(id);
@@ -457,7 +565,12 @@ fn pick_from_liked(root: &Path, auth: &Auth, n: usize) -> Result<Vec<String>, St
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let arg = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
     let root = std::env::current_dir().expect("cwd");
     let auth = if let Some(p) = arg("--cookies") {
         Auth::CookieFile(PathBuf::from(p))
@@ -468,10 +581,14 @@ fn main() {
     };
     let anonymous_control = args.iter().any(|a| a == "--anonymous-control");
     if matches!(auth, Auth::None) && !anonymous_control {
-        eprintln!("refusing to run: no credential source (no guest fallback). Use --cookies or --cookies-from-browser.");
+        eprintln!(
+            "refusing to run: no credential source (no guest fallback). Use --cookies or --cookies-from-browser."
+        );
         std::process::exit(2);
     }
-    if let Auth::CookieFile(p) = &auth && !p.exists() {
+    if let Auth::CookieFile(p) = &auth
+        && !p.exists()
+    {
         eprintln!("cookie file not found (this is the missing-credentials negative case)");
         std::process::exit(2);
     }
@@ -488,7 +605,11 @@ fn main() {
             }
         }
     } else if let Some(f) = arg("--ids") {
-        std::fs::read_to_string(f).unwrap_or_default().lines().filter_map(video_id).collect()
+        std::fs::read_to_string(f)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(video_id)
+            .collect()
     } else {
         eprintln!("need --from-liked N or --ids <file>");
         std::process::exit(2);
@@ -496,12 +617,19 @@ fn main() {
 
     if args.iter().any(|a| a == "--compare-only") {
         // Same tracks, with and without credentials. Resolution only, no playback.
-        println!("compare-only: authenticated vs anonymous resolution for {} tracks", ids.len());
+        println!(
+            "compare-only: authenticated vs anonymous resolution for {} tracks",
+            ids.len()
+        );
         for (i, id) in ids.iter().enumerate() {
             println!("  #{:02} [auth]", i + 1);
-            let a = resolve(&root, &auth, id).map(|_| ()).map_err(|e| println!("    {e}"));
+            let a = resolve(&root, &auth, id)
+                .map(|_| ())
+                .map_err(|e| println!("    {e}"));
             println!("  #{:02} [anon]", i + 1);
-            let b = resolve(&root, &Auth::None, id).map(|_| ()).map_err(|e| println!("    {e}"));
+            let b = resolve(&root, &Auth::None, id)
+                .map(|_| ())
+                .map_err(|e| println!("    {e}"));
             println!("    => auth_ok={} anon_ok={}", a.is_ok(), b.is_ok());
         }
         return;
@@ -524,6 +652,9 @@ fn main() {
             Err(e) => println!("    resolve FAIL: {e}\n    => FAIL (resolution)"),
         }
     }
-    println!("RESULT resolution+playback: {pass}/{} tracks passed", ids.len());
+    println!(
+        "RESULT resolution+playback: {pass}/{} tracks passed",
+        ids.len()
+    );
     std::process::exit(if pass == ids.len() { 0 } else { 1 });
 }

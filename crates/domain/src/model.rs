@@ -23,6 +23,19 @@ impl BrowseId {
     }
 }
 
+/// Opaque playlist ID (library playlist, album playlist, radio/mix list).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PlaylistId(String);
+
+impl PlaylistId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Identifies one *occurrence* of a track in the queue. The same video queued
 /// three times yields three distinct IDs. IDs are minted by [`crate::queue::Queue`]
 /// and never reused within a queue's lifetime.

@@ -48,11 +48,7 @@ struct Captured {
 /// host + path only; never query or fragment (they can carry tokens).
 fn redact_url(u: &str) -> String {
     let no_scheme = u.split("://").nth(1).unwrap_or(u);
-    no_scheme
-        .split(['?', '#'])
-        .next()
-        .unwrap_or("")
-        .to_string()
+    no_scheme.split(['?', '#']).next().unwrap_or("").to_string()
 }
 
 fn sha1_hex(s: &str) -> String {
@@ -66,7 +62,12 @@ fn authorization_header(cookies: &[Captured]) -> Option<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
-    let get = |n: &str| cookies.iter().find(|c| c.name == n).map(|c| c.value.clone());
+    let get = |n: &str| {
+        cookies
+            .iter()
+            .find(|c| c.name == n)
+            .map(|c| c.value.clone())
+    };
     let mut parts = Vec::new();
     for (scheme, cookie_name) in [
         ("SAPISIDHASH", "SAPISID"),
@@ -74,14 +75,21 @@ fn authorization_header(cookies: &[Captured]) -> Option<String> {
         ("SAPISID3PHASH", "__Secure-3PAPISID"),
     ] {
         if let Some(v) = get(cookie_name) {
-            parts.push(format!("{scheme} {ts}_{}", sha1_hex(&format!("{ts} {v} {ORIGIN}"))));
+            parts.push(format!(
+                "{scheme} {ts}_{}",
+                sha1_hex(&format!("{ts} {v} {ORIGIN}"))
+            ));
         }
     }
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 fn netscape_line(c: &Captured) -> String {
-    let include_sub = if c.domain.starts_with('.') { "TRUE" } else { "FALSE" };
+    let include_sub = if c.domain.starts_with('.') {
+        "TRUE"
+    } else {
+        "FALSE"
+    };
     format!(
         "{}\t{}\t{}\t{}\t{}\t{}\t{}",
         c.domain,
@@ -113,8 +121,19 @@ fn print_cookie_report(cookies: &[Captured]) {
             c.name, c.domain, c.secure, c.http_only, life
         );
     }
-    for needed in ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID", "SID", "__Secure-1PSID", "__Secure-3PSID", "LOGIN_INFO"] {
-        println!("  has {needed}: {}", cookies.iter().any(|c| c.name == needed));
+    for needed in [
+        "SAPISID",
+        "__Secure-1PAPISID",
+        "__Secure-3PAPISID",
+        "SID",
+        "__Secure-1PSID",
+        "__Secure-3PSID",
+        "LOGIN_INFO",
+    ] {
+        println!(
+            "  has {needed}: {}",
+            cookies.iter().any(|c| c.name == needed)
+        );
     }
 }
 
@@ -166,7 +185,8 @@ fn validate(cookies: &[Captured], user_agent: &str) -> bool {
         .map(|svcs| {
             svcs.iter().any(|s| {
                 s["params"].as_array().is_some_and(|ps| {
-                    ps.iter().any(|p| p["key"] == "logged_in" && p["value"] == "1")
+                    ps.iter()
+                        .any(|p| p["key"] == "logged_in" && p["value"] == "1")
                 })
             })
         })
@@ -229,10 +249,12 @@ fn main() {
 
     // Poll timer: capture is attempted only when we are on music.youtube.com.
     let poll_proxy = proxy.clone();
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(3));
-        if poll_proxy.send_event(UserEvent::Poll).is_err() {
-            break;
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(3));
+            if poll_proxy.send_event(UserEvent::Poll).is_err() {
+                break;
+            }
         }
     });
 
