@@ -59,7 +59,7 @@ Build time: first clean `cargo build -p apollo-m0-gpui` ≈ 1m52s on this PC (de
 | 2b | Keyboard text input | **done** | 16/16 scripted keystrokes arrived |
 | 2c | IME composition | **not_run** | no IME installed; code path wired and counted (`IME composition updates`), untested |
 | 2d | Tokio task updates UI | **done** | 18 ticks received, producer thread ≠ UI thread |
-| 2e | Accessibility basics | **partial** | UI Automation exposes only the top-level `Zed::Window`; no child nodes read |
+| 2e | Accessibility basics | **superseded** | At M0 only the top-level window was read. With roles and names on the controls (M3), UI Automation lists every control: `docs/accessibility.md` |
 | 3a | libmpv links and loads | **done** | `spikes/m0-media` |
 | 3b | AAC and Opus decode | **done** | M4A/AAC, Ogg/Opus, WebM/Opus, all 48 kHz stereo, ~12 s |
 | 3c | Seek start / middle / end | **done** | engine `time-pos` equal to the target (0.3 s, 6 s, 11 s) on all 3 files |

@@ -769,6 +769,8 @@ impl Render for QueuePanel {
             .id("queue-list")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_list)
+            .role(gpui::Role::List)
+            .aria_label("Queue")
             .on_action(cx.listener(|this, _: &CursorUp, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &PlayCursor, _, cx| this.play_cursor(cx)))

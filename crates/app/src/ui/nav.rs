@@ -254,7 +254,10 @@ impl RenderOnce for NavItem {
             .track_focus(&self.focus)
             .aria_label(label.clone())
             .role(gpui::Role::Link)
-            .aria_selected(self.active)
+            // The page being shown. `aria_selected` would turn the link into a selection item
+            // with no container to select in, which takes away its Invoke pattern: voice
+            // control and UI Automation clients could no longer activate it.
+            .when(self.active, |d| d.aria_description("Current page"))
             .when(self.active, |d| d.bg(color::state_selected()))
             .hover(|s| s.bg(color::state_hover()))
             .on_click({

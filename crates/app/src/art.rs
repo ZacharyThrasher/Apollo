@@ -9,6 +9,8 @@ use image::{imageops, Frame, RgbaImage};
 
 /// Longest side kept for display. The player bar shows 56px art; Now Playing needs up to 480.
 pub const MAX_SIDE: u32 = 512;
+/// Side of the picture handed to the OS media overlay.
+pub const COVER_SIDE: u32 = 300;
 /// Side of the queue-row thumbnails.
 pub const THUMB_SIDE: u32 = 96;
 
@@ -50,6 +52,20 @@ impl DecodedArt {
     pub fn from_encoded(bytes: &[u8]) -> Option<Self> {
         let img = image::load_from_memory(bytes).ok()?;
         Some(Self::from_rgba(img.to_rgba8()))
+    }
+
+    /// The artwork as a PNG for the OS media overlay (it shows a small square). `None` only if
+    /// encoding fails.
+    pub fn cover_png(&self) -> Option<Vec<u8>> {
+        let small = imageops::resize(
+            &self.pixels,
+            COVER_SIDE,
+            COVER_SIDE,
+            imageops::FilterType::Triangle,
+        );
+        let mut out = std::io::Cursor::new(Vec::new());
+        small.write_to(&mut out, image::ImageFormat::Png).ok()?;
+        Some(out.into_inner())
     }
 
     /// GPUI draws BGRA, so swap the channels once here.

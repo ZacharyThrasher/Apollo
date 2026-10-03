@@ -32,6 +32,8 @@ pub struct IconButton {
     focus: FocusHandle,
     icon: Icon,
     label: SharedString,
+    /// What assistive technology calls the button when that differs from the tooltip.
+    name: Option<SharedString>,
     tooltip: bool,
     size: f32,
     icon_color: Hsla,
@@ -57,6 +59,7 @@ impl IconButton {
             focus: focus.clone(),
             icon,
             label: label.into(),
+            name: None,
             tooltip: true,
             size: layout::MIN_HIT_TARGET,
             icon_color: color::text_secondary(),
@@ -68,6 +71,14 @@ impl IconButton {
             toggled: None,
             on_click: None,
         }
+    }
+
+    /// The accessible name, when the tooltip text is not the right one: a toggle already
+    /// reports its state, so its name must not flip with it ("Like", not "Unlike"), and a
+    /// button whose name another control on screen shares needs saying apart.
+    pub fn accessible_name(mut self, name: impl Into<SharedString>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     pub fn size(mut self, size: f32) -> Self {
@@ -200,7 +211,7 @@ impl RenderOnce for IconButton {
             .rounded(px(radius_px))
             .when_some(self.fill, |d, c| d.bg(c))
             .track_focus(&self.focus.clone().tab_stop(enabled))
-            .aria_label(self.label.clone())
+            .aria_label(self.name.clone().unwrap_or_else(|| self.label.clone()))
             .role(gpui::Role::Button)
             .when_some(self.toggled, |d, on| {
                 d.aria_toggled(if on {

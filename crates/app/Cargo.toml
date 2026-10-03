@@ -51,6 +51,10 @@ ureq = { version = "3", optional = true }
 [target.'cfg(windows)'.dependencies]
 apollo-media = { path = "../media", optional = true }
 apollo-resolver = { path = "../resolver", optional = true }
+# OS media controls (SMTC) on the window GPUI already owns; no second event loop (ADR 0001).
+# Pulls `windows` 0.44 beside GPUI's 0.62: duplicate crates, harmless (docs/build-baseline.md).
+raw-window-handle = "0.6"
+souvlaki = { version = "=0.8.3", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

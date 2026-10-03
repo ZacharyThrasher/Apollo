@@ -216,6 +216,8 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "image",
+ "raw-window-handle",
+ "souvlaki",
  "tempfile",
  "tokio",
  "unicode-segmentation",

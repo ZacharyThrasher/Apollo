@@ -17,6 +17,7 @@ use crate::accent_anim::AccentAnim;
 use crate::art::{ArtSource, DecodedArt};
 use crate::backend::{LibraryTrack, Ports, Prepared};
 use crate::library::LibrarySource;
+use crate::os_media::{MediaState, MediaTrack, OsCommand};
 use crate::settings::VolumeStore;
 use crate::thumbs::Thumbs;
 
@@ -40,6 +41,8 @@ struct ArtImages {
     image: Arc<RenderImage>,
     ambient: Arc<RenderImage>,
     accent: Accent,
+    /// PNG for the OS media overlay, encoded off the UI thread.
+    cover: Option<Arc<[u8]>>,
 }
 
 enum ArtSlot {
@@ -426,7 +429,12 @@ impl PlayerModel {
                     cx.spawn(async move |this, cx| {
                         let decoded = cx
                             .background_executor()
-                            .spawn(async move { source.fetch(&key) })
+                            .spawn(async move {
+                                source.fetch(&key).map(|d| {
+                                    let cover = d.cover_png().map(Arc::from);
+                                    (d, cover)
+                                })
+                            })
                             .await;
                         let _ = this.update(cx, |m, cx| m.art_loaded(owned, decoded, cx));
                     })
@@ -441,11 +449,17 @@ impl PlayerModel {
         cx.notify();
     }
 
-    fn art_loaded(&mut self, id: String, decoded: Option<DecodedArt>, cx: &mut Context<Self>) {
-        let slot = decoded.map(|d| ArtImages {
+    fn art_loaded(
+        &mut self,
+        id: String,
+        decoded: Option<(DecodedArt, Option<Arc<[u8]>>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let slot = decoded.map(|(d, cover)| ArtImages {
             image: d.render_image(),
             ambient: d.ambient_image(),
             accent: d.accent,
+            cover,
         });
         self.art.insert(id.clone(), ArtSlot::Ready(slot));
         if self.current_video().as_deref() == Some(id.as_str()) {
@@ -464,6 +478,70 @@ impl PlayerModel {
         };
         if let Some(t) = target {
             self.accent.retarget(Instant::now(), t, !cx.reduce_motion());
+        }
+    }
+
+    // ---- OS media keys and overlay -----------------------------------------
+
+    /// What the OS media overlay shows. Cheaper than [`view`](Self::view): no artwork images,
+    /// no accent, called on every update.
+    pub fn media_state(&self) -> MediaState {
+        let Some(d) = self.driver.as_ref() else {
+            return MediaState::default();
+        };
+        let c = d.coordinator();
+        let Some(entry) = c.queue().current() else {
+            return MediaState::default();
+        };
+        let track = &entry.track;
+        let id = track.video_id.as_str();
+        MediaState {
+            track: Some(MediaTrack {
+                video_id: id.to_owned(),
+                title: track.title.clone(),
+                artist: artist_line(track).to_string(),
+                album: track
+                    .album
+                    .as_ref()
+                    .map(|a| a.title.clone())
+                    .unwrap_or_default(),
+                duration_ms: c
+                    .duration_ms()
+                    .or_else(|| track.duration.map(|d| d.as_millis() as u64)),
+            }),
+            playing: c.intent() == Intent::Playing,
+            position_ms: c.position_ms(),
+            cover: match self.art.get(id) {
+                Some(ArtSlot::Ready(Some(images))) => images.cover.clone(),
+                _ => None,
+            },
+        }
+    }
+
+    /// A media key or overlay button. Same coordinator events as the on-screen controls.
+    pub fn os_command(&mut self, command: OsCommand, cx: &mut Context<Self>) {
+        let Some(d) = self.driver.as_ref() else {
+            return;
+        };
+        let c = d.coordinator();
+        let playing = c.intent() == Intent::Playing;
+        let seek_to = |ms: u64| Event::Seek {
+            position_ms: c.duration_ms().map_or(ms, |end| ms.min(end)),
+        };
+        let event = match command {
+            // Redundant requests (Play while playing) are dropped rather than replayed.
+            OsCommand::Play => (!playing).then_some(Event::Play),
+            OsCommand::Pause | OsCommand::Stop => playing.then_some(Event::Pause),
+            OsCommand::Toggle => Some(if playing { Event::Pause } else { Event::Play }),
+            OsCommand::Next => Some(Event::Next),
+            OsCommand::Previous => Some(Event::Previous),
+            OsCommand::SeekTo(ms) => Some(seek_to(ms)),
+            OsCommand::SeekBy(delta) => {
+                Some(seek_to(c.position_ms().saturating_add_signed(delta)))
+            }
+        };
+        if let Some(event) = event {
+            self.handle(event, cx);
         }
     }
 

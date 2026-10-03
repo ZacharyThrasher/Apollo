@@ -269,6 +269,7 @@ impl RenderOnce for PlayerBar {
                         controls,
                     )
                     .icon_color(transport::on_off(self.liked))
+                    .accessible_name("Like")
                     .toggled(self.liked)
                     .on_click({
                         let f = self.on_like.clone();
@@ -295,6 +296,7 @@ impl RenderOnce for PlayerBar {
                 div().w(px(VOLUME_WIDTH)).flex_none().child(
                     Slider::new("volume", &self.volume, &self.focus.volume, "Volume", accent)
                         .value(volume_value)
+                        .value_text(format!("{}%", (volume_value * 100.0).round() as u32))
                         .fill(color::text_secondary())
                         .enabled(ready)
                         .on_change({

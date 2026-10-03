@@ -1,6 +1,7 @@
 //! Application bootstrap: window, shortcuts, and the bridge from the service adapters to the UI.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     px, size, App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
@@ -19,9 +20,26 @@ use crate::url_thumbs::NoThumbs;
 const MIN_WIDTH: f32 = crate::ui::player_bar::MIN_BAR_WIDTH;
 const MIN_HEIGHT: f32 = 480.0;
 
+/// How often the system's animation setting is looked at while the app runs.
+pub const MOTION_POLL: Duration = Duration::from_secs(2);
+
+/// Keeps GPUI's reduced-motion flag in step with the system setting: read now, and again every
+/// [`MOTION_POLL`], so switching Windows "Animation effects" off (or back on) while Apollo is
+/// open takes effect without a restart. Every transition and loading pulse already follows the
+/// flag; windows are redrawn when it changes.
+pub fn follow_reduced_motion(cx: &mut App, animations_enabled: impl Fn() -> bool + 'static) {
+    cx.set_reduce_motion(!animations_enabled());
+    cx.spawn(async move |cx| loop {
+        cx.background_executor().timer(MOTION_POLL).await;
+        let reduce = !animations_enabled();
+        cx.update(|cx| cx.set_reduce_motion(reduce));
+    })
+    .detach();
+}
+
 pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     // Windows "Animation effects" off means every transition is instant.
-    cx.set_reduce_motion(!crate::platform::animations_enabled());
+    follow_reduced_motion(cx, crate::platform::animations_enabled);
     crate::style::Fonts::install(cx);
     shell::bind_keys(cx);
     cx.on_action(|_: &Quit, cx| cx.quit());
@@ -33,6 +51,9 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     let ports = mode.account_ports();
     let account = cx.new(|cx| AccountModel::new(ports.clone(), cx));
     let window = open_window(cx, player.clone(), account.clone());
+    // Media keys and the SMTC overlay, on the window just opened.
+    #[cfg(windows)]
+    crate::smtc::install(cx, window, player.clone());
     start_services(
         cx,
         mode,

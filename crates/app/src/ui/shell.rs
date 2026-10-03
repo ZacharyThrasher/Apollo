@@ -307,6 +307,33 @@ impl Shell {
         self.route
     }
 
+    /// The shell's own tab stops by name, in tab order: the nav rail, then the player bar. The
+    /// page and panels in between own theirs. For the tab-order tests.
+    pub fn tab_stops(&self) -> Vec<(&'static str, FocusHandle)> {
+        let mut stops = vec![("nav-toggle", self.nav_toggle.clone())];
+        for (name, handle) in ["nav-home", "nav-search", "nav-library", "nav-settings"]
+            .into_iter()
+            .zip(&self.nav_items)
+        {
+            stops.push((name, handle.clone()));
+        }
+        let bar = &self.bar;
+        stops.extend([
+            ("bar-now-playing", bar.now_playing.clone()),
+            ("bar-shuffle", bar.shuffle.clone()),
+            ("bar-previous", bar.previous.clone()),
+            ("bar-play", bar.play.clone()),
+            ("bar-next", bar.next.clone()),
+            ("bar-repeat", bar.repeat.clone()),
+            ("bar-progress", bar.progress.clone()),
+            ("bar-like", bar.like.clone()),
+            ("bar-mute", bar.mute.clone()),
+            ("bar-volume", bar.volume.clone()),
+            ("bar-queue", bar.queue.clone()),
+        ]);
+        stops
+    }
+
     pub fn library(&self) -> &Entity<LibraryView> {
         &self.library
     }
