@@ -114,13 +114,13 @@ impl Render for NowPlaying {
                 color::text_primary(),
                 cx,
             ))
-            .child(text_line(
+            .child(div().mt(px(spacing::S2)).child(text_line(
                 "np-artist",
-                v.artist.clone(),
-                typography::SECTION,
+                v.subtitle.clone(),
+                typography::NOW_PLAYING_ARTIST,
                 color::text_secondary(),
                 cx,
-            ));
+            )));
 
         let controls = div()
             .flex()

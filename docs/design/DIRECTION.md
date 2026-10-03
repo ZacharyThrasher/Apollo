@@ -66,5 +66,15 @@ Settings > Account. Other screens reuse these.
 4. **Skeleton:** white 4% blocks at final size. The pulse is low amplitude (opacity 0.85 to 1.0, 1.2 s cycle) and static when the OS reduces motion.
 5. **Premium:** the Premium slot shows "Premium" only once the app's own account check has confirmed it, and nothing otherwise. No hedged text ("assumed", "not declared"). Today no check can confirm it (there is no entitlement endpoint), so the slot is empty.
 
+## Queue and Now Playing decisions (coordinator, 2026-10-03)
+Applied to the queue panel (`ui/queue_panel.rs`) and Now Playing (`ui/now_playing.rs`).
+1. **Panel chrome:** the queue panel is flush to the right edge, filled with bg.raised, with a `border.subtle` left border and no radius or inset. It is 320px and slides in over 200 ms.
+2. **Rows:** 56px rows holding a 40px art tile, body title over body artist in text.secondary, and the duration in caption text.tertiary. On hover the duration is replaced by a remove button; the playing row has no remove. The playing row uses the nav's selected-row marker (3px accent bar, 8% selected background, body-strong title). Played rows drop the title to text.secondary. Row content is inset 4px so the focus ring fits between rows.
+3. **Labels and copy:** panel title "Queue" in the section style; "History" and "Up next" labels in body-strong text.secondary; empty state "Nothing up next" with a "Search" text button.
+4. **Reorder:** drag an up-next row onto another to take its place. The insertion line is 2px tall with rounded ends, in text.secondary (accent stays reserved), spanning the row's content width. Keyboard: Alt+Up/Down on the list cursor.
+5. **Clear:** clears up next only, with no confirmation; the playing track keeps playing.
+6. **No-art glyph:** 20px on tiles up to 56px; a quarter of the tile size above that.
+7. **Now Playing:** opened from the player bar's art/title block, closed with Esc, the chevron, or navigating. Art `min(50vh, 480px)`, title in the 40px style, then one line of artist name(s) and album separated by " · " at 18px regular in text.secondary, 8px below the title, truncating with an ellipsis. The progress row and transport sit below, shared with the player bar. Ambient art is blurred at 15% opacity (inside the 12-18% range) and sits only behind this view.
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

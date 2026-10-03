@@ -375,6 +375,7 @@ fn optical_size_switches_at_20px() {
     assert_eq!(LIST_TITLE.optical_size(), OpticalSize::Text);
     assert_eq!(SECTION.optical_size(), OpticalSize::Display);
     assert_eq!(NOW_PLAYING_TITLE.optical_size(), OpticalSize::Display);
+    assert_eq!(NOW_PLAYING_ARTIST.optical_size(), OpticalSize::Text);
 }
 
 #[test]

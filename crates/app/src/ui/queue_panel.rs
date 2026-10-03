@@ -46,6 +46,7 @@ pub const ROW_HEIGHT: f32 = 56.0;
 /// fits between neighbouring rows.
 const ROW_INSET: f32 = spacing::S1;
 const ART: f32 = 40.0;
+const DROP_LINE: f32 = 2.0;
 const DURATION_WIDTH: f32 = spacing::S12;
 
 /// Tab order: after the page, before the player bar.
@@ -591,6 +592,7 @@ impl QueuePanel {
             });
 
         let wrapper = div()
+            .relative()
             .h(px(ROW_HEIGHT))
             .w_full()
             .flex_none()
@@ -598,17 +600,31 @@ impl QueuePanel {
             .py(px(ROW_INSET))
             .child(surface);
         match upcoming_ix {
-            // An up-next row takes a dragged row's place: the insertion line shows above it.
-            Some(target) => wrapper
-                .border_t_2()
-                .border_color(gpui::transparent_black())
-                .drag_over::<DraggedEntry>(|s, _, _, _| s.border_color(color::text_secondary()))
-                .on_drop(cx.listener(move |this, dragged: &DraggedEntry, _, cx| {
-                    let id = dragged.id;
-                    this.player
-                        .update(cx, |m, cx| m.move_upcoming(id, target, cx));
-                }))
-                .into_any_element(),
+            // An up-next row takes a dragged row's place: a 2px rounded line shows above it,
+            // as wide as the row's content.
+            Some(target) => {
+                let drop_group: SharedString = format!("queue-drop-{ix}").into();
+                wrapper
+                    .group(drop_group.clone())
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(spacing::S2))
+                            .right(px(spacing::S2))
+                            .h(px(DROP_LINE))
+                            .rounded_full()
+                            .bg(color::text_secondary())
+                            .opacity(0.0)
+                            .group_drag_over::<DraggedEntry>(drop_group, |s| s.opacity(1.0)),
+                    )
+                    .on_drop(cx.listener(move |this, dragged: &DraggedEntry, _, cx| {
+                        let id = dragged.id;
+                        this.player
+                            .update(cx, |m, cx| m.move_upcoming(id, target, cx));
+                    }))
+                    .into_any_element()
+            }
             None => wrapper.into_any_element(),
         }
     }

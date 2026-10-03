@@ -73,6 +73,8 @@ pub struct PlayerView {
     pub has_track: bool,
     pub title: SharedString,
     pub artist: SharedString,
+    /// Artists and album on one line, for Now Playing.
+    pub subtitle: SharedString,
     pub art: Option<Arc<RenderImage>>,
     /// Blurred artwork for the Now Playing background.
     pub ambient: Option<Arc<RenderImage>>,
@@ -384,6 +386,7 @@ impl PlayerModel {
             has_track: false,
             title: SharedString::default(),
             artist: SharedString::default(),
+            subtitle: SharedString::default(),
             art: None,
             ambient: None,
             playing: false,
@@ -416,6 +419,7 @@ impl PlayerModel {
                 .map(|e| e.track.title.clone().into())
                 .unwrap_or_default(),
             artist: current.map(|e| artist_line(&e.track)).unwrap_or_default(),
+            subtitle: current.map(|e| subtitle_line(&e.track)).unwrap_or_default(),
             art,
             ambient,
             playing,
@@ -514,6 +518,18 @@ fn artist_line(track: &apollo_domain::model::Track) -> SharedString {
         .into()
 }
 
+/// Artist name(s) and album joined by " · "; whichever is missing is left out.
+pub fn subtitle_line(track: &apollo_domain::model::Track) -> SharedString {
+    let artists = artist_line(track);
+    let album = track.album.as_ref().map(|a| a.title.as_str()).unwrap_or("");
+    [artists.as_ref(), album]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+        .into()
+}
+
 pub fn next_repeat(r: Repeat) -> Repeat {
     match r {
         Repeat::Off => Repeat::All,
@@ -559,6 +575,31 @@ mod tests {
         assert_eq!(format_time(3_599_000), "59:59");
         assert_eq!(format_time(3_600_000), "1:00:00");
         assert_eq!(format_time(3_725_000), "1:02:05");
+    }
+
+    #[test]
+    fn the_subtitle_joins_artists_and_album_and_skips_what_is_missing() {
+        use apollo_domain::model::{AlbumRef, ArtistRef, Track};
+        let mut t = Track::new("v", "Title");
+        assert_eq!(subtitle_line(&t), "");
+        t.artists = vec![
+            ArtistRef {
+                name: "A".into(),
+                id: None,
+            },
+            ArtistRef {
+                name: "B".into(),
+                id: None,
+            },
+        ];
+        assert_eq!(subtitle_line(&t), "A, B");
+        t.album = Some(AlbumRef {
+            title: "Album".into(),
+            id: None,
+        });
+        assert_eq!(subtitle_line(&t), "A, B · Album");
+        t.artists.clear();
+        assert_eq!(subtitle_line(&t), "Album");
     }
 
     #[test]
