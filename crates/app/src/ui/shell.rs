@@ -24,6 +24,7 @@ use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::playlist_picker::{self, PlaylistPicker};
+use crate::ui::track_menu::{self, MenuHandle, TrackMenu};
 use crate::ui::queue_panel::QueuePanel;
 use crate::ui::search_page::{self, SearchPage};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
@@ -69,6 +70,7 @@ pub fn bind_keys(cx: &mut App) {
     library::bind_keys(cx);
     home_page::bind_keys(cx);
     playlist_picker::bind_keys(cx);
+    track_menu::bind_keys(cx);
 }
 
 /// A toast on screen, possibly on its way out.
@@ -91,6 +93,8 @@ pub struct Shell {
     /// Likes and playlist adds, and the short error a failed one leaves.
     writes: Entity<LibraryWrites>,
     picker: Entity<PlaylistPicker>,
+    /// The menu a right-click or a row's More button opens.
+    menu: Entity<TrackMenu>,
     /// The error on screen: it outlives the notice by the length of its fade-out.
     toast: Option<ToastShown>,
     /// Where a page opened from another route (a Search card) returns to when Back closes the
@@ -168,6 +172,22 @@ impl Shell {
         let picker = cx.new(|cx| PlaylistPicker::new(player.clone(), writes.clone(), cx));
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         cx.observe(&picker, |_, _, cx| cx.notify()).detach();
+        let menu = cx.new(|cx| {
+            TrackMenu::new(
+                player.clone(),
+                writes.clone(),
+                picker.clone(),
+                {
+                    let weak = weak.clone();
+                    move |target, window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.open_target(target, window, cx));
+                    }
+                },
+                cx,
+            )
+        });
+        cx.observe(&menu, |_, _, cx| cx.notify()).detach();
+        cx.set_global(MenuHandle(menu.clone()));
         let queue_panel = cx.new(|cx| {
             QueuePanel::new(
                 player.clone(),
@@ -279,6 +299,7 @@ impl Shell {
             home_epoch: 0,
             writes,
             picker,
+            menu,
             toast: None,
             detail_origin: None,
             library_epoch: 0,
@@ -323,6 +344,7 @@ impl Shell {
             // Likes and the open picker belong to the old account.
             self.writes.update(cx, |w, cx| w.reset(cx));
             self.picker.update(cx, |p, cx| p.reset(cx));
+            self.menu.update(cx, |m, cx| m.reset(cx));
         }
         let model = self.account.read(cx);
         let (signed_out, by_choice) = (model.is_signed_out(), model.is_signed_out_by_choice());
@@ -395,6 +417,10 @@ impl Shell {
 
     pub fn picker(&self) -> &Entity<PlaylistPicker> {
         &self.picker
+    }
+
+    pub fn menu(&self) -> &Entity<TrackMenu> {
+        &self.menu
     }
 
     pub fn nav_expanded(&self) -> bool {
@@ -808,6 +834,7 @@ impl Render for Shell {
             )
         });
         let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
+        let menu = self.menu.read(cx).is_open().then(|| self.menu.clone());
 
         let fonts = cx.global::<style::Fonts>().text.clone();
         div()
@@ -857,6 +884,7 @@ impl Render for Shell {
             .child(bar)
             .children(toast)
             .children(picker)
+            .children(menu)
     }
 }
 

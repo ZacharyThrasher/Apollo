@@ -103,6 +103,10 @@ struct SimState {
     writes: WriteBehaviour,
     /// Makes `playlists_for` fail (the picker's error state).
     playlists: Option<LoadFailure>,
+    /// Makes `radio` fail (the menu's Start radio error).
+    radio: Option<LoadFailure>,
+    /// Radios the simulation was asked for, by seed video id, for tests.
+    radio_log: Vec<String>,
     /// Writes the simulation received, `(what, video id)`, for tests.
     log: Vec<(String, String)>,
     home: HomeBehaviour,
@@ -117,6 +121,8 @@ impl SimState {
             added: Vec::new(),
             writes: WriteBehaviour::default(),
             playlists: None,
+            radio: None,
+            radio_log: Vec::new(),
             log: Vec::new(),
             home: HomeBehaviour::default(),
             home_log: Vec::new(),
@@ -174,6 +180,16 @@ impl SimLibrary {
     /// Makes the playlist list fail (tests).
     pub fn set_playlists_failure(&self, failure: Option<LoadFailure>) {
         self.state().playlists = failure;
+    }
+
+    /// Makes radio requests fail (tests).
+    pub fn set_radio_failure(&self, failure: Option<LoadFailure>) {
+        self.state().radio = failure;
+    }
+
+    /// The seed of every radio asked for, in order (tests).
+    pub fn radio_log(&self) -> Vec<String> {
+        self.state().radio_log.clone()
     }
 
     /// Video ids in Liked Music, most recently liked first.
@@ -681,6 +697,23 @@ impl LibrarySource for SimLibrary {
     fn liked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
         self.wait(PAGE_LATENCY);
         Ok(Some(self.state().liked.iter().any(|id| id == video_id)))
+    }
+
+    fn radio(&self, video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        {
+            let mut state = self.state();
+            state.radio_log.push(video_id.to_owned());
+            if let Some(f) = state.radio {
+                return Err(f);
+            }
+        }
+        // Every other fixture, the seed left out.
+        let all: Vec<usize> = (0..FIXTURES.len()).collect();
+        Ok(fixture_rows(&all)
+            .into_iter()
+            .filter(|r| r.track.video_id.as_str() != video_id)
+            .collect())
     }
 
     fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {

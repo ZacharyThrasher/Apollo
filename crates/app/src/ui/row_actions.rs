@@ -14,7 +14,9 @@ use gpui::{
 
 use crate::assets::Icon;
 use crate::style::color;
+use crate::ui::anchor;
 use crate::ui::tooltip::Tooltip;
+use crate::ui::track_menu::{self, Anchor, Subject};
 use crate::ui::transport::on_off;
 
 /// Width of one action; a row reserves this much per action so nothing shifts when they appear.
@@ -107,6 +109,33 @@ pub fn playlist_action(
         color::text_secondary(),
         on_click,
     )
+}
+
+/// The More button of a row, which opens the track menu under it. The slot is always there so
+/// nothing shifts; the button shows while the row is `active` (hovered or under the keyboard).
+/// `key` names the slot for the menu's placement and for tests.
+pub fn more_slot(key: impl Into<SharedString>, active: bool, subject: Subject) -> gpui::Div {
+    let key: SharedString = key.into();
+    div()
+        .relative()
+        .size(px(ACTION_SIZE))
+        .flex_none()
+        .debug_selector({
+            let key = key.to_string();
+            move || key.clone()
+        })
+        .child(anchor::probe(key.clone()))
+        .when(active, move |d| {
+            d.child(row_action(
+                ElementId::Name(key.clone()),
+                Icon::MoreHorizontal,
+                "More",
+                color::text_secondary(),
+                move |window, cx| {
+                    track_menu::open(subject.clone(), Anchor::Key(key.clone()), window, cx)
+                },
+            ))
+        })
 }
 
 #[cfg(test)]

@@ -228,6 +228,15 @@ impl LibrarySource for InnerTubeLibrary {
         })
     }
 
+    fn radio(&self, video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
+        let source = self.source()?;
+        let listed = self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.radio(video_id).await
+        })?;
+        Ok(listed.into_iter().map(row).collect())
+    }
+
     fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
         let source = self.source()?;
         self.rt.block_on(async {

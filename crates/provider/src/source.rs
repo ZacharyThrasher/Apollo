@@ -10,7 +10,8 @@ use crate::artist::{page_from_artist, ArtistPage};
 use crate::home::{home_page, HomePage};
 use crate::map::{
     account_validation, classify, classify_write, collections_from_grid, liked_from_rating,
-    page_from_album, page_from_continuation, page_from_playlist, target_from_option, ListedTrack,
+    page_from_album, page_from_continuation, page_from_playlist, target_from_option,
+    track_from_song, ListedTrack,
 };
 use crate::search::{search_results, SearchResults};
 
@@ -209,6 +210,28 @@ impl InnerTubeSource {
         Ok(next.rating.map(liked_from_rating))
     }
 
+    /// The radio seeded from a track: what YouTube Music plays after it (`next` for the `RDAMVM`
+    /// mix), the seed itself left out. A mix that answers with the seed alone names the live mix
+    /// it belongs to; that one is asked for instead.
+    pub async fn radio(&self, video_id: &str) -> Result<Vec<ListedTrack>, LoadFailure> {
+        let mix = format!("RDAMVM{video_id}");
+        let mut next = self
+            .tube
+            .next(&self.client, Some(video_id), Some(&mix))
+            .await
+            .map_err(|e| classify(&e))?;
+        if next.items.len() <= 1 {
+            if let Some(live) = next.automix_playlist_id.clone() {
+                next = self
+                    .tube
+                    .next(&self.client, Some(video_id), Some(&live))
+                    .await
+                    .map_err(|e| classify(&e))?;
+            }
+        }
+        Ok(radio_tracks(&next.items, video_id))
+    }
+
     /// The playlists the account can add `video_id` to, each flagged when it already holds it.
     pub async fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
         let options = self
@@ -263,6 +286,15 @@ impl InnerTubeSource {
     }
 }
 
+/// The playable rows of a radio panel, without the seed (the panel lists it first).
+fn radio_tracks(items: &[innertube::SongItem], seed: &str) -> Vec<ListedTrack> {
+    items
+        .iter()
+        .filter_map(track_from_song)
+        .filter(|t| t.track.video_id.as_str() != seed)
+        .collect()
+}
+
 /// The browse id a playlist page is fetched by: the playlist id with a `VL` prefix. Library and
 /// search cards already carry it; a bare id (a pasted link, a radio id) gets it here.
 pub(crate) fn playlist_browse_id(id: &str) -> String {
@@ -282,7 +314,26 @@ fn to_validation_error(err: innertube::Error) -> ValidationError {
 
 #[cfg(test)]
 mod tests {
-    use super::playlist_browse_id;
+    use super::{playlist_browse_id, radio_tracks};
+    use innertube::SongItem;
+
+    fn song(id: &str) -> SongItem {
+        SongItem {
+            video_id: id.to_owned(),
+            title: format!("Song {id}"),
+            ..SongItem::default()
+        }
+    }
+
+    #[test]
+    fn a_radio_leaves_out_its_seed_and_rows_that_cannot_be_played() {
+        let rows = [song("seedSeed001"), song("radio000001"), song("bad"), song("radio000002")];
+        let ids: Vec<String> = radio_tracks(&rows, "seedSeed001")
+            .iter()
+            .map(|t| t.track.video_id.as_str().to_owned())
+            .collect();
+        assert_eq!(ids, ["radio000001", "radio000002"]);
+    }
 
     #[test]
     fn a_bare_playlist_id_gets_the_browse_prefix_once() {

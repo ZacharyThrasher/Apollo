@@ -65,6 +65,13 @@ icons! {
     HeartRegular => "heart-regular",
     PlaylistAdd => "playlist-add-regular",
     Checkmark => "checkmark-regular",
+    MoreHorizontal => "more-horizontal-regular",
+    Album => "album-regular",
+    Person => "person-regular",
+    Link => "link-regular",
+    Radio => "live-regular",
+    QueueAdd => "queue-add-regular",
+    PlayNext => "play-next-regular",
 }
 
 pub struct Assets;

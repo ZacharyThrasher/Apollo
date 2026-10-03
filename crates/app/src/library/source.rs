@@ -86,6 +86,11 @@ pub trait LibrarySource: Send + Sync {
         Ok(None)
     }
 
+    /// The tracks that follow a track in its radio, the track itself left out.
+    fn radio(&self, _video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
     /// The playlists the account can add a track to, each flagged when it already holds it.
     fn playlists_for(&self, _video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
         Err(LoadFailure::Other)
