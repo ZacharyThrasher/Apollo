@@ -236,3 +236,31 @@ fn canaries_do_not_leak_through_debug_display_or_files() {
         }
     }
 }
+
+/// Opt-in: the REAL WebView2 helper (a window opens for a few seconds on this PC). Cancelled
+/// before any sign-in; proves the throwaway profile is removed even though WebView2's child
+/// processes still hold files for a moment after the helper dies (found in the first real run:
+/// the profile was left behind).
+///   cargo test -p apollo-account --test login -- --ignored --nocapture
+#[test]
+#[ignore = "opens the real sign-in window briefly"]
+fn real_helper_cancelled_leaves_no_profile_behind() {
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/debug/apollo-login-helper.exe");
+    if !helper.exists() {
+        eprintln!("NOT RUN: build apollo-login-helper first");
+        return;
+    }
+    let r = Rig::new();
+    let cfg = LoginConfig::new(helper, r.profiles());
+    let cancel = LoginCancel::new();
+    let c2 = cancel.clone();
+    let t = thread::spawn(move || {
+        thread::sleep(Duration::from_secs(6)); // let WebView2 create its profile and processes
+        c2.cancel();
+    });
+    let err = run_login(&cfg, &cancel).unwrap_err();
+    t.join().unwrap();
+    assert_eq!(err, LoginError::Cancelled);
+    assert_eq!(r.profile_entries(), 0, "WebView2 profile left behind after cancel");
+}

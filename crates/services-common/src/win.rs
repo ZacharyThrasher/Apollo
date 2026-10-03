@@ -242,8 +242,9 @@ impl PrivateDir {
         Ok(p)
     }
 
-    /// Overwrite with zeros then delete everything inside.
-    fn wipe(path: &Path) {
+    /// Overwrite top-level files with zeros, then delete everything inside, nested directories
+    /// included. Returns whether the directory is gone.
+    fn wipe(path: &Path) -> bool {
         if let Ok(rd) = std::fs::read_dir(path) {
             for e in rd.flatten() {
                 let p = e.path();
@@ -255,16 +256,32 @@ impl PrivateDir {
                         }
                     }
                 }
-                let _ = std::fs::remove_file(&p);
             }
         }
-        let _ = std::fs::remove_dir(path);
+        let _ = std::fs::remove_dir_all(path);
+        !path.exists()
+    }
+}
+
+/// Remove a directory tree, retrying while other processes still hold files open (WebView2 helper
+/// processes outlive their host for a moment). Returns whether it is gone.
+pub fn remove_dir_all_with_retry(path: &Path, patience: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        let _ = std::fs::remove_dir_all(path);
+        if !path.exists() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
 impl Drop for PrivateDir {
     fn drop(&mut self) {
-        Self::wipe(&self.path);
+        let _ = Self::wipe(&self.path);
     }
 }
 
@@ -298,8 +315,7 @@ pub fn sweep_stale(base: &Path, prefix: &str) -> usize {
         let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else {
             continue;
         };
-        if pid != me && !process_alive(pid) {
-            PrivateDir::wipe(&e.path());
+        if pid != me && !process_alive(pid) && PrivateDir::wipe(&e.path()) {
             removed += 1;
         }
     }
@@ -346,6 +362,45 @@ mod tests {
         }
         assert!(!path.exists(), "dir removed on drop");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sweep_removes_nested_stale_trees_like_a_webview2_profile() {
+        let base = scratch("sweepnested");
+        let dead = base.join("login-4294967-aaaa");
+        let nested = dead.join("EBWebView").join("Default");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("Cookies"), b"x").unwrap();
+        assert_eq!(sweep_stale(&base, "login"), 1);
+        assert!(!dead.exists(), "nested stale profile survived the sweep");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn retrying_removal_outlasts_a_briefly_locked_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let base = scratch("retry");
+        let f = base.join("locked.db");
+        std::fs::write(&f, b"x").unwrap();
+        // Hold the file open exclusively (no FILE_SHARE_DELETE), as a still-running process would.
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&f).unwrap();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            drop(held);
+        });
+        let t0 = std::time::Instant::now();
+        assert!(remove_dir_all_with_retry(&base, std::time::Duration::from_secs(10)));
+        assert!(t0.elapsed() >= std::time::Duration::from_millis(1000), "it must have waited for the lock");
+        t.join().unwrap();
+
+        // A lock that outlives the patience is reported, not hidden.
+        let base2 = scratch("retry2");
+        let f2 = base2.join("locked.db");
+        std::fs::write(&f2, b"x").unwrap();
+        let held2 = std::fs::OpenOptions::new().read(true).share_mode(0).open(&f2).unwrap();
+        assert!(!remove_dir_all_with_retry(&base2, std::time::Duration::from_millis(600)));
+        drop(held2);
+        assert!(remove_dir_all_with_retry(&base2, std::time::Duration::from_secs(5)));
     }
 
     #[test]
