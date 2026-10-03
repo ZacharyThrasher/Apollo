@@ -76,6 +76,9 @@ struct RowState {
     hover: HoverFade,
 }
 
+/// Called with the value the owner asked for.
+type Toggle = Box<dyn Fn(bool, &mut Window, &mut App) + 'static>;
+
 /// One setting: label left, switch right.
 #[derive(IntoElement)]
 pub struct SettingsRow {
@@ -85,7 +88,7 @@ pub struct SettingsRow {
     on: bool,
     ring: gpui::Hsla,
     accent: Accent,
-    on_toggle: Option<Box<dyn Fn(bool, &mut Window, &mut App) + 'static>>,
+    on_toggle: Option<Toggle>,
 }
 
 impl SettingsRow {

@@ -105,7 +105,24 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
             SqliteSettings::default_location().map(|s| Arc::new(s) as Arc<dyn SettingsBackend>),
         )
     });
-    let window = open_window(cx, player.clone(), account.clone(), settings);
+    // The tray first: with one, "Start minimized to tray" opens the window hidden (no flash),
+    // and without one the window always opens.
+    #[cfg(windows)]
+    let tray = crate::tray_win::Tray::create();
+    #[cfg(windows)]
+    let start_hidden = tray.is_some()
+        && settings
+            .read(cx)
+            .get(&crate::settings::START_MINIMIZED_TO_TRAY);
+    #[cfg(not(windows))]
+    let start_hidden = false;
+    let window = open_window(
+        cx,
+        player.clone(),
+        account.clone(),
+        settings.clone(),
+        !start_hidden,
+    );
     let lyrics = lyrics_service(&mode, stores.db_path.clone());
     let _ = window.update(cx, |shell, _, cx| {
         shell.install_lyrics(lyrics, stores.lyrics_open.clone(), cx)
@@ -113,6 +130,11 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     // Media keys and the SMTC overlay, on the window just opened.
     #[cfg(windows)]
     crate::smtc::install(cx, window, player.clone());
+    // The notification-area icon: transport menu, and the close button hides to it.
+    #[cfg(windows)]
+    if let Some(tray) = tray {
+        crate::tray_win::install(cx, window, tray, player.clone(), settings.clone());
+    }
     start_services(
         cx,
         mode,
@@ -146,6 +168,7 @@ fn open_window(
     player: gpui::Entity<PlayerModel>,
     account: gpui::Entity<AccountModel>,
     settings: gpui::Entity<SettingsModel>,
+    show: bool,
 ) -> WindowHandle<Shell> {
     let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
     let window = cx
@@ -159,6 +182,7 @@ fn open_window(
                 }),
                 window_background: WindowBackgroundAppearance::MicaBackdrop,
                 window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
+                show,
                 ..Default::default()
             },
             |_, cx| cx.new(|cx| Shell::with_settings(player, account, settings, cx)),
