@@ -16,6 +16,7 @@ use crate::library::{LibraryWrites, Notice, Target};
 use crate::motion::PanelSlide;
 use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
+use crate::settings::SettingsModel;
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
 use crate::ui::home_page::{self, HomeView};
@@ -26,6 +27,7 @@ use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::playlist_picker::{self, PlaylistPicker};
 use crate::ui::queue_panel::QueuePanel;
 use crate::ui::search_page::{self, SearchPage};
+use crate::ui::settings_page::{self, SettingsPage};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
 use crate::ui::titlebar::TitleBar;
 use crate::ui::toast::{self, toast, Fade};
@@ -81,7 +83,7 @@ struct ToastShown {
 pub struct Shell {
     player: Entity<PlayerModel>,
     account: Entity<AccountModel>,
-    account_page: Entity<AccountPage>,
+    settings_page: Entity<SettingsPage>,
     library: Entity<LibraryView>,
     home: Entity<HomeModel>,
     home_page: Entity<HomeView>,
@@ -137,6 +139,17 @@ impl Shell {
     pub fn with_account(
         player: Entity<PlayerModel>,
         account: Entity<AccountModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Settings that last only for this run (tests, and windows that do not own any).
+        let settings = cx.new(|_| SettingsModel::new(None));
+        Self::with_settings(player, account, settings, cx)
+    }
+
+    pub fn with_settings(
+        player: Entity<PlayerModel>,
+        account: Entity<AccountModel>,
+        settings: Entity<SettingsModel>,
         cx: &mut Context<Self>,
     ) -> Self {
         // Tab order: nav toggle, nav items, then the player bar left to right.
@@ -197,6 +210,8 @@ impl Shell {
             )
         });
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
+        let settings_page =
+            cx.new(|cx| SettingsPage::new(account_page, settings, player.clone(), cx));
         let library = cx.new(|cx| {
             LibraryView::new(
                 player.clone(),
@@ -271,7 +286,7 @@ impl Shell {
         let mut shell = Self {
             player,
             account,
-            account_page,
+            settings_page,
             library,
             home,
             home_page,
@@ -715,17 +730,25 @@ impl Render for Shell {
                 .pt(px(spacing::S6))
                 .child(self.library.clone())
         } else {
-            page.overflow_y_scroll()
+            let title = style::text_style(div(), typography::PAGE_TITLE, cx)
+                .text_color(color::text_primary())
+                .child(self.route.title());
+            let page = page
+                .overflow_y_scroll()
                 .px(px(spacing::S8))
-                .pt(px(spacing::S6))
-                .child(
-                    style::text_style(div(), typography::PAGE_TITLE, cx)
-                        .text_color(color::text_primary())
-                        .child(self.route.title()),
+                .pt(px(spacing::S6));
+            if self.route == Route::Settings {
+                // One column, title included, no wider than the settings rows read well.
+                page.child(
+                    div()
+                        .w_full()
+                        .max_w(px(settings_page::MAX_WIDTH))
+                        .child(title)
+                        .child(self.settings_page.clone()),
                 )
-                .when(self.route == Route::Settings, |page| {
-                    page.child(self.account_page.clone())
-                })
+            } else {
+                page.child(title)
+            }
         };
 
         // The queue panel slides in from the right edge over 200 ms, then stays mounted only

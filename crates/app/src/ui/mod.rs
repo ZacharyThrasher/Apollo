@@ -13,6 +13,8 @@ pub mod playlist_picker;
 pub mod queue_panel;
 pub mod row_actions;
 pub mod search_page;
+pub mod settings_page;
+pub mod settings_row;
 pub mod shell;
 pub mod skeleton;
 pub mod slider;
