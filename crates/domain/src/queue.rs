@@ -274,6 +274,83 @@ impl Queue {
         true
     }
 
+    /// Drop everything upcoming (manual, context and radio). The current entry and the history
+    /// stay, so playback is not interrupted.
+    pub fn clear_upcoming(&mut self) {
+        self.manual.clear();
+        self.context.clear();
+        self.radio.clear();
+        let keep: Vec<QueueEntryId> = self
+            .history
+            .iter()
+            .map(|e| e.id)
+            .chain(self.current.iter().map(|c| c.entry.id))
+            .collect();
+        self.canonical.retain(|c| keep.contains(c));
+    }
+
+    /// Make an upcoming or history entry the current one (the user picked it in the queue).
+    ///
+    /// Jumping forward moves the current entry and everything skipped into history, in play
+    /// order. Jumping back returns everything after the target (and the current entry) to the
+    /// head of their own segments, like repeated Previous. Returns false for the current entry
+    /// and for unknown ids; the queue is then unchanged.
+    pub fn jump_to(&mut self, id: QueueEntryId) -> bool {
+        if self.current().is_some_and(|c| c.id == id) {
+            return false;
+        }
+        if let Some(pos) = self.history.iter().position(|e| e.id == id) {
+            let mut returning: Vec<QueueEntry> = self.history.drain(pos + 1..).collect();
+            let target = self.history.pop().expect("history entry at pos");
+            if let Some(cur) = self.current.take() {
+                if !cur.removed {
+                    returning.push(cur.entry);
+                }
+            }
+            for entry in returning.into_iter().rev() {
+                match entry.origin {
+                    Origin::Manual => self.manual.insert(0, entry),
+                    Origin::Context => self.context.insert(0, entry),
+                    Origin::Radio => self.radio.insert(0, entry),
+                }
+            }
+            self.current = Some(Current {
+                entry: target,
+                removed: false,
+            });
+            return true;
+        }
+        let Some(skip) = self.upcoming().position(|e| e.id == id) else {
+            return false;
+        };
+        let mut played = Vec::with_capacity(skip);
+        for _ in 0..skip {
+            played.push(
+                self.take_first_upcoming()
+                    .expect("skip counts existing entries"),
+            );
+        }
+        let target = self.take_first_upcoming().expect("target is upcoming");
+        if let Some(prev) = self.current.take() {
+            if !prev.removed {
+                self.history.push(prev.entry);
+            }
+        }
+        self.history.extend(played);
+        self.current = Some(Current {
+            entry: target,
+            removed: false,
+        });
+        true
+    }
+
+    fn take_first_upcoming(&mut self) -> Option<QueueEntry> {
+        [&mut self.manual, &mut self.context, &mut self.radio]
+            .into_iter()
+            .find(|seg| !seg.is_empty())
+            .map(|seg| seg.remove(0))
+    }
+
     fn take_upcoming(&mut self, id: QueueEntryId) -> Option<QueueEntry> {
         for seg in [&mut self.manual, &mut self.context, &mut self.radio] {
             if let Some(pos) = seg.iter().position(|e| e.id == id) {
@@ -771,6 +848,69 @@ mod tests {
         assert!(q.remove(b));
         assert_eq!(cur(&q), "b");
         assert!(matches!(q.previous(0), Previous::Started(_)));
+        assert_eq!(cur(&q), "a");
+        assert_eq!(vids(q.upcoming()), ["c"]);
+    }
+
+    #[test]
+    fn clear_upcoming_keeps_current_and_history() {
+        let mut q = Queue::new();
+        q.play_context(tracks(&["a", "b", "c", "d"]), 1);
+        q.play_next(tracks(&["n"]));
+        q.append_radio(tracks(&["r"]));
+        q.clear_upcoming();
+        assert_eq!(cur(&q), "b");
+        assert_eq!(vids(q.history().iter()), ["a"]);
+        assert_eq!(q.upcoming().count(), 0);
+        // Shuffle toggling after a clear has nothing to restore and does not panic.
+        q.set_shuffle(true, 3);
+        q.set_shuffle(false, 0);
+        assert_eq!(q.upcoming().count(), 0);
+        // New entries after a clear still work.
+        q.add_to_queue(tracks(&["x"]));
+        assert_eq!(vids(q.upcoming()), ["x"]);
+    }
+
+    #[test]
+    fn jump_forward_moves_current_and_skipped_into_history_in_order() {
+        let mut q = Queue::new();
+        q.play_context(tracks(&["a", "b", "c", "d", "e"]), 0);
+        q.play_next(tracks(&["m"]));
+        let d = q.context()[2].id;
+        assert!(q.jump_to(d));
+        assert_eq!(cur(&q), "d");
+        assert_eq!(vids(q.history().iter()), ["a", "m", "b", "c"]);
+        assert_eq!(vids(q.upcoming()), ["e"]);
+        // Previous steps back through the skipped entries.
+        assert!(matches!(q.previous(0), Previous::Started(_)));
+        assert_eq!(cur(&q), "c");
+        assert_eq!(vids(q.upcoming()), ["d", "e"]);
+    }
+
+    #[test]
+    fn jump_back_returns_later_history_and_current_to_upcoming() {
+        let mut q = Queue::new();
+        q.play_context(tracks(&["a", "b", "c", "d", "e"]), 3);
+        let b = q.history()[1].id;
+        assert!(q.jump_to(b));
+        assert_eq!(cur(&q), "b");
+        assert_eq!(vids(q.history().iter()), ["a"]);
+        assert_eq!(vids(q.upcoming()), ["c", "d", "e"]);
+    }
+
+    #[test]
+    fn jump_ignores_current_and_unknown_ids_and_drops_a_removed_current() {
+        let mut q = Queue::new();
+        q.play_context(tracks(&["a", "b", "c"]), 1);
+        let before = q.snapshot();
+        let current = q.current().unwrap().id;
+        assert!(!q.jump_to(current));
+        assert!(!q.jump_to(QueueEntryId(999)));
+        assert_eq!(q.snapshot(), before);
+
+        q.remove(current);
+        let a = q.history()[0].id;
+        assert!(q.jump_to(a));
         assert_eq!(cur(&q), "a");
         assert_eq!(vids(q.upcoming()), ["c"]);
     }

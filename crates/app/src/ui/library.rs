@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use apollo_domain::library::{Collection, CollectionKind};
@@ -14,10 +15,9 @@ use apollo_domain::listing::LoadFailure;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
-    actions, div, img, prelude::*, px, uniform_list, Animation, AnimationExt, AnyElement, App,
-    Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, ImageSource, IntoElement,
-    KeyBinding, ObjectFit, ParentElement, Render, SharedString, Styled, UniformListScrollHandle,
-    Window,
+    actions, div, prelude::*, px, uniform_list, Animation, AnimationExt, AnyElement, App, Context,
+    ElementId, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, ParentElement, Render,
+    SharedString, Styled, UniformListScrollHandle, Window,
 };
 
 use crate::assets::Icon;
@@ -26,8 +26,9 @@ use crate::library::source::TrackRow;
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::style::{self, color};
-use crate::ui::button::{focus_ring, keyboard_focused, IconButton};
-use crate::ui::text_button::{ButtonStyle, TextButton};
+use crate::ui::art_tile::art_tile;
+use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
+use crate::ui::text_button::TextButton;
 use crate::ui::tooltip::Tooltip;
 
 actions!(
@@ -81,11 +82,6 @@ const PLAYING_BAR: f32 = 3.0;
 const SKELETON_ROWS: usize = 12;
 /// One pulse of the skeleton shimmer.
 const SHIMMER: Duration = Duration::from_millis(1600);
-
-pub enum LibraryEvent {
-    /// The empty state's action: go find music.
-    OpenSearch,
-}
 
 #[derive(Clone)]
 struct Focus {
@@ -147,27 +143,31 @@ pub struct LibraryView {
     /// Where the overview's selection was when a collection was opened.
     overview_selected: usize,
     hover: RowHover,
+    /// The empty state's action: go find music.
+    on_search: Rc<Handler>,
     /// Rows drawn last frame: with virtualization this stays a screenful however long the list.
     rendered: Range<usize>,
 }
 
-impl EventEmitter<LibraryEvent> for LibraryView {}
-
 impl LibraryView {
-    pub fn new(player: Entity<PlayerModel>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        player: Entity<PlayerModel>,
+        on_search: impl Fn(&mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let stop = |cx: &mut Context<Self>, index: isize| {
             cx.focus_handle().tab_index(index).tab_stop(true)
         };
-        // Tab order sits between the nav rail (1-4) and the player bar (10+). Overview and
-        // detail never show at once, so they share indices.
+        // Tab order sits after the nav rail (1-5), in the slots Now Playing uses (they never
+        // show together). Overview and detail never show at once, so they share indices.
         let focus = Focus {
-            back: stop(cx, 5),
-            tab_playlists: stop(cx, 5),
-            tab_albums: stop(cx, 6),
-            play: stop(cx, 6),
-            shuffle: stop(cx, 7),
-            list: stop(cx, 8),
-            retry: stop(cx, 9),
+            back: stop(cx, 6),
+            tab_playlists: stop(cx, 6),
+            tab_albums: stop(cx, 7),
+            play: stop(cx, 7),
+            shuffle: stop(cx, 8),
+            list: stop(cx, 9),
+            retry: stop(cx, 10),
         };
         let model = cx.new(|cx| LibraryModel::new(player.clone(), cx));
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
@@ -183,8 +183,18 @@ impl LibraryView {
             selected: 0,
             overview_selected: 0,
             hover: RowHover::default(),
+            on_search: Rc::new(Box::new(on_search)),
             rendered: 0..0,
         }
+    }
+
+    /// Back to a blank overview (the account changed: nothing of the old one may show).
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |m, cx| m.reset(cx));
+        self.selected = 0;
+        self.overview_selected = 0;
+        self.hover.clear();
+        cx.notify();
     }
 
     pub fn rendered_rows(&self) -> Range<usize> {
@@ -322,6 +332,11 @@ impl LibraryView {
             }
             self.model.read(cx).art(url, size)
         });
+        // Everything but Liked Music (which has no cover) is the shell's art tile.
+        if !matches!(glyph, Icon::HeartFilled) {
+            return art_tile(px_size, image).into_any_element();
+        }
+        // A decorative glyph: the 3:1 non-text minimum applies, not 4.5:1.
         div()
             .size(px(px_size))
             .flex_none()
@@ -331,22 +346,13 @@ impl LibraryView {
             .rounded(px(radius::MEDIUM))
             .overflow_hidden()
             .bg(color::bg_overlay())
-            .map(|d| match image {
-                Some(image) => d.child(
-                    img(ImageSource::Render(image))
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                ),
-                // No artwork (yet): a quiet glyph. Decorative, so the 3:1 non-text minimum
-                // applies, not 4.5:1.
-                None => d.child(
-                    gpui::svg()
-                        .path(glyph.path())
-                        .size(px(layout::ICON_SIZE))
-                        .flex_none()
-                        .text_color(glyph_color),
-                ),
-            })
+            .child(
+                gpui::svg()
+                    .path(glyph.path())
+                    .size(px(layout::ICON_SIZE))
+                    .flex_none()
+                    .text_color(glyph_color),
+            )
             .into_any_element()
     }
 
@@ -455,14 +461,12 @@ impl LibraryView {
                     .child(text.into()),
             )
             .child(
-                TextButton::new(
-                    ElementId::from(action),
-                    &self.focus.retry,
-                    action,
-                    ButtonStyle::Plain,
-                    accent,
-                )
-                .on_click(on_action),
+                div()
+                    .debug_selector(|| "library-notice-action".into())
+                    .child(
+                        TextButton::new(ElementId::from(action), &self.focus.retry, action, accent)
+                            .on_click(on_action),
+                    ),
             )
             .into_any_element()
     }
@@ -619,13 +623,13 @@ impl LibraryView {
         accent: Accent,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let this = cx.entity();
+        let on_search = self.on_search.clone();
         self.notice(
             text,
             false,
             "Search",
             accent,
-            move |_, cx| this.update(cx, |_, cx| cx.emit(LibraryEvent::OpenSearch)),
+            move |w, cx| on_search(w, cx),
             cx,
         )
     }
@@ -930,31 +934,23 @@ impl LibraryView {
                             .gap(px(spacing::S2))
                             .mt(px(spacing::S2))
                             .child(
-                                TextButton::new(
-                                    "library-play",
-                                    &self.focus.play,
-                                    "Play",
-                                    ButtonStyle::Primary,
-                                    accent,
-                                )
-                                .icon(Icon::Play)
-                                .enabled(can_play || loading)
-                                .busy(play_busy)
-                                .on_click(move |_, cx| {
-                                    model.update(cx, |m, cx| {
-                                        m.request_play(PlayRequest::PLAY_ALL, cx)
-                                    })
-                                }),
+                                TextButton::new("library-play", &self.focus.play, "Play", accent)
+                                    .primary()
+                                    .enabled(can_play || loading)
+                                    .busy(play_busy)
+                                    .on_click(move |_, cx| {
+                                        model.update(cx, |m, cx| {
+                                            m.request_play(PlayRequest::PLAY_ALL, cx)
+                                        })
+                                    }),
                             )
                             .child(
                                 TextButton::new(
                                     "library-shuffle",
                                     &self.focus.shuffle,
                                     "Shuffle",
-                                    ButtonStyle::Secondary,
                                     accent,
                                 )
-                                .icon(Icon::ShuffleRegular)
                                 .enabled(can_play || loading)
                                 .busy(shuffle_busy)
                                 .on_click(move |_, cx| {

@@ -26,6 +26,8 @@ const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 pub struct Identity {
     pub name: String,
     pub handle: Option<String>,
+    /// Channel picture URL when the service gave one (https, Google-hosted images only).
+    pub avatar_url: Option<String>,
     /// Opaque id the service uses to address this channel (page id), when it gives one.
     pub page_id: Option<String>,
     pub selected_by_service: bool,
@@ -335,6 +337,27 @@ fn first_string(v: &Value, key: &str) -> Option<String> {
     found.iter().find_map(|f| f.as_str().map(str::to_owned))
 }
 
+/// Hosts the account service serves channel pictures from. Anything else is ignored, so a
+/// response can never make the app fetch an arbitrary address.
+const AVATAR_HOSTS: &[&str] = &[".googleusercontent.com", ".ggpht.com"];
+
+/// The largest `accountPhoto` thumbnail that is an https URL on a known image host.
+fn avatar_url(v: &Value) -> Option<String> {
+    let thumbs = v.get("accountPhoto")?.get("thumbnails")?.as_array()?;
+    thumbs
+        .iter()
+        .filter_map(|t| {
+            let url = t.get("url")?.as_str()?;
+            let host = url.strip_prefix("https://")?.split(['/', '?', '#']).next()?;
+            let host = host.rsplit('@').next()?; // never trust userinfo tricks
+            let allowed = !host.contains(':')
+                && AVATAR_HOSTS.iter().any(|h| host.ends_with(h) && host.len() > h.len());
+            allowed.then(|| (t.get("width").and_then(Value::as_u64).unwrap_or(0), url))
+        })
+        .max_by_key(|(w, _)| *w)
+        .map(|(_, url)| url.to_owned())
+}
+
 fn parse_active_account(j: &Value) -> Option<Identity> {
     let mut hdr = Vec::new();
     find_all(j, "activeAccountHeaderRenderer", &mut hdr);
@@ -342,6 +365,7 @@ fn parse_active_account(j: &Value) -> Option<Identity> {
     Some(Identity {
         name: h.get("accountName").and_then(text_of)?,
         handle: h.get("channelHandle").and_then(text_of),
+        avatar_url: avatar_url(h),
         page_id: None,
         selected_by_service: true,
     })
@@ -356,6 +380,7 @@ fn parse_account_items(j: &Value) -> Vec<Identity> {
             Some(Identity {
                 name: it.get("accountName").and_then(text_of)?,
                 handle: it.get("accountByline").and_then(text_of),
+                avatar_url: avatar_url(it),
                 page_id: first_string(it, "pageId"),
                 selected_by_service: it["isSelected"].as_bool().unwrap_or(false),
             })
@@ -534,7 +559,7 @@ mod tests {
 
     #[test]
     fn debug_output_hides_identity_and_values() {
-        let id = Identity { name: "Real Name".into(), handle: Some("@h".into()), page_id: Some("P".into()), selected_by_service: true };
+        let id = Identity { name: "Real Name".into(), handle: Some("@h".into()), avatar_url: None, page_id: Some("P".into()), selected_by_service: true };
         assert!(!format!("{id:?} {:?}", Validation::Valid { identities: vec![id.clone()] }).contains("Real Name"));
     }
 
@@ -594,5 +619,32 @@ mod tests {
         assert!(authorization_header(&jar_with(&["SID"]), 1000).is_none());
         // No cookie value appears in the header.
         assert!(!a.contains("VALUECANARY"));
+    }
+
+    #[test]
+    fn avatar_is_the_largest_https_thumbnail_on_a_google_image_host() {
+        let item = serde_json::json!({"accountPhoto": {"thumbnails": [
+            {"url": "https://lh3.googleusercontent.com/a=s48", "width": 48},
+            {"url": "https://yt3.ggpht.com/a=s176", "width": 176},
+            {"url": "https://evil.example/huge", "width": 999},
+        ]}});
+        assert_eq!(avatar_url(&item).as_deref(), Some("https://yt3.ggpht.com/a=s176"));
+    }
+
+    #[test]
+    fn avatar_urls_that_could_point_elsewhere_are_ignored() {
+        for url in [
+            "http://lh3.googleusercontent.com/a",
+            "https://googleusercontent.com/a",
+            "https://lh3.googleusercontent.com@evil.example/a",
+            "https://lh3.googleusercontent.com:8443/a",
+            "https://evil.example/.googleusercontent.com/a",
+            "https://evilgoogleusercontent.com/a",
+            "data:image/png;base64,AAAA",
+        ] {
+            let item = serde_json::json!({"accountPhoto": {"thumbnails": [{"url": url, "width": 10}]}});
+            assert_eq!(avatar_url(&item), None, "{url}");
+        }
+        assert_eq!(avatar_url(&serde_json::json!({})), None);
     }
 }

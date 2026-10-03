@@ -60,7 +60,7 @@ fn setup(cx: &mut TestAppContext) -> (Page, &mut VisualTestContext) {
     });
     shell.update_in(vcx, |s, window, cx| {
         s.focus_root(window, cx);
-        s.go_to(Route::Library, cx);
+        s.show_route(Route::Library, cx);
     });
     player.update(vcx, |m, cx| m.install(prepared(), cx));
     vcx.run_until_parked();
@@ -346,10 +346,23 @@ fn the_empty_states_action_opens_search(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     open(&page, vcx, sim::EMPTY_ID);
     vcx.run_until_parked();
-    // Drive the same path the empty state's button takes.
-    page.view.update(vcx, |_, cx| {
-        cx.emit(apollo_app::ui::library::LibraryEvent::OpenSearch)
-    });
+    let bounds = vcx
+        .debug_bounds("library-notice-action")
+        .expect("the empty state has an action");
+    vcx.simulate_click(bounds.center(), gpui::Modifiers::none());
     page.shell
         .read_with(vcx, |s, _| assert_eq!(s.route(), Route::Search));
+}
+
+#[gpui::test]
+fn an_account_change_drops_the_open_collection_and_reloads(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open(&page, vcx, LIKED_MUSIC_BROWSE_ID);
+    page.view.update(vcx, |v, cx| v.reset(cx));
+    vcx.run_until_parked();
+    page.model.read_with(vcx, |m, _| {
+        assert!(m.detail().is_none());
+        assert!(matches!(m.collections(), Load::Ready(_)));
+    });
+    assert_eq!(page.view.read_with(vcx, |v, _| v.selected()), 0);
 }

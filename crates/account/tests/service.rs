@@ -53,6 +53,7 @@ fn ident(n: usize) -> Identity {
     Identity {
         name: format!("Channel {n}"),
         handle: Some(format!("@c{n}")),
+        avatar_url: None,
         page_id: Some(format!("PAGE{n}")),
         selected_by_service: n == 0,
     }

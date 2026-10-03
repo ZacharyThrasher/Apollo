@@ -205,6 +205,26 @@ impl LibraryModel {
         }
     }
 
+    /// Forgets everything loaded (the account changed) and loads the lists again. Answers still
+    /// in flight for the old account are dropped.
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.detail = None;
+        // Covers still downloading finish into the new cache harmlessly; keep their count.
+        self.thumbs = Thumbs {
+            inflight: self.thumbs.inflight,
+            ..Thumbs::default()
+        };
+        self.tab = Tab::Playlists;
+        self.collections_rev += 1;
+        self.collections = Load::Idle;
+        if self.source.is_some() {
+            self.load_collections(cx);
+        } else {
+            self.try_start(cx);
+        }
+        cx.notify();
+    }
+
     pub fn reload_collections(&mut self, cx: &mut Context<Self>) {
         self.load_collections(cx);
     }

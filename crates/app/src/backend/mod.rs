@@ -15,9 +15,11 @@ use apollo_domain::playback::Event;
 use apollo_runtime::{MediaEngine, Resolver};
 use apollo_services_common::EventSink;
 
+use crate::account::AccountPorts;
 use crate::art::ArtSource;
 use crate::library::LibrarySource;
 
+pub mod account;
 #[cfg(all(windows, feature = "real-services"))]
 pub mod real;
 pub mod sim;
@@ -47,17 +49,24 @@ pub struct Prepared {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     Sim,
+    /// The simulation, but nobody is signed in at launch (to see the sign-in screen).
+    SimSignedOut,
     #[cfg(all(windows, feature = "real-services"))]
     Real(real::Options),
 }
 
 impl Mode {
     /// `--real [--source stored|firefox|login|file:<path>] [--tracks N]` selects the real
-    /// services when the feature is compiled in; anything else runs the simulation.
+    /// services when the feature is compiled in; anything else runs the simulation
+    /// (`--signed-out` starts it without an account).
     pub fn from_args(args: &[String]) -> Result<Self, String> {
         let wants_real = args.iter().any(|a| a == "--real");
         if !wants_real {
-            return Ok(Mode::Sim);
+            return Ok(if args.iter().any(|a| a == "--signed-out") {
+                Mode::SimSignedOut
+            } else {
+                Mode::Sim
+            });
         }
         #[cfg(all(windows, feature = "real-services"))]
         {
@@ -69,12 +78,41 @@ impl Mode {
         }
     }
 
-    /// Build the backend. Adapters report completions through `sink`.
-    pub fn prepare(self, sink: EventSink) -> Result<Prepared, String> {
+    /// The account service and the platform's sign-in source. Cheap: nothing is read or
+    /// validated until [`Mode::start_account`].
+    pub fn account_ports(&self) -> AccountPorts {
         match self {
-            Mode::Sim => Ok(sim::prepare(sink)),
+            Mode::Sim | Mode::SimSignedOut => account::ports(),
             #[cfg(all(windows, feature = "real-services"))]
-            Mode::Real(opts) => real::prepare(opts, sink),
+            Mode::Real(opts) => real::account_ports(opts),
+        }
+    }
+
+    /// Restore the stored session (and, in the simulation, sign in as the demo listener).
+    /// Blocking; runs off the UI thread.
+    pub fn start_account(&self, ports: &AccountPorts) {
+        match self {
+            Mode::Sim => account::start(ports, true),
+            Mode::SimSignedOut => account::start(ports, false),
+            #[cfg(all(windows, feature = "real-services"))]
+            Mode::Real(opts) => real::start_account(opts, ports),
+        }
+    }
+
+    /// Build the backend. Adapters report completions through `sink`; the resolver reads the
+    /// session from `account`.
+    pub fn prepare(
+        self,
+        sink: EventSink,
+        account: &apollo_account::service::AccountService,
+    ) -> Result<Prepared, String> {
+        match self {
+            Mode::Sim | Mode::SimSignedOut => {
+                let _ = account;
+                Ok(sim::prepare(sink))
+            }
+            #[cfg(all(windows, feature = "real-services"))]
+            Mode::Real(opts) => real::prepare(opts, sink, account),
         }
     }
 }

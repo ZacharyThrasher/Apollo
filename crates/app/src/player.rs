@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use apollo_domain::model::Track;
+use apollo_domain::model::{QueueEntryId, Track};
 use apollo_domain::playback::{Event, Failure, Intent, Phase};
-use apollo_domain::queue::Repeat;
+use apollo_domain::queue::{QueueEntry, Repeat};
 use apollo_runtime::Driver;
 use apollo_theme::Accent;
 use gpui::{Context, RenderImage, SharedString};
@@ -18,6 +18,7 @@ use crate::art::{ArtSource, DecodedArt};
 use crate::backend::{LibraryTrack, Ports, Prepared};
 use crate::library::LibrarySource;
 use crate::settings::VolumeStore;
+use crate::thumbs::Thumbs;
 
 type AppDriver =
     Driver<Box<dyn apollo_runtime::Resolver + Send>, Box<dyn apollo_runtime::MediaEngine + Send>>;
@@ -34,10 +35,36 @@ pub enum Status {
     Unavailable(SharedString),
 }
 
+/// The images and accent made from one track's artwork.
+struct ArtImages {
+    image: Arc<RenderImage>,
+    ambient: Arc<RenderImage>,
+    accent: Accent,
+}
+
 enum ArtSlot {
     Loading,
     /// `None` = the track has no usable artwork.
-    Ready(Option<(Arc<RenderImage>, Accent)>),
+    Ready(Option<ArtImages>),
+}
+
+/// One queue row, copied out of the model. Artwork is looked up per row with
+/// [`PlayerModel::thumb`], so only the rows on screen ever load any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueRow {
+    pub id: QueueEntryId,
+    pub video_id: String,
+    pub title: SharedString,
+    pub artist: SharedString,
+    pub duration_ms: Option<u64>,
+}
+
+/// The queue as the panel draws it: played, now playing, then what is up next in play order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueueView {
+    pub history: Vec<QueueRow>,
+    pub current: Option<QueueRow>,
+    pub upcoming: Vec<QueueRow>,
 }
 
 /// Everything the views draw, copied out of the model.
@@ -48,6 +75,8 @@ pub struct PlayerView {
     pub title: SharedString,
     pub artist: SharedString,
     pub art: Option<Arc<RenderImage>>,
+    /// Blurred artwork for the Now Playing background.
+    pub ambient: Option<Arc<RenderImage>>,
     /// The user wants audio (play button shows pause).
     pub playing: bool,
     /// Waiting on the resolver/engine while the user wants audio.
@@ -69,6 +98,7 @@ pub struct PlayerModel {
     art_source: Option<Arc<dyn ArtSource>>,
     library: Option<Arc<dyn LibrarySource>>,
     art: HashMap<String, ArtSlot>,
+    thumbs: Thumbs,
     accent: AccentAnim,
     volume: u8,
     muted: bool,
@@ -84,6 +114,7 @@ impl PlayerModel {
             art_source: None,
             library: None,
             art: HashMap::new(),
+            thumbs: Thumbs::default(),
             accent: AccentAnim::new(Accent::fallback()),
             volume: DEFAULT_VOLUME,
             muted: false,
@@ -176,6 +207,31 @@ impl PlayerModel {
         self.handle(event, cx);
     }
 
+    pub fn next(&mut self, cx: &mut Context<Self>) {
+        self.handle(Event::Next, cx);
+    }
+
+    pub fn previous(&mut self, cx: &mut Context<Self>) {
+        self.handle(Event::Previous, cx);
+    }
+
+    pub fn retry(&mut self, cx: &mut Context<Self>) {
+        self.handle(Event::Play, cx);
+    }
+
+    pub fn seek(&mut self, position_ms: u64, cx: &mut Context<Self>) {
+        self.handle(Event::Seek { position_ms }, cx);
+    }
+
+    fn next_seed(&mut self) -> u64 {
+        let seed = self.shuffle_seed;
+        self.shuffle_seed = self
+            .shuffle_seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        seed
+    }
+
     /// Replace the queue with `tracks` and start playing. `start` is the first track's index
     /// (default: the first, or a random one when shuffling); `shuffle` sets the queue's shuffle
     /// on or off, `None` keeping the current setting.
@@ -211,31 +267,6 @@ impl PlayerModel {
         self.handle(Event::PlayContext { tracks, start }, cx);
     }
 
-    pub fn next(&mut self, cx: &mut Context<Self>) {
-        self.handle(Event::Next, cx);
-    }
-
-    pub fn previous(&mut self, cx: &mut Context<Self>) {
-        self.handle(Event::Previous, cx);
-    }
-
-    pub fn retry(&mut self, cx: &mut Context<Self>) {
-        self.handle(Event::Play, cx);
-    }
-
-    pub fn seek(&mut self, position_ms: u64, cx: &mut Context<Self>) {
-        self.handle(Event::Seek { position_ms }, cx);
-    }
-
-    fn next_seed(&mut self) -> u64 {
-        let seed = self.shuffle_seed;
-        self.shuffle_seed = self
-            .shuffle_seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        seed
-    }
-
     pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         let seed = self.next_seed();
         if let Some(d) = self.driver.as_mut() {
@@ -249,6 +280,40 @@ impl PlayerModel {
         if let Some(d) = self.driver.as_mut() {
             let next = next_repeat(d.coordinator().queue().repeat());
             d.edit_queue(|q| q.set_repeat(next));
+        }
+        self.sync(cx);
+    }
+
+    /// Play an entry picked in the queue panel.
+    pub fn play_entry(&mut self, id: QueueEntryId, cx: &mut Context<Self>) {
+        self.handle(Event::PlayEntry { id }, cx);
+    }
+
+    pub fn remove_entry(&mut self, id: QueueEntryId, cx: &mut Context<Self>) {
+        self.edit_queue(cx, |q| {
+            q.remove(id);
+        });
+    }
+
+    /// Move an upcoming entry to `index` in the up-next order (it takes that row's place).
+    pub fn move_upcoming(&mut self, id: QueueEntryId, index: usize, cx: &mut Context<Self>) {
+        self.edit_queue(cx, |q| {
+            q.move_upcoming(id, index);
+        });
+    }
+
+    /// Drop everything up next; what is playing keeps playing.
+    pub fn clear_upcoming(&mut self, cx: &mut Context<Self>) {
+        self.edit_queue(cx, |q| q.clear_upcoming());
+    }
+
+    fn edit_queue(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut apollo_domain::queue::Queue),
+    ) {
+        if let Some(d) = self.driver.as_mut() {
+            d.edit_queue(f);
         }
         self.sync(cx);
     }
@@ -346,7 +411,11 @@ impl PlayerModel {
     }
 
     fn art_loaded(&mut self, id: String, decoded: Option<DecodedArt>, cx: &mut Context<Self>) {
-        let slot = decoded.map(|d| (d.render_image(), d.accent));
+        let slot = decoded.map(|d| ArtImages {
+            image: d.render_image(),
+            ambient: d.ambient_image(),
+            accent: d.accent,
+        });
         self.art.insert(id.clone(), ArtSlot::Ready(slot));
         if self.current_video().as_deref() == Some(id.as_str()) {
             self.steer_accent(&id, cx);
@@ -358,7 +427,7 @@ impl PlayerModel {
     /// absent) it crossfades to the track's accent or the fallback.
     fn steer_accent(&mut self, id: &str, cx: &Context<Self>) {
         let target = match self.art.get(id) {
-            Some(ArtSlot::Ready(Some((_, accent)))) => Some(*accent),
+            Some(ArtSlot::Ready(Some(images))) => Some(images.accent),
             Some(ArtSlot::Ready(None)) => Some(Accent::fallback()),
             _ => None,
         };
@@ -377,6 +446,7 @@ impl PlayerModel {
             title: SharedString::default(),
             artist: SharedString::default(),
             art: None,
+            ambient: None,
             playing: false,
             busy: false,
             position_ms: 0,
@@ -394,10 +464,12 @@ impl PlayerModel {
         };
         let c = d.coordinator();
         let current = c.queue().current();
-        let art = current.and_then(|e| match self.art.get(e.track.video_id.as_str()) {
-            Some(ArtSlot::Ready(Some((img, _)))) => Some(img.clone()),
+        let images = current.and_then(|e| match self.art.get(e.track.video_id.as_str()) {
+            Some(ArtSlot::Ready(Some(images))) => Some(images),
             _ => None,
         });
+        let art = images.map(|i| i.image.clone());
+        let ambient = images.map(|i| i.ambient.clone());
         let playing = c.intent() == Intent::Playing;
         PlayerView {
             has_track: current.is_some(),
@@ -406,6 +478,7 @@ impl PlayerModel {
                 .unwrap_or_default(),
             artist: current.map(|e| artist_line(&e.track)).unwrap_or_default(),
             art,
+            ambient,
             playing,
             busy: playing
                 && matches!(
@@ -421,6 +494,61 @@ impl PlayerModel {
             error: c.error(),
             ..base
         }
+    }
+}
+
+impl PlayerModel {
+    // ---- queue panel -------------------------------------------------------
+
+    /// The queue as the panel draws it. Empty until the backend is installed.
+    pub fn queue_view(&self) -> QueueView {
+        let Some(d) = self.driver.as_ref() else {
+            return QueueView::default();
+        };
+        let q = d.coordinator().queue();
+        QueueView {
+            history: q.history().iter().map(queue_row).collect(),
+            current: q.current().map(queue_row),
+            upcoming: q.upcoming().map(queue_row).collect(),
+        }
+    }
+
+    /// A row's small artwork, once loaded.
+    pub fn thumb(&self, video_id: &str) -> Option<Arc<RenderImage>> {
+        self.thumbs.get(video_id)
+    }
+
+    /// Start loading artwork for rows that are on screen. Ids already loading or loaded are
+    /// skipped, so calling this on every paint is cheap.
+    pub fn request_thumbs(&mut self, video_ids: Vec<String>, cx: &mut Context<Self>) {
+        let Some(source) = self.art_source.clone() else {
+            return;
+        };
+        for id in self.thumbs.take_missing(video_ids) {
+            let source = source.clone();
+            let key = id.clone();
+            cx.spawn(async move |this, cx| {
+                let image = cx
+                    .background_executor()
+                    .spawn(async move { source.fetch(&key).map(|d| d.thumb_image()) })
+                    .await;
+                let _ = this.update(cx, |m, cx| {
+                    m.thumbs.finish(id, image);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+}
+
+fn queue_row(entry: &QueueEntry) -> QueueRow {
+    QueueRow {
+        id: entry.id,
+        video_id: entry.track.video_id.as_str().to_owned(),
+        title: entry.track.title.clone().into(),
+        artist: artist_line(&entry.track),
+        duration_ms: entry.track.duration.map(|d| d.as_millis() as u64),
     }
 }
 

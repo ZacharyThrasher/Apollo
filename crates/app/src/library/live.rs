@@ -6,7 +6,7 @@
 //! rotates `__Secure-*PSIDTS` on these very requests and invalidates the old value, so dropping
 //! the new one would eventually sign the account out). Nothing here logs cookies, ids or titles.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apollo_domain::library::Collection;
@@ -21,48 +21,90 @@ use crate::art::DecodedArt;
 const ART_TIMEOUT: Duration = Duration::from_secs(10);
 const ART_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
+/// The channel a multi-channel login acts as (`None` for a single-account login).
+pub type DataSyncId = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// A signed-in InnerTube session and what it was built from. A new login, logout or channel
+/// choice changes either, and the next request builds a fresh one.
+struct Built {
+    epoch: u64,
+    data_sync_id: Option<String>,
+    source: InnerTubeSource,
+}
+
 pub struct InnerTubeLibrary {
     rt: tokio::runtime::Runtime,
-    source: InnerTubeSource,
+    session: Arc<dyn SessionProvider>,
+    data_sync_id: DataSyncId,
+    built: Mutex<Option<Built>>,
     agent: ureq::Agent,
 }
 
 impl InnerTubeLibrary {
-    /// `data_sync_id` addresses the selected channel when the login can act as several; `None`
-    /// for a single-account login.
+    /// Nothing is read from the account until the first request, so this works signed out.
     pub fn new(
         session: Arc<dyn SessionProvider>,
-        data_sync_id: Option<String>,
+        data_sync_id: DataSyncId,
     ) -> Result<Self, String> {
-        let snapshot = session
-            .snapshot()
-            .ok_or_else(|| "no validated account session".to_string())?;
-        let cookie = cookie_header(snapshot.cookies_netscape.expose(), unix_now())
-            .ok_or_else(|| "the session has no YouTube cookies".to_string())?;
-        let sent = cookie.clone();
-        let source = InnerTubeSource::new(
-            Session {
-                locale: Locale::default(),
-                visitor_data: None,
-                data_sync_id,
-                cookie: Some(cookie),
-            },
-            None,
-        )
-        .map_err(|e| e.to_string())?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("apollo-library")
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(ART_TIMEOUT))
+            .build()
+            .into();
+        Ok(Self {
+            rt,
+            session,
+            data_sync_id,
+            built: Mutex::new(None),
+            agent,
+        })
+    }
 
-        // Rotated cookies go back to the account service, as long as the session it was built
-        // from is still current.
+    /// The session for the current account, built on first use and after the account changes.
+    /// `Session` failure when nobody is signed in.
+    fn source(&self) -> Result<InnerTubeSource, LoadFailure> {
+        let snapshot = self.session.snapshot().ok_or(LoadFailure::Session)?;
+        let data_sync_id = (self.data_sync_id)();
+        let mut built = self.built.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(b) = built.as_ref() {
+            if b.epoch == snapshot.epoch && b.data_sync_id == data_sync_id {
+                return Ok(b.source.clone());
+            }
+        }
+        let cookie = cookie_header(snapshot.cookies_netscape.expose(), unix_now())
+            .ok_or(LoadFailure::Session)?;
+        let source = InnerTubeSource::new(
+            Session {
+                locale: Locale::default(),
+                visitor_data: None,
+                data_sync_id: data_sync_id.clone(),
+                cookie: Some(cookie.clone()),
+            },
+            None,
+        )
+        .map_err(|_| LoadFailure::Other)?;
+        self.spawn_rotation(&source, cookie, snapshot.epoch);
+        *built = Some(Built {
+            epoch: snapshot.epoch,
+            data_sync_id,
+            source: source.clone(),
+        });
+        Ok(source)
+    }
+
+    /// Rotated cookies go back to the account service, as long as the session they came from
+    /// is still current (the service rotates `__Secure-*PSIDTS` on these very requests and
+    /// invalidates the old value, so dropping the new one would eventually sign the account out).
+    fn spawn_rotation(&self, source: &InnerTubeSource, sent: String, epoch: u64) {
         let rotated = source.cookie_changed();
         let reader = source.clone();
-        let epoch = snapshot.epoch;
-        rt.spawn(async move {
+        let session = self.session.clone();
+        self.rt.spawn(async move {
             loop {
                 rotated.notified().await;
                 let (Some(header), Some(now)) = (reader.cookie(), session.snapshot()) else {
@@ -78,12 +120,6 @@ impl InnerTubeLibrary {
                 }
             }
         });
-
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(ART_TIMEOUT))
-            .build()
-            .into();
-        Ok(Self { rt, source, agent })
     }
 }
 
@@ -106,29 +142,32 @@ fn rows(page: Page<ListedTrack>) -> Page<TrackRow> {
 
 impl LibrarySource for InnerTubeLibrary {
     fn collections(&self) -> Result<Vec<Collection>, LoadFailure> {
+        let source = self.source()?;
         self.rt.block_on(async {
-            self.source.ensure_visitor_data().await;
-            let mut all = self.source.library_playlists().await?;
-            all.extend(self.source.library_albums().await?);
+            source.ensure_visitor_data().await;
+            let mut all = source.library_playlists().await?;
+            all.extend(source.library_albums().await?);
             Ok(all)
         })
     }
 
     fn tracks(&self, collection: &Collection) -> Result<Page<TrackRow>, LoadFailure> {
         use apollo_domain::library::CollectionKind;
+        let source = self.source()?;
         self.rt.block_on(async {
-            self.source.ensure_visitor_data().await;
+            source.ensure_visitor_data().await;
             let page = match collection.kind {
-                CollectionKind::Playlist => self.source.playlist(collection.id.as_str()).await,
-                CollectionKind::Album => self.source.album(collection.id.as_str()).await,
+                CollectionKind::Playlist => source.playlist(collection.id.as_str()).await,
+                CollectionKind::Album => source.album(collection.id.as_str()).await,
             }?;
             Ok(rows(page))
         })
     }
 
     fn more_tracks(&self, token: &str) -> Result<Page<TrackRow>, LoadFailure> {
+        let source = self.source()?;
         self.rt
-            .block_on(async { Ok(rows(self.source.continuation(token).await?)) })
+            .block_on(async { Ok(rows(source.continuation(token).await?)) })
     }
 
     fn artwork(&self, url: &str) -> Option<DecodedArt> {
