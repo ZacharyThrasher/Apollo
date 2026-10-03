@@ -127,9 +127,10 @@ impl<T: ListItem> Listing<T> {
         self.skipped
     }
     /// True only for a successfully completed load with no items. A failed or
-    /// still-loading list is never "empty".
+    /// still-loading list is never "empty", and neither is one whose rows were all
+    /// unreadable: that is a parse problem, not an empty library.
     pub fn is_confirmed_empty(&self) -> bool {
-        self.state == LoadState::Complete && self.items.is_empty()
+        self.state == LoadState::Complete && self.items.is_empty() && self.skipped == 0
     }
 
     /// A request for the next page is marked in flight.
@@ -354,5 +355,22 @@ mod tests {
         l.fail(r, LoadFailure::Throttled);
         assert_eq!(l.items(), [Row("a")]);
         assert_eq!(l.state(), LoadState::Failed(LoadFailure::Throttled));
+    }
+
+    #[test]
+    fn a_page_of_only_unreadable_rows_is_not_an_empty_list() {
+        let mut l = Listing::<Row>::new();
+        let rev = l.begin();
+        l.apply(
+            rev,
+            Page {
+                items: vec![],
+                continuation: None,
+                skipped: 3,
+            },
+        );
+        assert_eq!(l.state(), LoadState::Complete);
+        assert_eq!(l.skipped(), 3);
+        assert!(!l.is_confirmed_empty());
     }
 }

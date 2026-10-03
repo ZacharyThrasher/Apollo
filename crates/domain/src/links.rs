@@ -86,11 +86,7 @@ fn id_chars_ok(s: &str) -> bool {
 }
 
 fn video_id(s: &str) -> Result<VideoId, LinkError> {
-    if s.len() == 11 && id_chars_ok(s) {
-        Ok(VideoId::new(s))
-    } else {
-        Err(LinkError::BadId)
-    }
+    VideoId::parse(s).ok_or(LinkError::BadId)
 }
 
 fn playlist_id(s: &str) -> Result<PlaylistId, LinkError> {

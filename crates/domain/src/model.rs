@@ -8,6 +8,16 @@ impl VideoId {
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
+
+    /// Accepts only the 11-character `[A-Za-z0-9_-]` shape the service uses. Anything else is
+    /// not a video this app can play, so parsers use this to refuse it at the boundary.
+    pub fn parse(id: &str) -> Option<Self> {
+        (id.len() == 11
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+        .then(|| Self(id.to_owned()))
+    }
     pub fn as_str(&self) -> &str {
         &self.0
     }
