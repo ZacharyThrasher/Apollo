@@ -65,6 +65,8 @@ icons! {
     HeartRegular => "heart-regular",
     PlaylistAdd => "playlist-add-regular",
     Checkmark => "checkmark-regular",
+    LyricsRegular => "lyrics-regular",
+    LyricsFilled => "lyrics-filled",
 }
 
 pub struct Assets;

@@ -112,5 +112,14 @@ Applied to the Home route (`ui/home_page.rs`, `home.rs`); the feed is YouTube Mu
 7. **Keyboard:** one Tab stop per shelf at the page's tab index, so Tab reaches the player bar quickly. Each shelf is still a list named by its title. Nothing more is planned for accessibility on this personal app (Zach, 2026-10-03).
 8. **Approved as built:** the primary Sign in button when signed out, "Nothing to show" with Retry, "Couldn't load more" with Retry, and the 32px circle chevrons on bg.overlay with border.strong.
 
+## Lyrics decisions (coordinator, 2026-10-03)
+Applied to the lyrics pane (`ui/lyrics_pane.rs`, `lyrics.rs`) and the Lyrics button in the player bar. Tokens are in `theme::tokens::lyrics`.
+1. **Where:** Now Playing has a "Lyrics" toggle (Fluent icon, filled when on) beside the queue toggle in the player bar. When it is on, lyrics take the right half of Now Playing in place of the queue; the cover, title and transport stay on the left. The choice is remembered (`lyrics_open` in the `settings` table). Pressing the Lyrics button with Now Playing closed opens it. The queue button, pressed while lyrics show, turns them off and opens the queue.
+2. **Lines:** Segoe UI Variable 22px semibold, left-aligned, line height 1.3 with 8px above and below each line. The current line is text.primary; every other line is text.secondary at 80% opacity (measured: 5.2:1 on bg.base, so it still passes AA). Never text.tertiary. A line you point at rises to full text.secondary.
+3. **Following:** the current line sits a third of the way down the pane. The column moves to it over 200 ms (ease-out), or at once under reduced motion. Clicking a line seeks to it and follows again. A manual scroll pauses following until a line is clicked or 4 s after the last scroll.
+4. **Plain lyrics:** static, scrollable text in the same type, all text.secondary; no clicking, no following.
+5. **States:** no lyrics is a single centred "No lyrics" in text.secondary (same type as the lines); loading is the shared skeleton pulse (six bars the height of a line, starting at the third). Nothing else is explained.
+6. **Data:** LRCLIB only (`/api/get`, then `/api/search` within 2 s of the track's length), synced preferred, plain as the fallback. Looked up when a track becomes current and for the track after it; answers, including "not found", are cached in SQLite by video id (a "not found" is believed for a week).
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

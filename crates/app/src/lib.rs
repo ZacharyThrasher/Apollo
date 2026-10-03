@@ -9,6 +9,7 @@ pub mod backend;
 pub mod home;
 pub mod latency;
 pub mod library;
+pub mod lyrics;
 pub mod motion;
 pub mod os_media;
 pub mod platform;

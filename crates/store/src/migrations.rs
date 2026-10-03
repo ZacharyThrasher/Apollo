@@ -52,4 +52,16 @@ pub const MIGRATIONS: &[Migration] = &[Migration {
             entry_id INTEGER NOT NULL
         );
     ",
+}, Migration {
+    version: 2,
+    sql: "
+        -- Lyrics found (or not found) per video. `kind` says how to read `body`: LRC text for
+        -- 'synced', plain text for 'plain', empty for 'none' (looked up, nothing there).
+        CREATE TABLE lyrics_cache (
+            video_id   TEXT PRIMARY KEY,
+            kind       TEXT    NOT NULL CHECK (kind IN ('synced', 'plain', 'none')),
+            body       TEXT    NOT NULL,
+            fetched_at INTEGER NOT NULL
+        );
+    ",
 }];

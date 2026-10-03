@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use apollo_lyrics::{Lrclib, LyricsCache, LyricsService, SqliteCache};
 use gpui::{
     px, size, App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
     WindowHandle, WindowOptions,
@@ -10,9 +11,13 @@ use gpui::{
 
 use crate::account::{AccountModel, AccountPorts};
 use crate::backend::{channel_sink, Mode};
+use crate::lyrics::SimLyrics;
 use crate::player::PlayerModel;
 use crate::search::Unavailable;
-use crate::settings::{SqliteVolume as SettingsVolume, VolumeStore};
+use crate::settings::{
+    default_db_path, FlagStore, SqliteFlag, SqliteVolume as SettingsVolume, VolumeStore,
+    KEY_LYRICS_OPEN,
+};
 use crate::ui::shell::{self, Quit, Shell};
 use crate::url_thumbs::NoThumbs;
 
@@ -54,6 +59,12 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     let ports = mode.account_ports();
     let account = cx.new(|cx| AccountModel::new(ports.clone(), cx));
     let window = open_window(cx, player.clone(), account.clone());
+    let lyrics_flag = SqliteFlag::default_location(KEY_LYRICS_OPEN)
+        .map(|flag| Arc::new(flag) as Arc<dyn FlagStore>);
+    let service = lyrics_service(&mode);
+    let _ = window.update(cx, |shell, _, cx| {
+        shell.install_lyrics(service, lyrics_flag, cx)
+    });
     // Media keys and the SMTC overlay, on the window just opened.
     #[cfg(windows)]
     crate::smtc::install(cx, window, player.clone());
@@ -74,6 +85,16 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     .detach();
     cx.activate(true);
     window
+}
+
+/// Where lyrics come from: LRCLIB with the SQLite cache, or the fixtures under the simulation.
+fn lyrics_service(mode: &Mode) -> Arc<LyricsService> {
+    if matches!(mode, Mode::Sim | Mode::SimSignedOut) {
+        return Arc::new(LyricsService::new(vec![Arc::new(SimLyrics)], None));
+    }
+    let cache =
+        default_db_path().map(|path| Arc::new(SqliteCache::at(path)) as Arc<dyn LyricsCache>);
+    Arc::new(LyricsService::new(vec![Arc::new(Lrclib::new())], cache))
 }
 
 fn open_window(

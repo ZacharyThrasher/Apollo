@@ -94,6 +94,8 @@ pub mod typography {
     pub const NOW_PLAYING_TITLE: TextStyle = TextStyle::new(40.0, 600);
     /// Artist and album under the Now Playing title.
     pub const NOW_PLAYING_ARTIST: TextStyle = TextStyle::new(18.0, 400);
+    /// Lines of lyrics in Now Playing.
+    pub const LYRICS: TextStyle = TextStyle::new(22.0, 600);
 }
 
 /// 4px grid, in logical pixels.
@@ -186,4 +188,21 @@ pub mod ambient {
     pub const BLUR_RADIUS_MIN_PX: f32 = 80.0;
     pub const OPACITY_MIN: f32 = 0.12;
     pub const OPACITY_MAX: f32 = 0.18;
+}
+
+/// Lyrics in Now Playing (DIRECTION.md, Lyrics decisions).
+pub mod lyrics {
+    use std::time::Duration;
+
+    /// Opacity of text.secondary for every line but the current one. The current line is
+    /// text.primary at full strength; text.tertiary is never used here.
+    pub const DIM_OPACITY_PCT: u8 = 80;
+    /// The current line sits this far down the pane.
+    pub const FOCUS_FRACTION: f32 = 1.0 / 3.0;
+    /// Following the current line scrolls over this long (instant under reduced motion).
+    pub const SCROLL: Duration = super::motion::PANEL;
+    /// A manual scroll pauses following for this long, unless a line is clicked first.
+    pub const MANUAL_HOLD: Duration = Duration::from_secs(4);
+    /// The pane never gets narrower than this; the cover column gives way first.
+    pub const MIN_PANE_WIDTH: f32 = 320.0;
 }

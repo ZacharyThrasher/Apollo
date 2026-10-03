@@ -36,6 +36,7 @@ provider = [
 apollo-account = { path = "../account" }
 apollo-domain = { path = "../domain" }
 apollo-innertube = { path = "../innertube", optional = true }
+apollo-lyrics = { path = "../lyrics" }
 apollo-provider = { path = "../provider" }
 apollo-runtime = { path = "../runtime" }
 apollo-services-common = { path = "../services-common" }

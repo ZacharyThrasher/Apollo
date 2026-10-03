@@ -13,13 +13,16 @@ use gpui::{
 use crate::account::AccountModel;
 use crate::home::{Access, HomeModel};
 use crate::library::{LibraryWrites, Notice, Target};
+use crate::lyrics::LyricsModel;
 use crate::motion::PanelSlide;
 use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
+use crate::settings::FlagStore;
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
 use crate::ui::home_page::{self, HomeView};
 use crate::ui::library::{self, LibraryView};
+use crate::ui::lyrics_pane::LyricsPane;
 use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
@@ -110,6 +113,9 @@ pub struct Shell {
     nav_toggled: bool,
     queue: PanelSlide,
     queue_panel: Entity<QueuePanel>,
+    /// Lyrics of the playing track, and the pane that shows them in Now Playing.
+    lyrics: Entity<LyricsModel>,
+    lyrics_pane: Entity<LyricsPane>,
     now_playing_open: bool,
     now_playing: Entity<NowPlaying>,
     root_focus: FocusHandle,
@@ -158,6 +164,8 @@ impl Shell {
             like: stop(cx, 26),
             mute: stop(cx, 27),
             volume: stop(cx, 28),
+            // Beside the queue button, ahead of it.
+            lyrics: stop(cx, 29),
             queue: stop(cx, 29),
         };
         let progress = cx.new(|_| SliderState::default());
@@ -181,11 +189,15 @@ impl Shell {
                 cx,
             )
         });
+        let lyrics = cx.new(|cx| LyricsModel::new(player.clone(), cx));
+        let lyrics_pane = cx.new(|cx| LyricsPane::new(player.clone(), lyrics.clone(), cx));
+        cx.observe(&lyrics_pane, |_, _, cx| cx.notify()).detach();
         let now_playing = cx.new(|cx| {
             NowPlaying::new(
                 player.clone(),
                 writes.clone(),
                 picker.clone(),
+                lyrics_pane.clone(),
                 {
                     let (weak, root) = (weak.clone(), root_focus.clone());
                     move |window, cx| {
@@ -290,6 +302,8 @@ impl Shell {
             nav_toggled: false,
             queue: PanelSlide::default(),
             queue_panel,
+            lyrics,
+            lyrics_pane,
             now_playing_open: false,
             now_playing,
             root_focus,
@@ -372,6 +386,7 @@ impl Shell {
             ("bar-like", bar.like.clone()),
             ("bar-mute", bar.mute.clone()),
             ("bar-volume", bar.volume.clone()),
+            ("bar-lyrics", bar.lyrics.clone()),
             ("bar-queue", bar.queue.clone()),
         ]);
         stops
@@ -492,11 +507,73 @@ impl Shell {
     }
 
     pub fn set_now_playing(&mut self, open: bool, cx: &mut Context<Self>) {
+        if open && !self.now_playing_open {
+            // The lyrics column starts on the current line when the page appears.
+            self.lyrics_pane.update(cx, |p, _| p.reset_follow());
+        }
         self.now_playing_open = open;
         cx.notify();
     }
 
+    /// Lyrics are on screen: Now Playing is open and lyrics are chosen. They take the right
+    /// side of the page, the queue's place, so the queue is hidden meanwhile.
+    pub fn lyrics_showing(&self, cx: &App) -> bool {
+        self.now_playing_open && self.lyrics_pane.read(cx).is_open()
+    }
+
+    pub fn lyrics_pane(&self) -> &Entity<LyricsPane> {
+        &self.lyrics_pane
+    }
+
+    pub fn lyrics(&self) -> &Entity<LyricsModel> {
+        &self.lyrics
+    }
+
+    /// The Lyrics button: shows lyrics (opening Now Playing if need be), or hides them.
+    pub fn toggle_lyrics(&mut self, cx: &mut Context<Self>) {
+        if self.lyrics_showing(cx) {
+            self.lyrics_pane.update(cx, |p, cx| p.set_open(false, cx));
+        } else {
+            self.lyrics_pane.update(cx, |p, cx| p.set_open(true, cx));
+            self.set_now_playing(true, cx);
+        }
+        cx.notify();
+    }
+
+    /// The lookup is ready, and where the Lyrics choice is remembered: lyrics start loading and
+    /// the saved choice is applied.
+    pub fn install_lyrics(
+        &mut self,
+        service: Arc<apollo_lyrics::LyricsService>,
+        flag: Option<Arc<dyn FlagStore>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.lyrics.update(cx, |l, cx| l.install(service, cx));
+        self.lyrics_pane
+            .update(cx, |p, _| p.set_flag_store(flag.clone()));
+        let Some(flag) = flag else { return };
+        let pane = self.lyrics_pane.downgrade();
+        cx.spawn(async move |_, cx| {
+            let saved = cx
+                .background_executor()
+                .spawn(async move { flag.load() })
+                .await;
+            let _ = pane.update(cx, |p, cx| p.restore_open(saved, cx));
+        })
+        .detach();
+    }
+
     pub fn toggle_queue(&mut self, cx: &mut Context<Self>) {
+        if self.lyrics_showing(cx) {
+            // The queue asked for the side the lyrics are on: lyrics give way.
+            self.lyrics_pane.update(cx, |p, cx| p.set_open(false, cx));
+            if !self.queue.is_open() {
+                self.queue.set(true, Instant::now(), !cx.reduce_motion());
+                self.queue_panel.update(cx, |p, cx| p.reveal_current(cx));
+            }
+            cx.notify();
+            return;
+        }
         let open = !self.queue.is_open();
         self.queue.set(open, Instant::now(), !cx.reduce_motion());
         if open {
@@ -734,7 +811,8 @@ impl Render for Shell {
         if moving {
             window.request_animation_frame();
         }
-        let queue = (openness > 0.0).then(|| {
+        let lyrics_showing = self.lyrics_showing(cx);
+        let queue = (openness > 0.0 && !lyrics_showing).then(|| {
             div()
                 .id("queue-slot")
                 .relative()
@@ -768,7 +846,12 @@ impl Render for Shell {
             focus: self.bar.clone(),
             progress: self.progress.clone(),
             volume: self.volume.clone(),
-            queue_open: self.queue.is_open(),
+            queue_open: self.queue.is_open() && !lyrics_showing,
+            lyrics_open: lyrics_showing,
+            on_lyrics_toggle: Rc::new(Box::new({
+                let shell = shell.clone();
+                move |_, cx| shell.update(cx, |s, cx| s.toggle_lyrics(cx))
+            })),
             on_queue_toggle: Rc::new(Box::new({
                 let shell = shell.clone();
                 move |_, cx| shell.update(cx, |s, cx| s.toggle_queue(cx))
