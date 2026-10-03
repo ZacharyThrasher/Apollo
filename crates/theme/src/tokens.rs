@@ -7,8 +7,13 @@ pub mod color {
 
     // Surfaces
     pub const BG_BASE: Rgba = Rgba::hex(0x0E0E10);
-    /// bg.base when Mica is active: same color at 80% alpha.
-    pub const BG_BASE_MICA: Rgba = BG_BASE.with_alpha_pct(80);
+    /// Opacity of bg.base when Mica is active. 80% is the direction's value; the contrast
+    /// test confirms it passes AA against the worst-case backdrop (no raise was needed).
+    pub const MICA_BASE_ALPHA_PCT: u8 = 80;
+    /// bg.base when Mica is active.
+    pub const BG_BASE_MICA: Rgba = BG_BASE.with_alpha_pct(MICA_BASE_ALPHA_PCT);
+    /// Worst plausible dark-mode Mica backdrop, used only to test contrast.
+    pub const MICA_WORST_CASE_BACKDROP: Rgba = Rgba::hex(0x3A3A3A);
     pub const BG_RAISED: Rgba = Rgba::hex(0x17171A);
     pub const BG_OVERLAY: Rgba = Rgba::hex(0x1F1F23);
 
@@ -25,6 +30,9 @@ pub mod color {
     /// Durations, counts; never essential info. Nudged from #7C7C84 (4.32:1 on bg.raised) to pass AA.
     pub const TEXT_TERTIARY: Rgba = Rgba::hex(0x808088);
     pub const TEXT_DISABLED: Rgba = Rgba::white_pct(30);
+    /// Menus, popovers and tooltips (bg.overlay) use text.secondary as their lowest text
+    /// tier; text.tertiary is only ever drawn on bg.base and bg.raised.
+    pub const TEXT_LOWEST_ON_OVERLAY: Rgba = TEXT_SECONDARY;
 
     // Skeleton blocks
     pub const SKELETON: Rgba = Rgba::white_pct(4);

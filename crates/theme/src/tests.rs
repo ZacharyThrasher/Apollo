@@ -52,11 +52,38 @@ fn text_tokens_pass_aa_on_base_and_raised() {
 }
 
 #[test]
-fn primary_and_secondary_pass_aa_on_overlay() {
-    // Tertiary is deliberately not asserted here: it is 4.19:1 on bg.overlay (see DIRECTION.md).
-    for fg in [TEXT_PRIMARY, TEXT_SECONDARY] {
+fn overlay_text_never_uses_tertiary() {
+    // Rule: bg.overlay (menus, popovers, tooltips) bottoms out at text.secondary.
+    assert_eq!(TEXT_LOWEST_ON_OVERLAY, TEXT_SECONDARY);
+    for fg in [TEXT_PRIMARY, TEXT_LOWEST_ON_OVERLAY] {
         assert!(contrast_ratio(fg, BG_OVERLAY) >= AA);
     }
+    // Tertiary only qualifies on base/raised: it fails on overlay, which is why the rule exists.
+    assert!(contrast_ratio(TEXT_TERTIARY, BG_OVERLAY) < AA);
+    for bg in [BG_BASE, BG_RAISED] {
+        assert!(contrast_ratio(TEXT_TERTIARY, bg) >= AA);
+    }
+}
+
+#[test]
+fn mica_alpha_passes_aa_on_worst_case_backdrop() {
+    // Smallest alpha, from 80% in 5% steps, at which every text tier passes on
+    // bg.base composited over the worst plausible Mica backdrop.
+    let passes = |pct: u8| {
+        let bg = BG_BASE.with_alpha_pct(pct).over(MICA_WORST_CASE_BACKDROP);
+        [TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY]
+            .iter()
+            .all(|&fg| contrast_ratio(fg, bg) >= AA)
+    };
+    let needed = (80..=100)
+        .step_by(5)
+        .find(|&p| passes(p))
+        .expect("100% passes");
+    assert_eq!(
+        needed, MICA_BASE_ALPHA_PCT,
+        "update MICA_BASE_ALPHA_PCT and DIRECTION.md"
+    );
+    assert_eq!(BG_BASE_MICA, BG_BASE.with_alpha_pct(MICA_BASE_ALPHA_PCT));
 }
 
 #[test]
