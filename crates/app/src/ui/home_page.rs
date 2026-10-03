@@ -35,7 +35,9 @@ use crate::ui::playing_row;
 use crate::ui::search_page::OpenTarget;
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
+use crate::ui::row_actions::{more_slot, ACTION_SIZE};
 use crate::ui::tooltip::Tooltip;
+use crate::ui::track_menu::{self, Subject};
 use crate::url_thumbs::{Thumb, ThumbStore};
 
 actions!(home, [ShelfNext, ShelfPrevious]);
@@ -721,6 +723,7 @@ impl HomeView {
                         .on_intent(move |cx| {
                             hint_player.update(cx, |p, cx| p.hint_play(&track, cx));
                         })
+                        .menu(Subject::track(song.track.clone(), song.thumbnail.clone()))
                         .into_any_element()
                     }
                     HomeItem::Collection(c) => {
@@ -735,6 +738,7 @@ impl HomeView {
                             accent,
                             move |window, cx| on_open(target.clone(), window, cx),
                         )
+                        .menu(Subject::Collection(c.clone()))
                         .into_any_element()
                     }
                     HomeItem::Artist(h) => {
@@ -790,6 +794,7 @@ impl HomeView {
                         artists: artists_line(&song.track).unwrap_or_default(),
                         thumb,
                         playing: playing == Some(song.track.video_id.as_str()),
+                        menu: Subject::track(song.track.clone(), song.thumbnail.clone()),
                         focus: focus.clone(),
                         accent,
                         on_play: Rc::new(move |_, cx| play_from(&player, &shelf, j, cx)),
@@ -864,6 +869,8 @@ struct SongTile {
     artists: SharedString,
     thumb: Thumb,
     playing: bool,
+    /// What the More button and a right-click offer.
+    menu: Subject,
     focus: FocusHandle,
     accent: Accent,
     on_play: Rc<dyn Fn(&mut Window, &mut App) + 'static>,
@@ -889,6 +896,7 @@ impl RenderOnce for SongTile {
         let (play, play_key) = (self.on_play.clone(), self.on_play.clone());
         let on_intent = self.on_intent.clone();
         let (id, title, artists) = (self.id.clone(), self.title.clone(), self.artists.clone());
+        let menu = self.menu.clone();
 
         let art = div()
             .relative()
@@ -948,7 +956,13 @@ impl RenderOnce for SongTile {
                 )
             });
 
-        div()
+        // The More button sits over the row's right end while the pointer is on it.
+        let more = more_slot(format!("{id}-more"), level > 0.0, menu.clone())
+            .absolute()
+            .right(px(spacing::S1))
+            .top(px((SONG_ROW - ACTION_SIZE) / 2.0));
+
+        let tile = div()
             .debug_selector({
                 let id = id.to_string();
                 move || id.clone()
@@ -997,9 +1011,11 @@ impl RenderOnce for SongTile {
             })
             .child(art)
             .child(info)
+            .child(more)
             .when(ring, move |d| {
                 d.child(focus_ring(ring_color, radius::SMALL))
-            })
+            });
+        track_menu::on_context_menu(tile, menu)
     }
 }
 

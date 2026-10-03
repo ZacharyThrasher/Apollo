@@ -436,7 +436,8 @@ impl LibraryWrites {
 
     // ---- notices ------------------------------------------------------------------------
 
-    fn raise(&mut self, text: &'static str, cx: &mut Context<Self>) {
+    /// Show a short error (the track menu's radio and collection loads use it too).
+    pub fn raise(&mut self, text: &'static str, cx: &mut Context<Self>) {
         let id = self.next_notice;
         self.next_notice += 1;
         self.notice = Some(Notice {

@@ -150,7 +150,8 @@ impl PlaylistPicker {
         self.open_with(video_id, title, bounds, window, cx);
     }
 
-    fn open_with(
+    /// Open the panel anchored to `anchor` (window space); centred when there is none.
+    pub fn open_with(
         &mut self,
         video_id: &str,
         title: impl Into<SharedString>,
