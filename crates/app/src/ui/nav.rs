@@ -61,10 +61,10 @@ impl Route {
 /// Width of the indicator bar on the active item.
 const INDICATOR_WIDTH: f32 = 3.0;
 const ITEM_HEIGHT: f32 = 40.0;
-const BADGE_SIZE: f32 = 8.0;
+const BADGE_SIZE: f32 = 6.0;
 /// Centred on the top right corner of the 20px icon (which sits at 14px, 10px down).
-const BADGE_LEFT: f32 = 30.0;
-const BADGE_TOP: f32 = 6.0;
+const BADGE_LEFT: f32 = 31.0;
+const BADGE_TOP: f32 = 7.0;
 
 type RouteHandler = Box<dyn Fn(Route, &mut Window, &mut App) + 'static>;
 
@@ -77,8 +77,8 @@ pub struct NavRail {
     accent: Accent,
     toggle_focus: FocusHandle,
     item_focus: [FocusHandle; 4],
-    /// Warning dot on Settings: the account needs the owner.
-    attention: bool,
+    /// Warning dot on Settings, with its accessible name: why the account needs the owner.
+    attention: Option<&'static str>,
     on_toggle: Option<Handler>,
     on_route: Option<RouteHandler>,
 }
@@ -99,13 +99,13 @@ impl NavRail {
             accent,
             toggle_focus: toggle_focus.clone(),
             item_focus: item_focus.clone(),
-            attention: false,
+            attention: None,
             on_toggle: None,
             on_route: None,
         }
     }
 
-    pub fn attention(mut self, attention: bool) -> Self {
+    pub fn attention(mut self, attention: Option<&'static str>) -> Self {
         self.attention = attention;
         self
     }
@@ -176,7 +176,11 @@ impl RenderOnce for NavRail {
                 active: route == current,
                 expanded,
                 accent,
-                badge: route == Route::Settings && self.attention,
+                badge: if route == Route::Settings {
+                    self.attention
+                } else {
+                    None
+                },
                 focus: focus.clone(),
                 on_click: Box::new(move |w, cx| {
                     if let Some(f) = &on_route {
@@ -212,18 +216,17 @@ struct NavItem {
     active: bool,
     expanded: bool,
     accent: Accent,
-    /// A warning dot over the icon; the item's label says why.
-    badge: bool,
+    /// A warning dot over the icon; the text is its accessible name and part of the item's.
+    badge: Option<&'static str>,
     focus: FocusHandle,
     on_click: Handler,
 }
 
 impl RenderOnce for NavItem {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let label: SharedString = if self.badge {
-            format!("{}, needs attention", self.route.title()).into()
-        } else {
-            self.route.title().into()
+        let label: SharedString = match self.badge {
+            Some(why) => format!("{}, {why}", self.route.title()).into(),
+            None => self.route.title().into(),
         };
         let ring = keyboard_focused(&self.focus, window);
         let icon_color = if self.active {
@@ -284,9 +287,12 @@ impl RenderOnce for NavItem {
                     .flex_none()
                     .text_color(icon_color),
             )
-            .when(self.badge, |d| {
+            .when_some(self.badge, |d, why| {
                 d.child(
                     div()
+                        .id("nav-badge")
+                        .role(gpui::Role::Image)
+                        .aria_label(why)
                         .absolute()
                         .top(px(BADGE_TOP))
                         .left(px(BADGE_LEFT))

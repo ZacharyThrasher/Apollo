@@ -1,20 +1,31 @@
 //! Text button: the player bar's "Retry" pattern as a reusable control. No fill and no accent;
 //! it underlines on hover, shows the keyboard-only accent focus ring, and can carry a spinner
 //! while its action runs (the one place spinners are allowed).
+//!
+//! [`TextButton::primary`] is the page's single main action: a neutral filled button
+//! (bg.overlay, text.primary, no accent) whose fill brightens on hover. At most one per view.
+
+use std::time::{Duration, Instant};
 
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
     div, percentage, prelude::*, px, svg, Animation, AnimationExt, ElementId, FocusHandle,
-    KeyboardButton, SharedString, Transformation, Window,
+    KeyboardButton, MouseButton, SharedString, Transformation, Window,
 };
-use std::time::Duration;
 
 use crate::assets::Icon;
+use crate::motion::HoverFade;
 use crate::style::{self, color};
 use crate::ui::button::{focus_ring, keyboard_focused, Handler};
 
 const SPIN_PERIOD: Duration = Duration::from_millis(900);
+
+#[derive(Default)]
+struct PrimaryState {
+    fade: HoverFade,
+    pressed: bool,
+}
 
 #[derive(IntoElement)]
 pub struct TextButton {
@@ -24,6 +35,7 @@ pub struct TextButton {
     /// Body-strong in text.primary (the action the page is about) instead of body in
     /// text.secondary.
     strong: bool,
+    primary: bool,
     busy: bool,
     enabled: bool,
     ring: gpui::Hsla,
@@ -42,6 +54,7 @@ impl TextButton {
             focus: focus.clone(),
             label: label.into(),
             strong: false,
+            primary: false,
             busy: false,
             enabled: true,
             ring: color::accent(accent),
@@ -50,6 +63,13 @@ impl TextButton {
     }
 
     pub fn strong(mut self) -> Self {
+        self.strong = true;
+        self
+    }
+
+    /// The page's single main action: neutral filled button, label in text.primary.
+    pub fn primary(mut self) -> Self {
+        self.primary = true;
         self.strong = true;
         self
     }
@@ -96,6 +116,29 @@ impl RenderOnce for TextButton {
                     el.with_transformation(Transformation::rotate(percentage(t)))
                 })
         });
+        let primary = self.primary;
+        let state = primary
+            .then(|| window.use_keyed_state(self.id.clone(), cx, |_, _| PrimaryState::default()));
+        let (level, moving, pressed) = state.as_ref().map_or((0.0, false, false), |st| {
+            let st = st.read(cx);
+            let (level, moving) = st.fade.level(Instant::now());
+            (level, moving, st.pressed)
+        });
+        if moving {
+            window.request_animation_frame();
+        }
+        let animations = !cx.reduce_motion();
+        // Fill brightens by the hover tint (and the press tint, instantly).
+        let tint = if live && pressed {
+            color::state_pressed()
+        } else if live {
+            color::state_hover().opacity(level)
+        } else {
+            color::state_hover().opacity(0.0)
+        };
+        let hover_state = state.clone();
+        let down_state = state.clone();
+        let up_state = state.clone();
         style::text_style(div(), text_style, cx)
             .id(self.id)
             .relative()
@@ -103,18 +146,46 @@ impl RenderOnce for TextButton {
             .flex_row()
             .flex_none()
             .items_center()
+            .justify_center()
             .gap(px(spacing::S2))
             .h(px(layout::MIN_HIT_TARGET))
-            .px(px(spacing::S2))
+            .px(px(if primary { spacing::S4 } else { spacing::S2 }))
             .rounded(px(radius::SMALL))
             .whitespace_nowrap()
             .text_color(text_color)
+            .when(primary, |d| d.bg(color::bg_overlay()))
             .track_focus(&self.focus.clone().tab_stop(live))
             .role(gpui::Role::Button)
             .aria_label(self.label.clone())
             .when(live, |d| {
                 d.cursor_pointer()
-                    .hover(|s| s.underline().text_color(color::text_primary()))
+                    .when(!primary, |d| {
+                        d.hover(|s| s.underline().text_color(color::text_primary()))
+                    })
+                    .when_some(hover_state, |d, st| {
+                        d.on_hover(move |hovered, _, cx| {
+                            st.update(cx, |s, cx| {
+                                s.fade.set(*hovered, Instant::now(), animations);
+                                cx.notify();
+                            });
+                        })
+                    })
+                    .when_some(down_state, |d, st| {
+                        d.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            st.update(cx, |s, cx| {
+                                s.pressed = true;
+                                cx.notify();
+                            });
+                        })
+                    })
+                    .when_some(up_state, |d, st| {
+                        d.on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                            st.update(cx, |s, cx| {
+                                s.pressed = false;
+                                cx.notify();
+                            });
+                        })
+                    })
             })
             .when_some(handler, |d, handler| {
                 d.on_click(move |event, window, cx| {
@@ -127,6 +198,15 @@ impl RenderOnce for TextButton {
                     }
                     handler(window, cx);
                 })
+            })
+            .when(primary, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .rounded(px(radius::SMALL))
+                        .bg(tint),
+                )
             })
             .children(spinner)
             .child(self.label)

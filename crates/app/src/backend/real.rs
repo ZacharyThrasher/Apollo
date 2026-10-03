@@ -34,7 +34,7 @@ use apollo_resolver::{ResolverConfig, YtDlpResolver};
 use apollo_services_common::{EventSink, LeaseStore};
 
 use super::{LibraryTrack, Ports, Prepared};
-use crate::account::{AccountPorts, SessionSource, SignInError};
+use crate::account::{AccountPorts, AvatarSource, SessionSource, SignInError};
 use crate::art::{ArtSource, DecodedArt};
 use crate::player::DEFAULT_VOLUME;
 
@@ -194,6 +194,7 @@ pub fn account_ports(_opts: &Options) -> AccountPorts {
         Ok(store) => AccountPorts {
             service: AccountService::new(validator, Some(store)),
             source,
+            avatars: Arc::new(HttpAvatars(HttpArt::new(HashMap::new()))),
             startup_error: None,
         },
         Err(err) => {
@@ -201,6 +202,7 @@ pub fn account_ports(_opts: &Options) -> AccountPorts {
             AccountPorts {
                 service: AccountService::new(validator, None),
                 source,
+                avatars: Arc::new(HttpAvatars(HttpArt::new(HashMap::new()))),
                 startup_error: Some(SignInError::Storage),
             }
         }
@@ -320,6 +322,15 @@ impl HttpArt {
             .read_to_vec()
             .ok()?;
         DecodedArt::from_encoded(&bytes)
+    }
+}
+
+/// Channel pictures: plain unauthenticated GETs of the image URL the service named.
+struct HttpAvatars(HttpArt);
+
+impl AvatarSource for HttpAvatars {
+    fn fetch(&self, url: &str) -> Option<DecodedArt> {
+        self.0.get(url)
     }
 }
 

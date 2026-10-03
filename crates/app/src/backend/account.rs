@@ -11,7 +11,7 @@ use apollo_account::identity::{AccountValidator, Identity, Validation};
 use apollo_account::jar::{Cookie, CookieJar};
 use apollo_account::service::AccountService;
 
-use crate::account::{AccountPorts, SessionSource, SignInError};
+use crate::account::{AccountPorts, NoAvatars, SessionSource, SignInError};
 
 const SIGN_IN_DELAY: Duration = Duration::from_millis(600);
 const POLL: Duration = Duration::from_millis(30);
@@ -24,6 +24,7 @@ impl AccountValidator for SimValidator {
             identities: vec![Identity {
                 name: "Demo Listener".into(),
                 handle: Some("@demolistener".into()),
+                avatar_url: None,
                 page_id: None,
                 selected_by_service: true,
             }],
@@ -82,6 +83,7 @@ pub fn ports() -> AccountPorts {
     AccountPorts {
         service: AccountService::new(Arc::new(SimValidator), None),
         source: Arc::new(SimSource::default()),
+        avatars: Arc::new(NoAvatars),
         startup_error: None,
     }
 }
