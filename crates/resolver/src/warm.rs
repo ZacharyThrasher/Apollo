@@ -55,6 +55,8 @@ pub struct WorkerSpawn {
     pub plugin_root: PathBuf,
     pub scratch: PathBuf,
     pub env: Vec<(OsString, OsString)>,
+    /// `youtube:` extractor arguments (key, values) handed to the worker's yt-dlp.
+    pub youtube_args: Vec<(String, Vec<String>)>,
 }
 
 /// Write the worker plugin under `run_dir/plugins` (only touching the file when it changed) and
@@ -183,7 +185,15 @@ impl Worker {
             startup_ms: 0,
             served: 0,
         };
-        let init = json!({"op": "init", "deno": spec.deno.to_string_lossy()});
+        let mut init = json!({"op": "init", "deno": spec.deno.to_string_lossy()});
+        if !spec.youtube_args.is_empty() {
+            let args: serde_json::Map<String, Value> = spec
+                .youtube_args
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect();
+            init["extractor_args"] = json!({ "youtube": args });
+        }
         let startup_error = |w: &mut Worker| {
             w.kill();
             // Give the stderr reader a moment to pick up the last words of a dying process.

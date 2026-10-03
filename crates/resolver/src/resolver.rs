@@ -138,6 +138,8 @@ struct Note {
     src: &'static str,
     worker_ms: Option<u64>,
     phases: Vec<(String, u64)>,
+    /// Which YouTube client served the stream (the `c=` parameter of the URL) and the format id.
+    client: Option<String>,
 }
 
 impl Note {
@@ -145,6 +147,9 @@ impl Note {
         let mut s = format!(" src={}", if self.src.is_empty() { "cold" } else { self.src });
         if let Some(ms) = self.worker_ms {
             s.push_str(&format!(" worker_ms={ms}"));
+        }
+        if let Some(c) = &self.client {
+            s.push_str(&format!(" client={c}"));
         }
         if !self.phases.is_empty() {
             let p: Vec<String> = self
@@ -252,6 +257,7 @@ impl YtDlpResolver {
                         plugin_root,
                         scratch: scratch.clone(),
                         env,
+                        youtube_args: warm_cfg.youtube_args.clone(),
                     },
                 );
                 pool.prewarm(warm_cfg.prewarm);
@@ -730,6 +736,9 @@ impl Inner {
             };
             note.src = "warm";
             note.worker_ms = Some(sent.elapsed().as_millis() as u64);
+            note.client = reply["client"]
+                .as_str()
+                .map(|c| c.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').take(24).collect());
             if let Some(phases) = reply["phases"].as_array() {
                 note.phases = phases
                     .iter()

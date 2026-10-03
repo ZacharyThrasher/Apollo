@@ -63,6 +63,15 @@ struct Page {
 
 /// The shell with `library` installed, before anything has run.
 fn start(cx: &mut TestAppContext, library: SimLibrary) -> (Page, &mut VisualTestContext) {
+    let ready = prepared(library.clone());
+    start_with(cx, library, ready)
+}
+
+fn start_with(
+    cx: &mut TestAppContext,
+    library: SimLibrary,
+    ready: Prepared,
+) -> (Page, &mut VisualTestContext) {
     cx.update(|cx| {
         Fonts::install(cx);
         shell::bind_keys(cx);
@@ -74,7 +83,6 @@ fn start(cx: &mut TestAppContext, library: SimLibrary) -> (Page, &mut VisualTest
         move |_, cx| Shell::new(player, cx)
     });
     shell.update_in(vcx, |s, window, cx| s.focus_root(window, cx));
-    let ready = prepared(library.clone());
     let (search, thumbs) = (ready.search.clone(), ready.thumbs.clone());
     player.update(vcx, |m, cx| m.install(ready, cx));
     shell.update(vcx, |s, cx| s.install_search(search, thumbs, cx));
@@ -568,6 +576,36 @@ fn a_shelf_is_one_tab_stop_that_remembers_where_you_were(cx: &mut TestAppContext
     vcx.update(|window, cx| window.focus(&first, cx));
     vcx.simulate_keystrokes("left");
     assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(first));
+}
+
+/// Records which tracks were asked to be resolved ahead of time.
+struct Recorder(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl apollo_runtime::Resolver for Recorder {
+    fn start(&mut self, _: apollo_runtime::ResolveRequest) {}
+    fn cancel(&mut self, _: apollo_domain::playback::LoadId) {}
+    fn prefetch(&mut self, track: &Track) {
+        self.0.lock().unwrap().push(track.video_id.as_str().to_owned());
+    }
+}
+
+#[gpui::test]
+fn resting_the_pointer_on_a_song_starts_resolving_it_before_the_click(cx: &mut TestAppContext) {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let library = SimLibrary::instant();
+    let mut ready = prepared(library.clone());
+    ready.ports.resolver = Box::new(Recorder(seen.clone()));
+    let (_page, vcx) = start_with(cx, library, ready);
+    vcx.run_until_parked();
+    let before = seen.lock().unwrap().len();
+    let over = vcx.debug_bounds("home-0-3").expect("a song row").center();
+    vcx.simulate_mouse_move(over, None, Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(seen.lock().unwrap().len(), before, "not before the pointer has rested");
+    vcx.executor().advance_clock(Duration::from_millis(400));
+    vcx.run_until_parked();
+    let after = seen.lock().unwrap().clone();
+    assert_eq!(after.len(), before + 1, "{after:?}");
 }
 
 #[gpui::test]

@@ -37,6 +37,17 @@ pub struct WarmConfig {
     pub startup_timeout: Duration,
     /// A request that takes longer kills its worker (a worker is only ever lost, never stuck).
     pub request_timeout: Duration,
+    /// yt-dlp `--extractor-args youtube:<key>=<values>` for the workers, e.g.
+    /// `("player_skip", ["webpage", "initial_data"])`. Empty = yt-dlp's own defaults.
+    pub youtube_args: Vec<(String, Vec<String>)>,
+}
+
+impl WarmConfig {
+    pub fn with_youtube_arg(mut self, key: &str, values: &[&str]) -> Self {
+        self.youtube_args
+            .push((key.to_owned(), values.iter().map(|v| (*v).to_owned()).collect()));
+        self
+    }
 }
 
 impl Default for WarmConfig {
@@ -47,6 +58,7 @@ impl Default for WarmConfig {
             prewarm: 2,
             startup_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(30),
+            youtube_args: Vec::new(),
         }
     }
 }

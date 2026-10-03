@@ -72,6 +72,10 @@ fn serve(args: &[String]) {
         };
         match req["op"].as_str().unwrap_or("") {
             "init" => {
+                log_line(format!(
+                    "SERVE INIT extractor_args={}",
+                    if req["extractor_args"].is_null() { "none".to_owned() } else { req["extractor_args"].to_string() }
+                ));
                 thread::sleep(Duration::from_millis(startup));
                 // Noise before the reply must not break the channel.
                 let _ = writeln!(out, "[apollo-serve] Extracting URL: apollo-serve:");

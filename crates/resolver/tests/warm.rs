@@ -125,6 +125,7 @@ impl Opts {
                 prewarm: 0,
                 startup_timeout: Duration::from_secs(10),
                 request_timeout: Duration::from_secs(10),
+                youtube_args: Vec::new(),
             },
             session: TestSession::new(true),
             ytdlp: None,
@@ -533,6 +534,25 @@ fn yt_dlp_error_text_is_classified_like_the_per_process_path() {
     let mut r = rig(Opts::new("fail-bot"));
     r.start(0);
     assert_eq!(r.result(WAIT).unwrap().1, Err(Failure::SessionExpired));
+}
+
+#[test]
+fn youtube_arguments_reach_the_worker_and_default_to_none() {
+    let mut r = rig(Opts::new("ok"));
+    r.start(0);
+    r.result(WAIT).unwrap().1.unwrap();
+    assert!(r.log_text().contains("SERVE INIT extractor_args=none"), "{}", r.log_text());
+
+    let mut o = Opts::new("ok");
+    o.warm = o.warm.with_youtube_arg("player_skip", &["webpage", "initial_data"]);
+    let mut r = rig(o);
+    r.start(0);
+    r.result(WAIT).unwrap().1.unwrap();
+    assert!(
+        r.log_text().contains(r#"SERVE INIT extractor_args={"youtube":{"player_skip":["webpage","initial_data"]}}"#),
+        "{}",
+        r.log_text()
+    );
 }
 
 #[test]

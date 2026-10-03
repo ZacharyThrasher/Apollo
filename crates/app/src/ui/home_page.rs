@@ -708,6 +708,7 @@ impl HomeView {
                         let start = song_ix;
                         song_ix += 1;
                         let (player, shelf) = (self.player.clone(), plan.shelf.clone());
+                        let (hint_player, track) = (self.player.clone(), song.track.clone());
                         Card::new(
                             id,
                             song.track.title.clone(),
@@ -717,6 +718,9 @@ impl HomeView {
                             accent,
                             move |_, cx| play_from(&player, &shelf, start, cx),
                         )
+                        .on_intent(move |cx| {
+                            hint_player.update(cx, |p, cx| p.hint_play(&track, cx));
+                        })
                         .into_any_element()
                     }
                     HomeItem::Collection(c) => {
@@ -789,6 +793,12 @@ impl HomeView {
                         focus: focus.clone(),
                         accent,
                         on_play: Rc::new(move |_, cx| play_from(&player, &shelf, j, cx)),
+                        on_intent: Some(Rc::new({
+                            let (hint_player, track) = (self.player.clone(), song.track.clone());
+                            move |cx: &mut App| {
+                                hint_player.update(cx, |p, cx| p.hint_play(&track, cx));
+                            }
+                        })),
                     }
                     .into_any_element(),
                 )
@@ -857,6 +867,8 @@ struct SongTile {
     focus: FocusHandle,
     accent: Accent,
     on_play: Rc<dyn Fn(&mut Window, &mut App) + 'static>,
+    /// The pointer arrived: let the player start resolving the song before the click.
+    on_intent: Option<Rc<dyn Fn(&mut App) + 'static>>,
 }
 
 impl RenderOnce for SongTile {
@@ -875,6 +887,7 @@ impl RenderOnce for SongTile {
             format!("{}, {}", self.title, self.artists).into()
         };
         let (play, play_key) = (self.on_play.clone(), self.on_play.clone());
+        let on_intent = self.on_intent.clone();
         let (id, title, artists) = (self.id.clone(), self.title.clone(), self.artists.clone());
 
         let art = div()
@@ -961,6 +974,11 @@ impl RenderOnce for SongTile {
             .role(gpui::Role::Button)
             .aria_label(label)
             .on_hover(move |hovered, _, cx| {
+                if *hovered {
+                    if let Some(f) = &on_intent {
+                        f(cx);
+                    }
+                }
                 fade.update(cx, |s, cx| {
                     s.set(*hovered, Instant::now(), animate);
                     cx.notify();
