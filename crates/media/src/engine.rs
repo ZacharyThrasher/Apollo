@@ -12,9 +12,13 @@ use apollo_runtime::MediaEngine;
 use apollo_services_common::{unix_now, EventSink, LeaseLookup, LeaseStore};
 use libmpv2::Mpv;
 
+use apollo_domain::loudness::gain_db;
+use apollo_services_common::LoudnessTable;
+
 use crate::classify::{classify_end_file_error, classify_log};
 use crate::coalesce::PositionCoalescer;
 use crate::config::{core_options, MediaConfig};
+use crate::ramp::GainRamp;
 
 /// Headers a media request may carry. `UrlPolicy` already drops everything else; this is the
 /// engine's own last line of defence, so a bug upstream cannot put Cookie/Authorization on a CDN.
@@ -23,6 +27,9 @@ const ALLOWED_HEADERS: &[&str] = &["user-agent", "accept", "accept-language", "r
 const MAX_LOG_LINES: usize = 16;
 /// How long one seek may stay unanswered before the load is declared broken.
 const SEEK_WATCHDOG: Duration = Duration::from_secs(15);
+/// How long a change of normalization gain on a track that is already playing takes: the switch
+/// flipped, or the track's loudness arriving after it started.
+const GAIN_GLIDE: Duration = Duration::from_millis(400);
 
 #[derive(Debug)]
 pub enum MediaError {
@@ -59,8 +66,11 @@ enum Cmd {
     Close(LoadId),
     Stop,
     SetVolume(u8),
+    SetNormalization(bool),
     /// Test/diagnostic hook: current value of mpv options (names are fixed by the caller).
     Query(Vec<String>, Sender<Vec<(String, String)>>),
+    /// Test/diagnostic hook: current value of mpv properties (live state, not options).
+    QueryProperty(Vec<String>, Sender<Vec<(String, String)>>),
     Shutdown,
 }
 
@@ -107,6 +117,17 @@ impl MpvEngine {
         rrx.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
     }
 
+    /// Current values of mpv properties (live state such as `volume-gain`), for tests and
+    /// diagnostics.
+    pub fn property_values(&self, names: &[&str]) -> Vec<(String, String)> {
+        let (rtx, rrx) = mpsc::channel();
+        let names = names.iter().map(|s| s.to_string()).collect();
+        if self.tx.send(Cmd::QueryProperty(names, rtx)).is_err() {
+            return Vec::new();
+        }
+        rrx.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
+    }
+
     fn send(&self, c: Cmd) {
         let _ = self.tx.send(c);
     }
@@ -142,6 +163,9 @@ impl MediaEngine for MpvEngine {
     }
     fn set_volume(&mut self, percent: u8) {
         self.send(Cmd::SetVolume(percent.min(100)));
+    }
+    fn set_normalization(&mut self, on: bool) {
+        self.send(Cmd::SetNormalization(on));
     }
 }
 
@@ -207,6 +231,10 @@ fn next_event(mpv: &Mpv, timeout: f64) -> Option<OwnedEvent> {
 
 struct Active {
     load: LoadId,
+    /// The video this load plays, for looking up its loudness.
+    video_id: String,
+    /// What YouTube measured for it, once known. Looked up again while it is `None`.
+    loudness_db: Option<f32>,
     /// mpv announced the file for this load. Events before this belong to a replaced file.
     started: bool,
     /// FileLoaded seen and `Opened` sent.
@@ -233,11 +261,16 @@ struct Pump {
     sink: EventSink,
     active: Option<Active>,
     position: PositionCoalescer,
+    /// Volume normalization: the switch, the measurements and the level applied right now.
+    normalize: bool,
+    loudness: LoudnessTable,
+    gain: GainRamp,
 }
 
 impl Pump {
     fn new(mpv: Mpv, cfg: MediaConfig, leases: LeaseStore, sink: EventSink) -> Self {
         let position = PositionCoalescer::new(cfg.position_interval);
+        let loudness = cfg.loudness.clone();
         Self {
             mpv,
             cfg,
@@ -245,6 +278,9 @@ impl Pump {
             sink,
             active: None,
             position,
+            normalize: true,
+            loudness,
+            gain: GainRamp::new(Instant::now()),
         }
     }
 
@@ -266,11 +302,13 @@ impl Pump {
                 }
             }
             // Drain every queued mpv event, then wait briefly for the next.
-            let mut timeout = 0.05;
+            // Short waits while the gain glides, so the steps stay small.
+            let mut timeout = if self.gain.is_ramping() { 0.01 } else { 0.05 };
             while let Some(ev) = next_event(&self.mpv, timeout) {
                 timeout = 0.0;
                 self.on_mpv_event(ev);
             }
+            self.update_gain();
             self.poll();
         }
     }
@@ -301,6 +339,11 @@ impl Pump {
             Cmd::SetVolume(percent) => {
                 let _ = self.mpv.set_property("volume", i64::from(percent));
             }
+            Cmd::SetNormalization(on) => {
+                self.normalize = on;
+                // The track that is playing follows the switch, smoothly.
+                self.glide_to_desired_gain();
+            }
             Cmd::Query(names, reply) => {
                 let out = names
                     .into_iter()
@@ -308,6 +351,19 @@ impl Pump {
                         let v = self
                             .mpv
                             .get_property::<String>(&format!("options/{n}"))
+                            .unwrap_or_else(|e| format!("<{e:?}>"));
+                        (n, v)
+                    })
+                    .collect();
+                let _ = reply.send(out);
+            }
+            Cmd::QueryProperty(names, reply) => {
+                let out = names
+                    .into_iter()
+                    .map(|n| {
+                        let v = self
+                            .mpv
+                            .get_property::<String>(&n)
                             .unwrap_or_else(|e| format!("<{e:?}>"));
                         (n, v)
                     })
@@ -342,8 +398,11 @@ impl Pump {
         };
         // Replace whatever is playing. Old-file events are ignored until StartFile of this load.
         self.position.reset();
+        let video_id = lease.video_id().as_str().to_owned();
         self.active = Some(Active {
             load,
+            loudness_db: self.loudness.get(&video_id),
+            video_id,
             started: false,
             loaded: false,
             paused: start_paused,
@@ -353,6 +412,8 @@ impl Pump {
             device_reported: false,
             ao_checked: false,
         });
+        // This track's gain, in place before its first sample (the old track is being replaced).
+        self.track_changed();
         if let Err(e) = self.set_request_headers(lease.headers_for(lease.url())) {
             self.active = None;
             let _ = e;
@@ -407,6 +468,58 @@ impl Pump {
                 a.seek = None;
                 self.emit(load, EngineEvent::Error(Failure::Media));
             }
+        }
+    }
+
+    // ----------------------------------------------------------------- gain
+
+    /// The gain in dB the playing track should have right now: its normalization when the switch
+    /// is on and its loudness is known, else unity.
+    fn desired_gain_db(&self) -> f32 {
+        match self.active.as_ref() {
+            Some(a) if self.normalize => gain_db(a.loudness_db),
+            _ => 0.0,
+        }
+    }
+
+    /// The track playing changed (a load opened). Its gain is a property of the track, so it is
+    /// looked up and applied here, at once, rather than carried over from the track before. A
+    /// gapless advance calls this at the boundary.
+    fn track_changed(&mut self) {
+        let db = self.desired_gain_db();
+        self.gain.jump(Instant::now(), db);
+        self.apply_gain();
+    }
+
+    /// Start gliding to what the playing track should now have.
+    fn glide_to_desired_gain(&mut self) {
+        if self.active.is_some() {
+            let db = self.desired_gain_db();
+            self.gain.glide(Instant::now(), db, GAIN_GLIDE);
+        }
+    }
+
+    /// Once per loop: pick up a loudness that arrived after the track started, then move the
+    /// level one step along its glide.
+    fn update_gain(&mut self) {
+        let learned = match self.active.as_mut() {
+            Some(a) if a.loudness_db.is_none() => {
+                a.loudness_db = self.loudness.get(&a.video_id);
+                a.loudness_db.is_some()
+            }
+            _ => false,
+        };
+        if learned {
+            self.glide_to_desired_gain();
+        }
+        self.apply_gain();
+    }
+
+    /// Writes the level to mpv when it has moved. `volume-gain` is separate from `volume`, so
+    /// the user's volume is untouched.
+    fn apply_gain(&mut self) {
+        if let Some(db) = self.gain.step(Instant::now()) {
+            let _ = self.mpv.set_property("volume-gain", f64::from(db));
         }
     }
 

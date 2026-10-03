@@ -10,6 +10,7 @@ pub mod backend;
 pub mod home;
 pub mod latency;
 pub mod library;
+pub mod loudness;
 pub mod motion;
 pub mod os_media;
 pub mod persist;

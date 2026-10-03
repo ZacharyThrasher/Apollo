@@ -796,3 +796,23 @@ fn the_autoplay_switch_sits_right_of_the_list_controls_and_flips_the_setting(cx:
     click(vcx, "queue-autoplay");
     assert!(player.read_with(vcx, |m, _| m.view().autoplay));
 }
+
+#[gpui::test]
+fn settings_has_a_playback_section_whose_switch_flips_normalization(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (player, shell, vcx) = setup(cx);
+    shell.update(vcx, |s, cx| s.show_route(Route::Settings, cx));
+    vcx.run_until_parked();
+
+    let row = bounds(vcx, "setting-normalize-volume");
+    let switch = bounds(vcx, "setting-normalize-volume-switch");
+    assert_eq!(row.size.height, gpui::px(48.0), "a settings row is 48px");
+    assert!(switch.left() > row.center().x, "the switch is on the right of its label");
+    assert!(switch.right() <= row.right());
+    assert!(player.read_with(vcx, |m, _| m.normalize()), "on by default");
+
+    click(vcx, "setting-normalize-volume");
+    assert!(!player.read_with(vcx, |m, _| m.normalize()));
+    click(vcx, "setting-normalize-volume");
+    assert!(player.read_with(vcx, |m, _| m.normalize()));
+}

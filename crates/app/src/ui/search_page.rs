@@ -28,7 +28,8 @@ use crate::ui::anchor;
 use crate::ui::button::{focus_ring, keyboard_focused, IconButton};
 use crate::ui::card::{grid, heading, tile, Card};
 use crate::ui::playlist_picker::PlaylistPicker;
-use crate::ui::row_actions::{heart_action, playlist_action, ACTION_SIZE};
+use crate::ui::row_actions::{heart_action, more_slot, playlist_action, ACTION_SIZE};
+use crate::ui::track_menu::{self, Subject};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{self, TextField, TextFieldEvent};
@@ -486,6 +487,7 @@ impl SearchPage {
                         selected: list_focused && self.selected == Some(index),
                         accent,
                         liked: self.writes.read(cx).is_liked(song.track.video_id.as_str()),
+                        menu: Subject::track(song.track.clone(), song.thumbnail.clone()),
                         on_like: {
                             let (writes, video) =
                                 (self.writes.clone(), song.track.video_id.as_str().to_owned());
@@ -573,6 +575,7 @@ impl SearchPage {
                         move |window, cx| on_open(target.clone(), window, cx),
                     )
                     .circular(kind == "artist")
+                    .map_menu(Subject::of_target(&target_of(kind, hit)))
                 })
                 .collect();
             children.push(grid().children(cards).into_any_element());
@@ -671,6 +674,8 @@ struct SongRow {
     selected: bool,
     accent: Accent,
     liked: bool,
+    /// What the More button and a right-click offer.
+    menu: Subject,
     on_like: RowAction,
     on_playlist: RowAction,
     on_play: RowAction,
@@ -696,6 +701,7 @@ impl RenderOnce for SongRow {
         let queue = self.on_queue;
         let intent = self.on_intent;
         let (on_like, on_playlist) = (self.on_like, self.on_playlist);
+        let menu = self.menu;
         let liked = self.liked;
         let accent = color::accent(self.accent);
         let id = self.index;
@@ -809,8 +815,10 @@ impl RenderOnce for SongRow {
                 }))
             });
 
+        let more = more_slot(format!("song-more-{id}"), active, menu.clone());
+
         let row_fade = fade.clone();
-        div()
+        let row = div()
             .id(("song-row", id))
             .relative()
             .flex()
@@ -862,5 +870,7 @@ impl RenderOnce for SongRow {
             .child(like)
             .child(playlist)
             .child(add)
+            .child(more);
+        track_menu::on_context_menu(row, menu)
     }
 }

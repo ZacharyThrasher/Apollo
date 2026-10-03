@@ -21,7 +21,7 @@ use crate::latency::Latency;
 use crate::library::LibrarySource;
 use crate::os_media::{MediaState, MediaTrack, OsCommand};
 use crate::persist::QueueSaver;
-use crate::settings::{AutoplayStore, QueueStore, VolumeStore};
+use crate::settings::{AutoplayStore, NormalizeStore, QueueStore, VolumeStore};
 use crate::thumbs::Thumbs;
 
 type AppDriver =
@@ -80,6 +80,8 @@ enum ArtSlot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueRow {
     pub id: QueueEntryId,
+    /// The whole track, for what a row's menu needs (its artist and album, its link).
+    pub track: Track,
     pub video_id: String,
     pub title: SharedString,
     pub artist: SharedString,
@@ -140,6 +142,9 @@ pub struct PlayerModel {
     intent: Option<String>,
     autoplay: bool,
     autoplay_store: Option<Arc<dyn AutoplayStore>>,
+    /// Volume normalization (Settings > Playback): on by default.
+    normalize: bool,
+    normalize_store: Option<Arc<dyn NormalizeStore>>,
     /// Writes the queue and position down; present while someone is signed in.
     saver: Option<QueueSaver>,
     /// What the saved queue was made from, to tell a changed queue from a moved position.
@@ -173,6 +178,8 @@ impl PlayerModel {
             intent: None,
             autoplay: true,
             autoplay_store: None,
+            normalize: true,
+            normalize_store: None,
             saver: None,
             saved_fp: None,
             saved_row: false,
@@ -223,6 +230,7 @@ impl PlayerModel {
             }
         };
         driver.engine.set_volume(self.effective_volume());
+        driver.engine.set_normalization(self.normalize);
         // The queue starts paused on its current track: have it ready so the first Play is instant.
         let first = driver.coordinator().queue().current().map(|e| e.track.clone());
         self.saved_fp = Some(queue_fingerprint(driver.coordinator().queue()));
@@ -260,6 +268,37 @@ impl PlayerModel {
             std::thread::spawn(move || store.save(on));
         }
         self.sync(cx);
+    }
+
+    /// Where the volume-normalization switch is saved between runs (none in tests and the
+    /// headless harness).
+    pub fn set_normalize_store(&mut self, store: Option<Arc<dyn NormalizeStore>>) {
+        self.normalize_store = store;
+    }
+
+    /// Apply the normalization setting saved by a previous run (on when none was saved), before
+    /// the backend installs.
+    pub fn restore_normalize(&mut self, saved: Option<bool>) {
+        if let Some(on) = saved {
+            self.normalize = on;
+        }
+    }
+
+    pub fn normalize(&self) -> bool {
+        self.normalize
+    }
+
+    /// Turn volume normalization on or off and remember the choice. It applies to the track that
+    /// is playing, not just the next one.
+    pub fn set_normalize(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.normalize = on;
+        if let Some(d) = self.driver.as_mut() {
+            d.engine.set_normalization(on);
+        }
+        if let Some(store) = self.normalize_store.clone() {
+            std::thread::spawn(move || store.save(on));
+        }
+        cx.notify();
     }
 
     /// Start saving the queue under `account_key` (an opaque id of the signed-in account). With
@@ -456,6 +495,40 @@ impl PlayerModel {
             });
         }
         self.sync(cx);
+    }
+
+    /// Put `track` right after the one playing.
+    pub fn play_next(&mut self, track: Track, cx: &mut Context<Self>) {
+        self.edit_queue(cx, |q| {
+            q.play_next(vec![track]);
+        });
+        self.prefetch_upcoming();
+    }
+
+    /// Add `tracks` to the end of the up-next list, ahead of the rest of the context.
+    pub fn add_tracks_to_queue(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        self.edit_queue(cx, |q| {
+            q.add_to_queue(tracks);
+        });
+    }
+
+    /// Start a radio: `seed` plays now and the queue carries on as it, once `radio` arrives
+    /// ([`PlayerModel::finish_radio`]). The queue is left as it is until then, so a radio that
+    /// cannot be fetched loses nothing.
+    pub fn start_radio(&mut self, seed: Track, cx: &mut Context<Self>) {
+        self.edit_queue(cx, |q| {
+            q.play_next(vec![seed]);
+        });
+        self.handle_as(Some("start_radio"), Event::Next, cx);
+    }
+
+    /// The radio's tracks replace everything that was up next.
+    pub fn finish_radio(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        self.edit_queue(cx, |q| {
+            q.clear_upcoming();
+            q.append_radio(tracks);
+        });
+        self.prefetch_upcoming();
     }
 
     pub fn seek(&mut self, position_ms: u64, cx: &mut Context<Self>) {
@@ -1001,6 +1074,7 @@ impl PlayerModel {
 fn queue_row(entry: &QueueEntry) -> QueueRow {
     QueueRow {
         id: entry.id,
+        track: entry.track.clone(),
         video_id: entry.track.video_id.as_str().to_owned(),
         title: entry.track.title.clone().into(),
         artist: artist_line(&entry.track),

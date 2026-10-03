@@ -38,7 +38,8 @@ use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::card::{grid, heading, Card};
 use crate::ui::playing_row;
 use crate::ui::playlist_picker::PlaylistPicker;
-use crate::ui::row_actions::{heart_action, playlist_action, ACTION_SIZE};
+use crate::ui::row_actions::{heart_action, more_slot, playlist_action, ACTION_SIZE};
+use crate::ui::track_menu::{self, Subject};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::tooltip::Tooltip;
@@ -954,6 +955,7 @@ impl LibraryView {
         height: f32,
         playing: bool,
         track: Option<Track>,
+        menu: Subject,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -963,8 +965,9 @@ impl LibraryView {
         } else {
             color::state_hover().opacity(frame.level)
         };
-        div()
+        let row = div()
             .id(("row", ix))
+            .debug_selector(move || format!("library-row-{ix}"))
             .relative()
             .flex()
             .flex_row()
@@ -998,7 +1001,9 @@ impl LibraryView {
                         .border(px(layout::FOCUS_RING_WIDTH))
                         .border_color(color::accent(frame.accent)),
                 )
-            })
+            });
+        // Right-click opens the same menu as the More button.
+        track_menu::on_context_menu(row, menu)
     }
 
     // ---- collection rows -----------------------------------------------------------------
@@ -1028,6 +1033,7 @@ impl LibraryView {
             COLLECTION_ROW,
             false,
             None,
+            Subject::Collection(c.clone()),
             move |this, window, cx| this.open(open.clone(), window, cx),
             cx,
         )
@@ -1444,17 +1450,20 @@ impl LibraryView {
                     .read(cx)
                     .thumb(item.thumbnail.as_deref(), ArtSize::Card);
                 let (this, item_open) = (this.clone(), item.clone());
-                cards.push(Card::new(
-                    format!("artist-card-{section_ix}-{ix}"),
-                    item.title.clone(),
-                    item.subtitle.clone().map(Into::into),
-                    thumb,
-                    &self.card_focus[stop],
-                    accent,
-                    move |window, cx| {
-                        this.update(cx, |t, cx| t.open(item_open.clone(), window, cx))
-                    },
-                ));
+                cards.push(
+                    Card::new(
+                        format!("artist-card-{section_ix}-{ix}"),
+                        item.title.clone(),
+                        item.subtitle.clone().map(Into::into),
+                        thumb,
+                        &self.card_focus[stop],
+                        accent,
+                        move |window, cx| {
+                            this.update(cx, |t, cx| t.open(item_open.clone(), window, cx))
+                        },
+                    )
+                    .menu(Subject::Collection(item.clone())),
+                );
                 stop += 1;
             }
             children.push(grid().children(cards).into_any_element());
@@ -1561,12 +1570,14 @@ impl LibraryView {
         let accent = frame.accent;
         let video: String = row.track.video_id.as_str().to_owned();
         let liked = self.writes.read(cx).is_liked(&video);
+        let subject = Subject::track(row.track.clone(), row.thumbnail.clone());
         let actions = self.row_actions(
             ix,
             &video,
             row.track.title.clone().into(),
             liked,
             hovered || frame.selected,
+            subject.clone(),
         );
         let index_cell = div()
             .w(px(INDEX_WIDTH))
@@ -1592,6 +1603,7 @@ impl LibraryView {
             TRACK_ROW,
             playing,
             Some(row.track.clone()),
+            subject,
             move |this, _, cx| {
                 this.model
                     .update(cx, |m, cx| m.request_play(PlayRequest::row(ix), cx))
@@ -1685,6 +1697,7 @@ impl LibraryView {
         title: SharedString,
         liked: bool,
         active: bool,
+        subject: Subject,
     ) -> gpui::Div {
         let slot = || div().relative().size(px(ACTION_SIZE)).flex_none();
         let heart = slot()
@@ -1710,7 +1723,14 @@ impl LibraryView {
                     },
                 ))
             });
-        div().flex().flex_row().flex_none().child(heart).child(add)
+        let more = more_slot(format!("track-more-{ix}"), active, subject);
+        div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .child(heart)
+            .child(add)
+            .child(more)
     }
 
     /// The row after the last track: still loading, a failure part-way, or unreadable rows.

@@ -12,6 +12,7 @@
 //! * The saved queue is bound to an opaque account key; a different account
 //!   (or logout) purges it instead of replaying it.
 
+mod loudness;
 mod migrations;
 mod queue;
 
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
+pub use loudness::LoudnessRow;
 pub use migrations::{Migration, MIGRATIONS};
 
 #[derive(Debug)]

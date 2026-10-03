@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use apollo_services_common::LoudnessTable;
+
 /// Tunables for the engine. Defaults are the production policy.
 #[derive(Clone, Debug)]
 pub struct MediaConfig {
@@ -17,6 +19,9 @@ pub struct MediaConfig {
     pub lease_margin: Duration,
     /// How long a lease with no reported expiry may sit before it is treated as stale.
     pub max_unknown_lease_age: Duration,
+    /// Where the engine reads a track's loudness for volume normalization (filled by the
+    /// loudness fetcher). Empty by default: every track plays at unity.
+    pub loudness: LoudnessTable,
 }
 
 impl Default for MediaConfig {
@@ -30,6 +35,7 @@ impl Default for MediaConfig {
             position_interval: Duration::from_millis(250),
             lease_margin: Duration::from_secs(60),
             max_unknown_lease_age: Duration::from_secs(300),
+            loudness: LoudnessTable::default(),
         }
     }
 }

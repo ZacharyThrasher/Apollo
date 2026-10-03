@@ -21,6 +21,7 @@ use crate::motion::HoverFade;
 use crate::style::{self, color};
 use crate::ui::button::{focus_ring, keyboard_focused};
 use crate::ui::tooltip::Tooltip;
+use crate::ui::track_menu::{self, Subject};
 use crate::url_thumbs::Thumb;
 
 actions!(card, [OpenCard]);
@@ -107,6 +108,8 @@ pub struct Card {
     /// Called when the pointer arrives: the card plays something, so the player can start
     /// resolving it before the click.
     on_intent: Option<Rc<dyn Fn(&mut App) + 'static>>,
+    /// What a right-click on the card offers (none for an artist).
+    menu: Option<Subject>,
 }
 
 impl Card {
@@ -129,6 +132,7 @@ impl Card {
             accent,
             on_open: Rc::new(on_open),
             on_intent: None,
+            menu: None,
         }
     }
 }
@@ -137,6 +141,18 @@ impl Card {
     /// Draws the artwork as a circle (an artist).
     pub fn circular(mut self, circle: bool) -> Self {
         self.circle = circle;
+        self
+    }
+
+    /// [`Card::menu`] for a target that may not have one (an artist).
+    pub fn map_menu(mut self, subject: Option<Subject>) -> Self {
+        self.menu = subject;
+        self
+    }
+
+    /// The menu a right-click on the card opens.
+    pub fn menu(mut self, subject: Subject) -> Self {
+        self.menu = Some(subject);
         self
     }
 
@@ -167,6 +183,7 @@ impl RenderOnce for Card {
         let title = self.title.clone();
         let id = self.id.clone();
 
+        let menu = self.menu.clone();
         div()
             .debug_selector({
                 let id = id.to_string();
@@ -247,6 +264,10 @@ impl RenderOnce for Card {
             }))
             .when(ring, move |d| {
                 d.child(focus_ring(ring_color, radius::MEDIUM))
+            })
+            .map(move |d| match menu {
+                Some(subject) => track_menu::on_context_menu(d, subject),
+                None => d,
             })
     }
 }

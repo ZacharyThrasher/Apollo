@@ -1,6 +1,5 @@
 //! Settings: one scrolling column of sections. Account first (its own page), then the sections
-//! of switches built from [`SettingsSection`] and [`SettingsRow`]. Playback goes between Account
-//! and Window.
+//! of switches built from [`SettingsSection`] and [`SettingsRow`]: Playback, then Window.
 
 use apollo_theme::tokens::spacing;
 use gpui::{
@@ -12,6 +11,7 @@ use crate::autostart;
 use crate::player::PlayerModel;
 use crate::settings::{BoolSetting, SettingsModel, CLOSE_TO_TRAY, START_MINIMIZED_TO_TRAY};
 use crate::ui::account_page::{self, AccountPage};
+use crate::ui::playback_page::PlaybackPage;
 use crate::ui::settings_row::{SettingsRow, SettingsSection};
 
 /// The column's widest extent; the page title shares it (see the shell).
@@ -19,6 +19,7 @@ pub const MAX_WIDTH: f32 = 720.0;
 
 pub struct SettingsPage {
     account_page: Entity<AccountPage>,
+    playback_page: Entity<PlaybackPage>,
     settings: Entity<SettingsModel>,
     player: Entity<PlayerModel>,
     focus: Vec<FocusHandle>,
@@ -29,6 +30,7 @@ pub struct SettingsPage {
 impl SettingsPage {
     pub fn new(
         account_page: Entity<AccountPage>,
+        playback_page: Entity<PlaybackPage>,
         settings: Entity<SettingsModel>,
         player: Entity<PlayerModel>,
         cx: &mut Context<Self>,
@@ -36,6 +38,7 @@ impl SettingsPage {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             account_page,
+            playback_page,
             settings,
             player,
             focus: Vec::new(),
@@ -127,6 +130,7 @@ impl Render for SettingsPage {
             .mt(px(spacing::S6))
             .pb(px(spacing::S8))
             .child(self.account_page.clone())
+            .child(self.playback_page.clone())
             .child(window_section)
     }
 }
