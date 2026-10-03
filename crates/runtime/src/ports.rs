@@ -37,6 +37,11 @@ pub trait MediaEngine {
     /// playback state, so it never goes through the coordinator. Engines without a
     /// volume control may ignore it.
     fn set_volume(&mut self, _percent: u8) {}
+    /// Volume normalization on or off: turn tracks that YouTube measured as loud down so tracks
+    /// play at about the same level. A user setting like the volume, so it never goes through the
+    /// coordinator, and it applies to the track already playing. Engines that cannot do it may
+    /// ignore it.
+    fn set_normalization(&mut self, _on: bool) {}
 }
 
 impl<T: Resolver + ?Sized> Resolver for Box<T> {
@@ -72,6 +77,9 @@ impl<T: MediaEngine + ?Sized> MediaEngine for Box<T> {
     }
     fn set_volume(&mut self, percent: u8) {
         (**self).set_volume(percent)
+    }
+    fn set_normalization(&mut self, on: bool) {
+        (**self).set_normalization(on)
     }
 }
 

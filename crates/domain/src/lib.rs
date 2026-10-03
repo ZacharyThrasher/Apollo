@@ -6,6 +6,7 @@ pub mod lease;
 pub mod library;
 pub mod links;
 pub mod listing;
+pub mod loudness;
 pub mod model;
 pub mod playback;
 pub mod queue;

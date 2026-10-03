@@ -233,6 +233,18 @@ impl InnerTubeSource {
             .map_err(|e| classify_write(&e))
     }
 
+    /// How loud YouTube measured a track (`loudnessDb`, dB against its reference level), from one
+    /// metadata-only `player` request. `Ok(None)` is an answer: the service had no measurement for
+    /// the track. Nothing else in the response is read, and it carries no plays or history.
+    pub async fn loudness_db(&self, video_id: &str) -> Result<Option<f32>, LoadFailure> {
+        let loudness = self
+            .tube
+            .player_loudness(&self.client, video_id)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(loudness.loudness_db)
+    }
+
     /// Best-effort `visitorData`, which the service expects alongside the cookie. A failure
     /// leaves the session without one; requests then report whatever the service says about it.
     pub async fn bootstrap_visitor_data(&self) {

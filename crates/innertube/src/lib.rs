@@ -2,7 +2,8 @@
 //!
 //! Vendored from Limusic (GPL-3.0-or-later) and trimmed; see NOTICE.md. The crate knows nothing
 //! about UI, webviews, mpv or the OS and is testable against JSON fixtures with no network.
-//! Streaming is deliberately absent: audio is resolved by yt-dlp.
+//! Streaming is deliberately absent: audio is resolved by yt-dlp. The `player` endpoint is here
+//! for one field only, the track's loudness (`InnerTube::player_loudness`).
 
 pub mod clients;
 pub mod endpoints;
@@ -16,6 +17,7 @@ pub use models::browse::{
     SearchSuggestions, Section, SortMenu,
 };
 pub use models::context::Locale;
+pub use models::player::PlayerLoudness;
 pub use models::metadata::{
     AccountIdentity, AccountInfo, NextResult, Rating, SearchResult, SongItem,
 };

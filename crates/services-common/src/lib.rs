@@ -6,12 +6,17 @@ use std::sync::Arc;
 use apollo_domain::playback::Event;
 
 pub mod lease_store;
+pub mod loudness;
 pub mod secret;
 pub mod session;
 #[cfg(windows)]
 pub mod win;
 
 pub use lease_store::{unix_now, LeaseLookup, LeaseStore};
+pub use loudness::{
+    CachedLoudness, LoudnessCache, LoudnessError, LoudnessFetcher, LoudnessSource, LoudnessTable,
+    NoCache,
+};
 pub use secret::SecretString;
 pub use session::{SessionProvider, SessionSnapshot, SessionUnavailable};
 
