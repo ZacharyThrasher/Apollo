@@ -133,13 +133,3 @@ Open observations:
   defaults. Later requests on the same worker got 774. So "always best" is not yet true for the first
   track after launch.
 - One cold click took 8.6 s with about 6.7 s after the last diagnostic phase. Cause unknown (one sample).
-
-## First resolve on a fresh worker (fix, 2026-10-03)
-Round 4 showed the first resolve on a fresh worker serving the ~130 kbps stream (itag 251) even
-with the defaults. Now, when the full settings were asked for and a worker's first answer is below
-190 kbps, the same worker is asked once more and the higher-bitrate answer is kept (diagnostics:
-"first resolve on a new worker gave N kbps; asking again once"). The cost is one extra resolve
-(about 2.5 s) on the first resolve of each worker, mostly the launch prefetch where nobody waits;
-later resolves are untouched. Launch already prefetches the queue head, which also warms a worker.
-Fast-click profile (opt-in) is not affected. Measure on the PC: bench [2] first click and the
-`fmt=` of the first prefetch.

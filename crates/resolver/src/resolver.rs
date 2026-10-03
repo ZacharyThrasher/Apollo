@@ -132,18 +132,6 @@ struct Flight {
     foreground: AtomicBool,
 }
 
-/// Streams below this bitrate are the plain opus stream (itag 251, about 130 kbps); the Premium
-/// one (itag 774) is about 256 kbps.
-const PREMIUM_MIN_KBPS: u32 = 190;
-
-/// The bitrate of a successful worker reply, if it states one.
-fn reply_kbps(reply: &Value) -> Option<u32> {
-    if reply["ok"] != true {
-        return None;
-    }
-    reply["info"]["abr"].as_f64().filter(|a| *a > 0.0).map(|a| a.round() as u32)
-}
-
 /// Facts about one resolution for the diagnostics line. Static labels and numbers only.
 #[derive(Default)]
 struct Note {
@@ -772,7 +760,7 @@ impl Inner {
             let sent = Instant::now();
             let msg = json!({"op": "resolve", "video_id": video_id.as_str(), "extractor_args": extractor_args,
                 "site": if watch_url { "www" } else { "music" }});
-            let mut reply = match w.request(msg.clone(), cfg.request_timeout, &closed) {
+            let reply = match w.request(msg, cfg.request_timeout, &closed) {
                 Ok(v) => v,
                 Err(WorkerError::Timeout) => {
                     co.discard();
@@ -790,22 +778,6 @@ impl Inner {
                     return Warm::Done(Outcome::Failed(Failure::Network, "worker-died"));
                 }
             };
-            // The first resolve on a fresh worker has been seen to come back with the plain
-            // ~130 kbps stream where later ones get the Premium one. When the full settings were
-            // asked for and that happens, ask the now warmed worker once more and keep the better
-            // answer.
-            let first_on_worker = w.resolved == 0;
-            w.resolved += 1;
-            if !fast && first_on_worker {
-                if let Some(kbps) = reply_kbps(&reply).filter(|k| *k < PREMIUM_MIN_KBPS) {
-                    self.note(format!("first resolve on a new worker gave {kbps} kbps; asking again once"));
-                    if let Ok(again) = w.request(msg, cfg.request_timeout, &closed) {
-                        if reply_kbps(&again).is_some_and(|k| k > kbps) {
-                            reply = again;
-                        }
-                    }
-                }
-            }
             note.src = if fast { "warm-fast" } else { "warm" };
             note.worker_ms = Some(sent.elapsed().as_millis() as u64);
             note.client = reply["client"]
