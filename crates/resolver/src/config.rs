@@ -53,16 +53,25 @@ pub struct WarmConfig {
 }
 
 impl WarmConfig {
-    /// Production defaults: a click skips yt-dlp's watch-page and initial-data requests (about
-    /// 1.5 s faster, measured on the owner's PC) at the price of the plain ~130 kbps stream;
-    /// everything resolved ahead of time (queue, hover, page open) keeps yt-dlp's defaults, which
-    /// give the Premium ~256 kbps stream. See docs/adr/0004-warm-resolver-workers.md.
+    /// Production defaults. A click (someone is waiting) asks only the embedded and tv clients
+    /// about the plain watch URL and skips yt-dlp's page and initial-data requests: about 0.8 s
+    /// instead of 3 to 4 s, measured on the owner's PC, at the price of the plain ~130 kbps opus
+    /// stream. Everything resolved ahead of time (queue, hover, page open) keeps yt-dlp's
+    /// defaults, which give the Premium ~256 kbps stream. A click that gets no stream this way
+    /// is retried with the defaults. See docs/adr/0004-warm-resolver-workers.md.
     pub fn fast_clicks() -> Self {
         Self {
-            foreground_youtube_args: Some(vec![(
-                "player_skip".to_owned(),
-                vec!["webpage".to_owned(), "initial_data".to_owned()],
-            )]),
+            foreground_youtube_args: Some(vec![
+                (
+                    "player_skip".to_owned(),
+                    vec!["webpage".to_owned(), "initial_data".to_owned()],
+                ),
+                (
+                    "player_client".to_owned(),
+                    vec!["web_embedded".to_owned(), "tv_downgraded".to_owned()],
+                ),
+            ]),
+            foreground_watch_url: true,
             ..Self::default()
         }
     }
@@ -165,5 +174,20 @@ impl ResolverConfig {
         self.warm = None;
         self.cache = None;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_clicks_are_fast_and_background_work_keeps_the_defaults() {
+        let w = ResolverConfig::production(Path::new("t"), PathBuf::from("r")).warm.unwrap();
+        assert!(w.youtube_args.is_empty() && !w.watch_url, "background: yt-dlp defaults");
+        let fast = w.foreground_youtube_args.expect("clicks use their own arguments");
+        assert!(fast.iter().any(|(k, v)| k == "player_skip" && v.contains(&"webpage".to_owned())));
+        assert!(w.foreground_watch_url);
+        assert!(ResolverConfig::production(Path::new("t"), PathBuf::from("r")).legacy().warm.is_none());
     }
 }
