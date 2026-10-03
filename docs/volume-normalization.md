@@ -21,7 +21,7 @@ Settings > Playback > **Normalize volume** (on by default, applies live, remembe
 4. **libmpv applies it** as `volume-gain`, which is separate from the user's `volume`. The gain
    is a per-track property: `Pump::track_changed` looks it up and sets it at once when a load
    opens (the old track is being replaced, so there is nothing to click against). A gapless
-   advance should call the same function at the boundary. A change while a track plays (the
+   advance calls the same function at the boundary (`docs/gapless-playback.md`). A change while a track plays (the
    switch flipped, or its loudness arriving after it started) glides over 400 ms, linear in dB
    (`GainRamp`).
 

@@ -174,6 +174,14 @@ impl Harness {
                         self.fail("active load cancelled but still owned");
                     }
                 }
+                Effect::Preload { load, .. } => {
+                    if Some(load) != self.c.preload_load() {
+                        self.fail("Preload for a load that is not the coordinator's preload");
+                    }
+                    if self.cancelled.contains(&load) {
+                        self.fail("Preload for a cancelled load");
+                    }
+                }
                 Effect::Stop => self.engine_paused = None,
             }
         }

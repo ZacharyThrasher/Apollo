@@ -42,6 +42,16 @@ pub trait MediaEngine {
     /// coordinator, and it applies to the track already playing. Engines that cannot do it may
     /// ignore it.
     fn set_normalization(&mut self, _on: bool) {}
+    /// Line `load` up to start with no gap when the track now playing ends (gapless playback).
+    /// Called once the next track's lease is resolved. The engine may decline (gapless is off,
+    /// nothing is playing, the stream needs different request headers); the coordinator then
+    /// opens the track normally at the end of the current one, so declining is always safe.
+    /// A later `close(load)` takes the track back.
+    fn preload(&mut self, _load: LoadId, _lease: LeaseId) {}
+    /// Gapless playback on or off. A user setting like the volume, so it never goes through the
+    /// coordinator. Off drops a track that was lined up and means the next one opens at the end
+    /// of the current one, as before. Engines that cannot do it may ignore it.
+    fn set_gapless(&mut self, _on: bool) {}
 }
 
 impl<T: Resolver + ?Sized> Resolver for Box<T> {
@@ -80,6 +90,12 @@ impl<T: MediaEngine + ?Sized> MediaEngine for Box<T> {
     }
     fn set_normalization(&mut self, on: bool) {
         (**self).set_normalization(on)
+    }
+    fn preload(&mut self, load: LoadId, lease: LeaseId) {
+        (**self).preload(load, lease)
+    }
+    fn set_gapless(&mut self, on: bool) {
+        (**self).set_gapless(on)
     }
 }
 
@@ -124,6 +140,17 @@ impl<R: Resolver, M: MediaEngine> Driver<R, M> {
         self.resolver.prefetch(track);
     }
 
+    /// Turn gapless playback on or off. Turning it on lines up a next track that was already
+    /// resolved while it was off.
+    pub fn set_gapless(&mut self, on: bool) {
+        self.engine.set_gapless(on);
+        if on {
+            if let Some((load, lease)) = self.coordinator.ready_preload() {
+                self.engine.preload(load, lease);
+            }
+        }
+    }
+
     pub fn edit_queue(&mut self, f: impl FnOnce(&mut Queue)) {
         let effects = self.coordinator.edit_queue(f);
         self.run(effects);
@@ -163,6 +190,7 @@ impl<R: Resolver, M: MediaEngine> Driver<R, M> {
                     start_paused,
                     start_ms,
                 } => self.engine.open(load, lease, start_paused, start_ms),
+                Effect::Preload { load, lease } => self.engine.preload(load, lease),
                 Effect::Pause { load } => self.engine.pause(load),
                 Effect::Resume { load } => self.engine.resume(load),
                 Effect::Seek {
