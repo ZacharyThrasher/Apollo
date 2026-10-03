@@ -19,6 +19,13 @@ impl LoadId {
     pub fn get(self) -> u64 {
         self.0
     }
+
+    /// Adapter tests need ids without driving a coordinator. Production ids are minted only
+    /// by the coordinator, so this is not available without the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests(raw: u64) -> Self {
+        Self(raw)
+    }
 }
 
 /// Opaque handle for a memory-only stream lease held by the services layer.
