@@ -110,3 +110,26 @@ Every request, clicks included, is resolved with yt-dlp's defaults for the Premi
 (opus 774, about 256 kbps). Cold click is back to about 3.3 s; prepared tracks stay at 0 s. Bench
 section [6] now compares settings that might keep the Premium stream faster (tv client only,
 watch URL, no page); the winner, if any, becomes the production default.
+
+## Round 4 results (bench section [6], owner's PC, main fdb7734): no faster way to the Premium stream
+Looked for a setting that keeps the Premium stream (opus 774, about 256 kbps) and beats the defaults.
+
+| Setting | Cold click (median) | Stream |
+|---|---|---|
+| yt-dlp defaults | 3.09 s | 774 on 3 of 4 tracks (first on a fresh worker: 251) |
+| page + tv,music clients | 2.81 s | 774 on 3 of 4 tracks (first on a fresh worker: 251) |
+| watch URL only | 1.97 s | 251 (about 130 kbps) every time |
+| skip + watch URL + tv only | no stream | refused in 0.1 to 0.3 s |
+| skip + watch URL + tv,creator | no stream | unsupported-format |
+| skip + music URL + tv,music | no stream | unsupported-format |
+
+Nothing keeps the Premium stream and is meaningfully faster (2.81 s vs 3.09 s is within the noise),
+so production stays on the defaults. Premium needs the web music client, and that call plus the
+watch page is the time.
+
+Open observations:
+- The first resolve on a fresh worker (the first click after launch, or the first track of a
+  prefetch) served itag 251 from WEB_CREATOR in every variant that used the page, even with the
+  defaults. Later requests on the same worker got 774. So "always best" is not yet true for the first
+  track after launch.
+- One cold click took 8.6 s with about 6.7 s after the last diagnostic phase. Cause unknown (one sample).
