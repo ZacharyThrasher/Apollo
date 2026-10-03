@@ -15,8 +15,8 @@ use crate::lyrics::SimLyrics;
 use crate::player::PlayerModel;
 use crate::search::Unavailable;
 use crate::settings::{
-    AutoplayStore, LyricsOpenStore, NormalizeStore, QueueStore, SettingsBackend, SettingsModel,
-    SqliteSettings, VolumeStore,
+    AutoplayStore, GaplessStore, LyricsOpenStore, NormalizeStore, QueueStore, SettingsBackend,
+    SettingsModel, SqliteSettings, VolumeStore,
 };
 use crate::ui::shell::{self, Quit, Shell};
 use crate::url_thumbs::NoThumbs;
@@ -49,6 +49,7 @@ struct Stores {
     volume: Option<Arc<dyn VolumeStore>>,
     autoplay: Option<Arc<dyn AutoplayStore>>,
     normalize: Option<Arc<dyn NormalizeStore>>,
+    gapless: Option<Arc<dyn GaplessStore>>,
     queue: Option<Arc<dyn QueueStore>>,
     lyrics_open: Option<Arc<dyn LyricsOpenStore>>,
     /// The store's file, where the lyrics cache keeps its rows too.
@@ -62,6 +63,7 @@ impl Stores {
                 volume: Some(db.clone()),
                 autoplay: Some(db.clone()),
                 normalize: Some(db.clone()),
+                gapless: Some(db.clone()),
                 lyrics_open: Some(db.clone()),
                 db_path: Some(db.path().to_path_buf()),
                 queue: Some(db),
@@ -93,6 +95,7 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
         m.set_volume_store(stores.volume.clone());
         m.set_autoplay_store(stores.autoplay.clone());
         m.set_normalize_store(stores.normalize.clone());
+        m.set_gapless_store(stores.gapless.clone());
         m.set_latency_log(crate::latency::default_log());
     });
     let ports = mode.account_ports();
@@ -175,6 +178,7 @@ struct Saved {
     volume: Option<u8>,
     autoplay: Option<bool>,
     normalize: Option<bool>,
+    gapless: Option<bool>,
     queue: Option<(apollo_domain::queue::Queue, u64)>,
     queue_store: Option<Arc<dyn QueueStore>>,
     key: Option<String>,
@@ -215,6 +219,7 @@ fn start_services(
                     volume: stores.volume.and_then(|s| s.load()),
                     autoplay: stores.autoplay.and_then(|s| s.load()),
                     normalize: stores.normalize.and_then(|s| s.load()),
+                    gapless: stores.gapless.and_then(|s| s.load()),
                     queue: key
                         .as_deref()
                         .zip(stores.queue.as_ref())
@@ -232,6 +237,7 @@ fn start_services(
                     m.restore_volume(saved.volume);
                     m.restore_autoplay(saved.autoplay);
                     m.restore_normalize(saved.normalize);
+                    m.restore_gapless(saved.gapless);
                     m.set_queue_store(saved.queue_store, saved.key);
                     m.install_with(prepared, saved.queue, cx);
                 });

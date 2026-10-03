@@ -82,7 +82,9 @@ pub enum EngineEvent {
     },
     /// End of media for this load.
     Eof,
-    /// The engine itself moved on to the preloaded entry; the event's load is the *new* load.
+    /// The engine itself moved on to the preloaded entry with no gap (it was handed the lease by
+    /// [`Effect::Preload`]); the event's load is the *new* load. An `Opened` for that load, with
+    /// its duration, follows.
     Transitioned,
     Error(Failure),
 }
@@ -131,6 +133,14 @@ pub enum Effect {
         entry: QueueEntryId,
         track: Track,
     },
+    /// The preloaded next track's lease is ready: hand it to the engine so it can start it the
+    /// moment the current track ends, with no gap (gapless playback). The engine may decline, in
+    /// which case the track is opened normally at the end of the current one. A later `Cancel` of
+    /// the same load takes it back.
+    Preload {
+        load: LoadId,
+        lease: LeaseId,
+    },
     /// Cancel resolution and/or close the load in the engine.
     Cancel {
         load: LoadId,
@@ -164,6 +174,9 @@ struct Active {
     engine_paused: bool,
     reresolved: bool,
     pending_start_ms: u64,
+    /// Adopted through a gapless transition: the engine's `Opened` for it, which carries the
+    /// duration, is still to come.
+    awaiting_duration: bool,
 }
 
 enum PreloadState {
@@ -263,6 +276,17 @@ impl Coordinator {
     }
     pub fn preload_load(&self) -> Option<LoadId> {
         self.preload.as_ref().map(|p| p.load)
+    }
+    /// The next track's lease, if it is resolved and something is playing for it to follow.
+    pub fn ready_preload(&self) -> Option<(LoadId, LeaseId)> {
+        match &self.preload {
+            Some(Preload {
+                load,
+                state: PreloadState::Ready(lease),
+                ..
+            }) if self.is_loaded() => Some((*load, *lease)),
+            _ => None,
+        }
     }
 
     // ---- queue edits --------------------------------------------------
@@ -375,6 +399,7 @@ impl Coordinator {
                     engine_paused: self.intent == Intent::Paused,
                     reresolved: false,
                     pending_start_ms: resume_ms,
+                    awaiting_duration: false,
                 };
                 match p.state {
                     PreloadState::Ready(lease) => {
@@ -403,6 +428,7 @@ impl Coordinator {
             engine_paused: false,
             reresolved: false,
             pending_start_ms: resume_ms,
+            awaiting_duration: false,
         });
         self.phase = Phase::Resolving;
         fx.push(Effect::Resolve {
@@ -519,10 +545,17 @@ impl Coordinator {
             }
         }
         // Speculative next-track resolution. Its failure never touches playback.
+        let loaded = self.is_loaded();
         if let Some(p) = &mut self.preload {
             if p.load == load {
                 match result {
-                    Ok(lease) => p.state = PreloadState::Ready(lease),
+                    Ok(lease) => {
+                        p.state = PreloadState::Ready(lease);
+                        // Something is playing to follow: let the engine line the track up.
+                        if loaded {
+                            fx.push(Effect::Preload { load, lease });
+                        }
+                    }
                     Err(_) => {
                         self.preload_failed = Some(p.entry);
                         self.preload = None;
@@ -585,6 +618,12 @@ impl Coordinator {
 
     fn on_opened(&mut self, duration_ms: Option<u64>, fx: &mut Vec<Effect>) {
         if self.phase != Phase::Opening {
+            // A gapless transition adopted this load before its duration was known.
+            if let Some(a) = &mut self.active {
+                if std::mem::take(&mut a.awaiting_duration) {
+                    self.duration_ms = duration_ms;
+                }
+            }
             return;
         }
         let Some(a) = &mut self.active else { return };
@@ -672,6 +711,7 @@ impl Coordinator {
                 engine_paused: false,
                 reresolved: false,
                 pending_start_ms: 0,
+                awaiting_duration: true,
             });
             self.position_ms = 0;
             self.duration_ms = None;
@@ -1139,8 +1179,89 @@ mod tests {
             load: pre,
             result: Ok(LeaseId(2)),
         });
-        assert!(fx.is_empty());
+        assert_eq!(
+            fx,
+            vec![Effect::Preload {
+                load: pre,
+                lease: LeaseId(2)
+            }]
+        );
         (active, pre)
+    }
+
+    #[test]
+    fn a_resolved_preload_is_offered_to_the_engine_only_while_something_plays() {
+        let mut c = Coordinator::default();
+        let (_, pre) = preloaded_ready(&mut c);
+        assert_eq!(c.ready_preload(), Some((pre, LeaseId(2))));
+        // Nothing playing (stopped): nothing is waiting to be handed over.
+        c.handle(Event::Stop);
+        assert_eq!(c.ready_preload(), None);
+    }
+
+    #[test]
+    fn a_transition_takes_the_duration_from_the_opened_that_follows() {
+        let mut c = Coordinator::default();
+        let (_, pre) = preloaded_ready(&mut c);
+        c.handle(Event::Engine {
+            load: pre,
+            event: EngineEvent::Transitioned,
+        });
+        assert_eq!(c.phase(), Phase::Playing);
+        assert_eq!(c.duration_ms(), None);
+        let fx = c.handle(Event::Engine {
+            load: pre,
+            event: EngineEvent::Opened {
+                duration_ms: Some(187_000),
+            },
+        });
+        assert_eq!(c.duration_ms(), Some(187_000));
+        assert_eq!(c.phase(), Phase::Playing);
+        assert!(fx.is_empty(), "nothing to tell the engine: it is already playing");
+        // The same notice again changes nothing.
+        c.handle(Event::Engine {
+            load: pre,
+            event: EngineEvent::Opened {
+                duration_ms: Some(1),
+            },
+        });
+        assert_eq!(c.duration_ms(), Some(187_000));
+    }
+
+    #[test]
+    fn a_pause_pressed_before_the_boundary_still_wins_after_it() {
+        let mut c = Coordinator::default();
+        let (_, pre) = preloaded_ready(&mut c);
+        // The engine moves on and plays; the user paused in the same instant.
+        c.handle(Event::Pause);
+        let fx = c.handle(Event::Engine {
+            load: pre,
+            event: EngineEvent::Transitioned,
+        });
+        assert!(fx.contains(&Effect::Pause { load: pre }));
+        assert_eq!(c.phase(), Phase::Paused);
+    }
+
+    #[test]
+    fn the_next_track_after_a_transition_is_preloaded_and_offered_in_turn() {
+        let mut c = Coordinator::default();
+        let (_, pre) = preloaded_ready(&mut c);
+        let fx = c.handle(Event::Engine {
+            load: pre,
+            event: EngineEvent::Transitioned,
+        });
+        let next = preload_load(&fx).expect("the track after it is being resolved");
+        let fx = c.handle(Event::Resolved {
+            load: next,
+            result: Ok(LeaseId(4)),
+        });
+        assert_eq!(
+            fx,
+            vec![Effect::Preload {
+                load: next,
+                lease: LeaseId(4)
+            }]
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ use gpui::Context;
 const KEY_VOLUME: &str = "volume_percent";
 const KEY_AUTOPLAY: &str = "autoplay";
 const KEY_NORMALIZE: &str = "normalize_volume";
+const KEY_GAPLESS: &str = "gapless_playback";
 const KEY_LYRICS_OPEN: &str = "lyrics_open";
 
 /// A yes/no setting: the store key and what it is until the owner changes it.
@@ -148,6 +149,12 @@ pub trait LyricsOpenStore: Send + Sync {
     fn save(&self, on: bool);
 }
 
+/// Whether gapless playback is on. Blocking: call off the UI thread.
+pub trait GaplessStore: Send + Sync {
+    fn load(&self) -> Option<bool>;
+    fn save(&self, on: bool);
+}
+
 /// The saved queue, bound to the account that made it. Blocking: call off the UI thread.
 pub trait QueueStore: Send + Sync {
     /// The queue saved for `account_key` and the position it was left at. A queue saved for
@@ -269,6 +276,24 @@ impl LyricsOpenStore for SqliteSettings {
     }
 }
 
+impl GaplessStore for SqliteSettings {
+    fn load(&self) -> Option<bool> {
+        match self.open()?.get_setting(KEY_GAPLESS).ok()??.trim() {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => None,
+        }
+    }
+
+    fn save(&self, on: bool) {
+        if let Some(store) = self.open() {
+            if let Err(err) = store.set_setting(KEY_GAPLESS, if on { "on" } else { "off" }) {
+                eprintln!("could not save gapless playback: {err}");
+            }
+        }
+    }
+}
+
 impl QueueStore for SqliteSettings {
     fn load(&self, account_key: &str) -> Option<(Queue, u64)> {
         let mut store = self.open()?;
@@ -383,6 +408,23 @@ mod tests {
             .set_setting(KEY_LYRICS_OPEN, "maybe")
             .unwrap();
         assert_eq!(LyricsOpenStore::load(&store), None);
+    }
+
+    #[test]
+    fn gapless_round_trips_and_garbage_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apollo.db");
+        let store = SqliteSettings::at(path.clone());
+        assert_eq!(GaplessStore::load(&store), None);
+        GaplessStore::save(&store, false);
+        assert_eq!(GaplessStore::load(&store), Some(false));
+        GaplessStore::save(&store, true);
+        assert_eq!(GaplessStore::load(&store), Some(true));
+        Store::open(&path)
+            .unwrap()
+            .set_setting(KEY_GAPLESS, "maybe")
+            .unwrap();
+        assert_eq!(GaplessStore::load(&store), None);
     }
 
     #[test]
