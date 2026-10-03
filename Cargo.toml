@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/domain", "crates/theme", "crates/runtime", "crates/store", "crates/innertube", "crates/provider",
+    "crates/domain", "crates/theme", "crates/app", "crates/runtime", "crates/store", "crates/innertube", "crates/provider",
     "crates/services-common", "crates/media", "crates/resolver", "crates/account",
     "crates/login-helper", "crates/m2-probe",
     "spikes/m0-gpui", "spikes/m0-media", "spikes/m0-login", "spikes/m0-resolve",

@@ -1,0 +1,45 @@
+[package]
+name = "apollo-app"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Apollo desktop app: GPUI window, title bar, nav rail and player bar"
+
+[lib]
+name = "apollo_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "apollo"
+path = "src/main.rs"
+
+[features]
+default = []
+# Runs against the real M2 services (account, yt-dlp resolver, libmpv) instead of the
+# simulated backend. Windows only; needs the pinned tools under `tools/`.
+real-services = [
+    "dep:ureq",
+    "dep:apollo-account",
+    "dep:apollo-media",
+    "dep:apollo-resolver",
+]
+
+[dependencies]
+apollo-domain = { path = "../domain" }
+apollo-runtime = { path = "../runtime" }
+apollo-services-common = { path = "../services-common" }
+apollo-theme = { path = "../theme" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f37989fbdf840b308892af66516c2b9c3ef3853a" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f37989fbdf840b308892af66516c2b9c3ef3853a" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+tokio = { version = "1", features = ["sync"] }
+ureq = { version = "3", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+apollo-account = { path = "../account", optional = true }
+apollo-media = { path = "../media", optional = true }
+apollo-resolver = { path = "../resolver", optional = true }
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f37989fbdf840b308892af66516c2b9c3ef3853a", features = ["test-support"] }

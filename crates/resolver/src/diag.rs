@@ -23,6 +23,9 @@ pub struct ListedTrack {
     pub duration_secs: Option<u64>,
     /// Channel/artist label, used only to pick varied tracks.
     pub artist: Option<String>,
+    /// Display title and the listing's own thumbnail URL, for the app's quick test queue.
+    pub title: Option<String>,
+    pub thumbnail: Option<String>,
 }
 
 impl std::fmt::Debug for ListedTrack {
@@ -96,6 +99,15 @@ pub fn list_liked_music(
             id: id.to_owned(),
             duration_secs: e["duration"].as_f64().map(|d| d as u64),
             artist: e["channel"].as_str().or(e["uploader"].as_str()).map(str::to_owned),
+            title: e["title"].as_str().map(str::to_owned),
+            // Largest first; prefer a JPEG/PNG over WebP only if one is listed.
+            thumbnail: e["thumbnails"].as_array().and_then(|t| {
+                let urls: Vec<&str> = t.iter().rev().filter_map(|t| t["url"].as_str()).collect();
+                urls.iter()
+                    .find(|u| !u.split('?').next().unwrap_or(u).ends_with(".webp"))
+                    .or(urls.first())
+                    .map(|u| (*u).to_owned())
+            }),
         });
     }
     Ok(out)
@@ -120,7 +132,7 @@ mod tests {
     use super::*;
 
     fn t(id: &str, d: u64, a: &str) -> ListedTrack {
-        ListedTrack { id: id.into(), duration_secs: Some(d), artist: Some(a.into()) }
+        ListedTrack { id: id.into(), duration_secs: Some(d), artist: Some(a.into()), title: None, thumbnail: None }
     }
 
     #[test]
