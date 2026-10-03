@@ -11,4 +11,5 @@ pub mod platform;
 pub mod player;
 pub mod settings;
 pub mod style;
+pub mod thumbs;
 pub mod ui;

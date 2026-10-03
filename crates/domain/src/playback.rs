@@ -94,6 +94,10 @@ pub enum Event {
         tracks: Vec<Track>,
         start: usize,
     },
+    /// The user picked an entry in the queue.
+    PlayEntry {
+        id: QueueEntryId,
+    },
     Play,
     Pause,
     Next,
@@ -280,6 +284,11 @@ impl Coordinator {
                 Some(id) => self.user_start(id, &mut fx),
                 None => self.stop_all(&mut fx),
             },
+            Event::PlayEntry { id } => {
+                if self.queue.jump_to(id) {
+                    self.user_start(id, &mut fx);
+                }
+            }
             Event::Play => self.on_play(&mut fx),
             Event::Pause => self.on_pause(&mut fx),
             Event::Next => {
@@ -846,6 +855,35 @@ mod tests {
             result: Ok(LeaseId(2)),
         });
         assert!(has_open(&fx));
+    }
+
+    #[test]
+    fn picking_a_queue_entry_starts_it_and_cancels_the_old_load() {
+        let mut c = Coordinator::default();
+        let (old, _) = start_playing(&mut c, &["a", "b", "c", "d"]);
+        let target = c.queue().context()[1].id; // "c"
+        let fx = c.handle(Event::PlayEntry { id: target });
+        assert!(fx.contains(&Effect::Cancel { load: old }));
+        let new = resolve_load(&fx);
+        assert_ne!(new, old);
+        assert_eq!(cur(&c), "c");
+        assert_eq!(c.intent(), Intent::Playing);
+        assert_eq!(c.active_load(), Some(new));
+    }
+
+    #[test]
+    fn picking_the_current_entry_or_an_unknown_one_changes_nothing() {
+        let mut c = Coordinator::default();
+        let (load, _) = start_playing(&mut c, &["a", "b"]);
+        let current = c.queue().current().unwrap().id;
+        assert!(c.handle(Event::PlayEntry { id: current }).is_empty());
+        assert!(c
+            .handle(Event::PlayEntry {
+                id: QueueEntryId(999)
+            })
+            .is_empty());
+        assert_eq!(c.active_load(), Some(load));
+        assert_eq!(cur(&c), "a");
     }
 
     // TEST-06

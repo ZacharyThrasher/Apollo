@@ -3,24 +3,22 @@
 
 use std::rc::Rc;
 
-use apollo_domain::queue::Repeat;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use gpui::{
-    div, img, prelude::*, px, relative, App, Entity, FocusHandle, ImageSource, IntoElement,
-    ObjectFit, ParentElement, RenderOnce, SharedString, Styled, Window,
+    div, prelude::*, px, relative, App, Entity, FocusHandle, IntoElement, ParentElement,
+    RenderOnce, SharedString, Styled, Window,
 };
 
 use crate::assets::Icon;
-use crate::player::{failure_text, format_time, PlayerModel, PlayerView, Status};
+use crate::player::{failure_text, PlayerModel, PlayerView, Status};
 use crate::style::{self, color};
+use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::slider::{Slider, SliderState};
 use crate::ui::tooltip::Tooltip;
+use crate::ui::transport::{self, TransportFocus};
 
-/// Seek step for the keyboard on the progress bar.
-const SEEK_STEP_MS: f64 = 5_000.0;
 const VOLUME_WIDTH: f32 = 96.0;
-const TIME_WIDTH: f32 = spacing::S12;
 /// The centre column takes 40% of the bar, between these bounds.
 const CENTER_MAX: f32 = 640.0;
 const CENTER_MIN: f32 = 320.0;
@@ -42,6 +40,21 @@ pub struct BarFocus {
     pub volume: FocusHandle,
     /// Replaces the progress row while an error shows; shares its place in the tab order.
     pub retry: FocusHandle,
+    /// The art and title block, which opens Now Playing.
+    pub now_playing: FocusHandle,
+}
+
+impl BarFocus {
+    pub fn transport(&self) -> TransportFocus {
+        TransportFocus {
+            shuffle: self.shuffle.clone(),
+            previous: self.previous.clone(),
+            play: self.play.clone(),
+            next: self.next.clone(),
+            repeat: self.repeat.clone(),
+            progress: self.progress.clone(),
+        }
+    }
 }
 
 #[derive(IntoElement)]
@@ -53,6 +66,8 @@ pub struct PlayerBar {
     pub volume: Entity<SliderState>,
     pub queue_open: bool,
     pub on_queue_toggle: Rc<Handler>,
+    pub now_playing_open: bool,
+    pub on_now_playing_toggle: Rc<Handler>,
 }
 
 fn volume_icon(volume: u8, muted: bool) -> Icon {
@@ -74,31 +89,7 @@ impl RenderOnce for PlayerBar {
         let accent_hsla = color::accent(accent);
 
         // ---- left: art, title, artist / error ---------------------------------------
-        let art = div()
-            .size(px(layout::PLAYER_BAR_ART))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(radius::MEDIUM))
-            .overflow_hidden()
-            .bg(color::bg_overlay())
-            .map(|d| match v.art.clone() {
-                Some(image) => d.child(
-                    img(ImageSource::Render(image))
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                ),
-                // No artwork: a quiet music note. A decorative glyph, not text, so
-                // text.tertiary on bg.overlay (4.19:1) clears the 3:1 non-text minimum.
-                None => d.child(
-                    gpui::svg()
-                        .path(Icon::MusicNote.path())
-                        .size(px(layout::ICON_SIZE))
-                        .flex_none()
-                        .text_color(color::text_tertiary()),
-                ),
-            });
+        let art = art_tile(layout::PLAYER_BAR_ART, v.art.clone());
 
         let player = self.player.clone();
         let artist_line = text_line(
@@ -108,7 +99,12 @@ impl RenderOnce for PlayerBar {
             color::text_secondary(),
             cx,
         );
+        // The block opens (and closes) Now Playing. Inert while nothing is queued.
+        let ring = controls && keyboard_focused(&self.focus.now_playing, window);
         let left = div()
+            .id("now-playing-toggle")
+            .debug_selector(|| "now-playing-toggle".into())
+            .relative()
             .flex()
             .flex_row()
             .items_center()
@@ -117,6 +113,30 @@ impl RenderOnce for PlayerBar {
             .w(relative(layout::PLAYER_BAR_SIDE_FRACTION))
             .min_w(px(layout::PLAYER_BAR_SIDE_MIN))
             .max_w(px(layout::PLAYER_BAR_SIDE_MAX))
+            .rounded(px(radius::MEDIUM))
+            .track_focus(&self.focus.now_playing.clone().tab_stop(controls))
+            .role(gpui::Role::Button)
+            .aria_label("Now playing")
+            .aria_toggled(if self.now_playing_open {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .when(controls, |d| {
+                let toggle = self.on_now_playing_toggle.clone();
+                d.cursor_pointer()
+                    .hover(|s| s.bg(color::state_hover()))
+                    .on_click(move |event, window, cx| {
+                        // Space is the global play/pause key.
+                        if let gpui::ClickEvent::Keyboard(k) = event {
+                            if k.button == gpui::KeyboardButton::Space {
+                                return;
+                            }
+                        }
+                        toggle(window, cx)
+                    })
+            })
+            .when(ring, |d| d.child(focus_ring(accent_hsla, radius::MEDIUM)))
             .child(art)
             .child(
                 div()
@@ -135,138 +155,8 @@ impl RenderOnce for PlayerBar {
             );
 
         // ---- centre: transport + progress -------------------------------------------
-        let shuffle_icon = if v.shuffle {
-            Icon::ShuffleFilled
-        } else {
-            Icon::ShuffleRegular
-        };
-        let (repeat_icon, repeat_label, repeat_on) = match v.repeat {
-            Repeat::Off => (Icon::RepeatAllRegular, "Repeat off", false),
-            Repeat::All => (Icon::RepeatAllFilled, "Repeat all", true),
-            Repeat::One => (Icon::RepeatOneFilled, "Repeat one", true),
-        };
-        let on_off = |on: bool| {
-            if on {
-                color::text_primary()
-            } else {
-                color::text_secondary()
-            }
-        };
-        let (play_icon, play_label) = if v.busy {
-            (Icon::Spinner, "Pause")
-        } else if v.playing {
-            (Icon::Pause, "Pause")
-        } else {
-            (Icon::Play, "Play")
-        };
+        let transport_row = transport::buttons("", &player, &v, &self.focus.transport());
 
-        let button =
-            |id: &'static str, focus: &FocusHandle, icon: Icon, label: &str, enabled: bool| {
-                IconButton::new(id, focus, icon, label.to_owned(), accent).enabled(enabled)
-            };
-        let transport = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(spacing::S2))
-            .h(px(layout::PLAY_BUTTON))
-            .child(
-                button(
-                    "shuffle",
-                    &self.focus.shuffle,
-                    shuffle_icon,
-                    "Shuffle",
-                    ready,
-                )
-                .icon_color(on_off(v.shuffle))
-                .toggled(v.shuffle)
-                .on_click({
-                    let p = player.clone();
-                    move |_, cx| {
-                        p.update(cx, |m, cx| m.toggle_shuffle(cx));
-                    }
-                }),
-            )
-            .child(
-                button(
-                    "previous",
-                    &self.focus.previous,
-                    Icon::Previous,
-                    "Previous",
-                    controls,
-                )
-                .icon_color(color::text_primary())
-                .on_click({
-                    let p = player.clone();
-                    move |_, cx| {
-                        p.update(cx, |m, cx| m.previous(cx));
-                    }
-                }),
-            )
-            .child(
-                button("play", &self.focus.play, play_icon, play_label, controls)
-                    .size(layout::PLAY_BUTTON)
-                    .circle()
-                    .filled(if controls {
-                        accent_hsla
-                    } else {
-                        color::bg_overlay()
-                    })
-                    .icon_color(color::accent_fg(accent))
-                    .spinning(v.busy)
-                    .on_click({
-                        let p = player.clone();
-                        move |_, cx| {
-                            p.update(cx, |m, cx| m.toggle_play(cx));
-                        }
-                    }),
-            )
-            .child(
-                button("next", &self.focus.next, Icon::Next, "Next", controls)
-                    .icon_color(color::text_primary())
-                    .on_click({
-                        let p = player.clone();
-                        move |_, cx| {
-                            p.update(cx, |m, cx| m.next(cx));
-                        }
-                    }),
-            )
-            .child(
-                button(
-                    "repeat",
-                    &self.focus.repeat,
-                    repeat_icon,
-                    repeat_label,
-                    ready,
-                )
-                .icon_color(on_off(repeat_on))
-                .on_click({
-                    let p = player.clone();
-                    move |_, cx| {
-                        p.update(cx, |m, cx| m.cycle_repeat(cx));
-                    }
-                }),
-            );
-
-        let duration = v.duration_ms;
-        let seekable = controls && duration.is_some_and(|d| d > 0);
-        let scrub = self.progress.read(cx).scrubbing();
-        let shown_ms = match (scrub, duration) {
-            (Some(f), Some(d)) => (f64::from(f) * d as f64) as u64,
-            _ => v.position_ms,
-        };
-        let fraction = duration
-            .filter(|d| *d > 0)
-            .map_or(0.0, |d| (v.position_ms as f64 / d as f64).min(1.0) as f32);
-        let time = |id: &'static str, text: String, right: bool, cx: &App| {
-            style::tabular(style::text_style(div(), typography::CAPTION, cx))
-                .id(id)
-                .w(px(TIME_WIDTH))
-                .flex_none()
-                .text_color(color::text_tertiary())
-                .when(right, |d| d.text_right())
-                .child(text)
-        };
         let error_text: Option<SharedString> = match (&v.status, v.error) {
             (Status::Unavailable(text), _) => Some(text.clone()),
             (_, Some(failure)) => Some(SharedString::from(failure_text(failure))),
@@ -327,48 +217,8 @@ impl RenderOnce for PlayerBar {
                 )
                 .children(retry)
         });
-        let progress = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(spacing::S2))
-            .w_full()
-            .child(time("time-position", format_time(shown_ms), true, cx))
-            .child(
-                div().flex_1().min_w_0().child(
-                    Slider::new(
-                        "progress",
-                        &self.progress,
-                        &self.focus.progress,
-                        "Seek",
-                        accent,
-                    )
-                    .value(fraction)
-                    .step(
-                        duration
-                            .filter(|d| *d > 0)
-                            .map_or(0.0, |d| (SEEK_STEP_MS / d as f64) as f32),
-                    )
-                    .enabled(seekable)
-                    .on_change({
-                        let p = player.clone();
-                        move |frac, committed, _, cx| {
-                            if committed {
-                                if let Some(d) = duration {
-                                    let ms = (f64::from(frac) * d as f64).round() as u64;
-                                    p.update(cx, |m, cx| m.seek(ms, cx));
-                                }
-                            }
-                        }
-                    }),
-                ),
-            )
-            .child(time(
-                "time-duration",
-                format_time(duration.unwrap_or(0)),
-                false,
-                cx,
-            ));
+        let progress =
+            transport::progress("", &player, &v, &self.focus.progress, &self.progress, cx);
 
         let center = div()
             .flex()
@@ -378,13 +228,17 @@ impl RenderOnce for PlayerBar {
             .w(relative(0.4))
             .min_w(px(CENTER_MIN))
             .max_w(px(CENTER_MAX))
-            .child(transport)
+            .child(transport_row)
             .child(match error_row {
                 Some(row) => row.into_any_element(),
                 None => progress.into_any_element(),
             });
 
         // ---- right: volume, queue toggle --------------------------------------------
+        let button =
+            |id: &'static str, focus: &FocusHandle, icon: Icon, label: &str, enabled: bool| {
+                IconButton::new(id, focus, icon, label.to_owned(), accent).enabled(enabled)
+            };
         let volume_value = if v.muted {
             0.0
         } else {
@@ -447,7 +301,7 @@ impl RenderOnce for PlayerBar {
                     "Queue",
                     ready,
                 )
-                .icon_color(on_off(self.queue_open))
+                .icon_color(transport::on_off(self.queue_open))
                 .toggled(self.queue_open)
                 .on_click({
                     let f = self.on_queue_toggle.clone();
@@ -476,7 +330,7 @@ impl RenderOnce for PlayerBar {
 }
 
 /// One truncated line of text; the full text shows in a tooltip.
-fn text_line(
+pub(crate) fn text_line(
     id: &'static str,
     text: SharedString,
     style_: typography::TextStyle,
