@@ -58,6 +58,7 @@ enum Cmd {
     },
     Close(LoadId),
     Stop,
+    SetVolume(u8),
     /// Test/diagnostic hook: current value of mpv options (names are fixed by the caller).
     Query(Vec<String>, Sender<Vec<(String, String)>>),
     Shutdown,
@@ -138,6 +139,9 @@ impl MediaEngine for MpvEngine {
     }
     fn stop(&mut self) {
         self.send(Cmd::Stop);
+    }
+    fn set_volume(&mut self, percent: u8) {
+        self.send(Cmd::SetVolume(percent.min(100)));
     }
 }
 
@@ -294,6 +298,9 @@ impl Pump {
                 }
             }
             Cmd::Stop => self.stop_playback(),
+            Cmd::SetVolume(percent) => {
+                let _ = self.mpv.set_property("volume", i64::from(percent));
+            }
             Cmd::Query(names, reply) => {
                 let out = names
                     .into_iter()

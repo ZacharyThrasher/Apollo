@@ -35,7 +35,7 @@ Queue: right panel 320px, toggled from player bar, slides in 200 ms.
 Now Playing (expanded): art min(50vh, 480px), ambient glow, 40px title, artist in text.secondary, transport below.
 
 ## Motion
-Hover/press 120 ms, panels 200 ms, accent crossfade 400 ms; ease-out cubic. If Windows "Animation effects" is off, transitions are instant.
+Hover fades in and out over 120 ms; the press tint is instant (no fade). Panels 200 ms, accent crossfade 400 ms; ease-out cubic. If Windows "Animation effects" is off, transitions are instant.
 
 ## States and copy
 Loading: skeleton blocks at white 4% with subtle shimmer; spinners only inside buttons; reserve final size so nothing shifts.
@@ -43,6 +43,20 @@ Empty: one short line + one action (e.g. "No liked songs yet" [Search]).
 Errors: what happened in <= 6 words + one action (e.g. "Couldn't load this playlist" [Retry]).
 Premium/account status only in Settings > Account ("Premium assumed"), never in main chrome.
 Focus ring: 2px accent, 2px offset, keyboard focus only.
+
+## Shell decisions (coordinator, 2026-10-03)
+Applied to the app shell from the first Windows review.
+1. **Close button:** hover is native Windows 11 red #C42B1C with a white glyph; pressed is #C42B1C at 90%. The other caption buttons keep the neutral hover and pressed tints.
+2. **Player bar side blocks:** the left block (art, title, artist) is 30% of the bar, min 240px, max 360px. The right block (volume, queue) has the same width, so the transport stays centred on the window. The minimum window width follows: 240 + 320 + 240 plus padding and gaps is 864px.
+3. **No-art tile:** bg.overlay #1F1F23 with a centred 20px Fluent music-note glyph in text.tertiary. The glyph is decorative, not text, so the "no text.tertiary on bg.overlay" rule does not apply (4.19:1 clears the 3:1 non-text minimum).
+4. **Top-edge speckles:** the app draws no 1px border at the window top; the Mica edge is native. Nothing to remove; if the speckles persist they come from DWM compositing.
+5. **Tooltip radius** 4px. **Volume default** 70, saved to the `settings` table of the app store (`%LOCALAPPDATA%\Apollo\app\apollo.db`, key `volume_percent`) when a slider change is final, restored on start.
+6. **Queue button** toggles only its own state until the queue panel exists.
+7. **Player bar errors:** the time row (times and slider) is replaced by a warning icon in `warning`, a line of at most 6 words in text.secondary, and "Retry" as a text button in text.primary with underline on hover. No accent. Retry takes the progress slider's place in the tab order.
+8. **Nav:** 3px accent bar, 8% selected background and a filled icon on the selected item. Selected label is body-strong in text.primary; unselected is body in text.secondary. The expand/collapse toggle is icon-only with a tooltip and no visible label.
+9. **Sliders:** 4px track. Progress fill is the accent; volume fill is text.secondary. The 12px text.primary thumb shows only on hover, drag or focus. Shuffle and repeat "on" use the filled icon in text.primary; the repeat-one icon carries its own "1" badge.
+10. **Page padding:** 32px horizontal, 24px top.
+- Next/Previous while paused starts playing (matches YouTube Music). Owner can override.
 
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

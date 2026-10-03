@@ -69,6 +69,7 @@ pub enum EngineCall {
     },
     Close(LoadId),
     Stop,
+    SetVolume(u8),
 }
 
 /// Models what the audio device is doing.
@@ -143,5 +144,8 @@ impl MediaEngine for MockEngine {
         self.calls.push(EngineCall::Stop);
         self.audible = None;
         self.paused = false;
+    }
+    fn set_volume(&mut self, percent: u8) {
+        self.calls.push(EngineCall::SetVolume(percent));
     }
 }

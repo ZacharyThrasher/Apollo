@@ -29,6 +29,43 @@ pub trait MediaEngine {
     fn close(&mut self, load: LoadId);
     /// Silence everything.
     fn stop(&mut self);
+    /// Output level as a percentage (0 = silent, 100 = full). This is a user setting, not
+    /// playback state, so it never goes through the coordinator. Engines without a
+    /// volume control may ignore it.
+    fn set_volume(&mut self, _percent: u8) {}
+}
+
+impl<T: Resolver + ?Sized> Resolver for Box<T> {
+    fn start(&mut self, request: ResolveRequest) {
+        (**self).start(request)
+    }
+    fn cancel(&mut self, load: LoadId) {
+        (**self).cancel(load)
+    }
+}
+
+impl<T: MediaEngine + ?Sized> MediaEngine for Box<T> {
+    fn open(&mut self, load: LoadId, lease: LeaseId, start_paused: bool, start_ms: u64) {
+        (**self).open(load, lease, start_paused, start_ms)
+    }
+    fn pause(&mut self, load: LoadId) {
+        (**self).pause(load)
+    }
+    fn resume(&mut self, load: LoadId) {
+        (**self).resume(load)
+    }
+    fn seek(&mut self, load: LoadId, generation: u64, position_ms: u64) {
+        (**self).seek(load, generation, position_ms)
+    }
+    fn close(&mut self, load: LoadId) {
+        (**self).close(load)
+    }
+    fn stop(&mut self) {
+        (**self).stop()
+    }
+    fn set_volume(&mut self, percent: u8) {
+        (**self).set_volume(percent)
+    }
 }
 
 /// Owns the coordinator and runs its effects. All inputs funnel through
