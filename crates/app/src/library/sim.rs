@@ -1216,6 +1216,28 @@ impl LibrarySource for SimLibrary {
         Ok(library_artist_hits())
     }
 
+    fn subscribed_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        self.wait(LATENCY);
+        let (failure, channels) = {
+            let state = self.state();
+            (state.tabs, state.subscribed.clone())
+        };
+        if let Some(f) = failure {
+            return Err(f);
+        }
+        Ok(channels
+            .iter()
+            .filter_map(|channel| artist_content(channel))
+            .map(|artist| Hit {
+                id: BrowseId::new(artist.channel_id),
+                title: artist.name,
+                subtitle: artist.subscribers,
+                thumbnail: artist.thumbnail,
+                explicit: false,
+            })
+            .collect())
+    }
+
     fn history(&self) -> Result<Vec<HistoryDay>, LoadFailure> {
         self.wait(LATENCY);
         if let Some(f) = self.state().tabs {
