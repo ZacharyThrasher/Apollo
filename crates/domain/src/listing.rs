@@ -150,6 +150,18 @@ impl<T: ListItem> Listing<T> {
         before - self.items.len()
     }
 
+    /// Take the row at `from` and put it before the insertion slot `slot` (0 above the first row,
+    /// `len` below the last). Returns whether anything moved. Paging state is untouched.
+    pub fn move_item(&mut self, from: usize, slot: usize) -> bool {
+        if crate::library::plan_move(self.items.len(), from, slot).is_none() {
+            return false;
+        }
+        let item = self.items.remove(from);
+        let at = if slot > from { slot - 1 } else { slot };
+        self.items.insert(at, item);
+        true
+    }
+
     /// A request for the next page is marked in flight.
     pub fn mark_loading_more(&mut self, rev: Revision) -> bool {
         if rev != self.revision || self.continuation.is_none() {
@@ -238,6 +250,21 @@ mod tests {
             continuation: cont.map(str::to_owned),
             skipped: 0,
         }
+    }
+
+    #[test]
+    fn move_item_reorders_without_touching_paging() {
+        let mut l = Listing::new();
+        let rev = l.begin();
+        l.apply(rev, page(vec![Occ("a"), Occ("b"), Occ("c")], Some("t1")));
+        assert!(l.move_item(2, 0));
+        assert_eq!(l.items(), [Occ("c"), Occ("a"), Occ("b")]);
+        assert!(!l.move_item(1, 1), "onto itself");
+        assert!(!l.move_item(1, 2), "just below itself");
+        assert!(l.move_item(0, 3), "to the end");
+        assert_eq!(l.items(), [Occ("a"), Occ("b"), Occ("c")]);
+        assert_eq!(l.state(), LoadState::HasMore);
+        assert_eq!(l.continuation(), Some((rev, "t1")));
     }
 
     #[test]

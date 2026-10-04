@@ -10,6 +10,7 @@
 //! field (and out of it when the field is empty). Cards are tab stops after the list; Enter opens.
 
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use apollo_domain::library::{Collection, CollectionKind};
@@ -22,11 +23,13 @@ use gpui::{
 };
 
 use crate::assets::Icon;
-use crate::library::model::{ArtistTarget, Target};
+use crate::library::model::{ArtistTarget, LibraryModel, Target};
+use crate::library::source::TrackRow;
 use crate::queue_source;
 use crate::library::writes::LibraryWrites;
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
+use crate::search::local::{LocalHit, LocalResults, CHIP_CAP};
 use crate::search::{
     as_link, failure_text, normalise, More, SearchChip, SearchEvent, SearchModel, SearchState,
     BAD_LINK_TEXT, HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES,
@@ -39,6 +42,7 @@ use crate::ui::card::{self, grid, tile, Card};
 use crate::ui::playlist_picker::PlaylistPicker;
 use crate::ui::row_actions::{heart_action, more_slot, playlist_action, ACTION_SIZE};
 use crate::ui::search_chips::ChipRow;
+use crate::ui::search_library::LibraryRow;
 use crate::ui::search_popover::{self, SearchPopover};
 use crate::ui::top_result::{self, TopCard};
 use crate::ui::track_menu::{self, Command, Subject};
@@ -93,8 +97,10 @@ const SKELETON_CARDS: usize = 4;
 /// Distance from the end of a filtered list at which the next page is asked for.
 const LOAD_MORE_MARGIN: f32 = 600.0;
 /// Tab stops the All view's own controls take beyond its cards: the Top result card and its
-/// Play button, and one "Show all" per group.
-const EXTRA_STOPS: usize = 2 + 4;
+/// Play button, one "Show all" per group, and the "In your library" group's "Show all" and rows.
+const EXTRA_STOPS: usize = 2 + 4 + 1 + crate::search::local::LEAD_ROWS;
+/// The All view's group of the owner's own saved things.
+const LIBRARY_GROUP: &str = "In your library";
 const SELECTED_MARKER_WIDTH: f32 = 3.0;
 /// Scrim over a row's artwork while it is the play target.
 const ART_SCRIM: f32 = 0.6;
@@ -107,6 +113,13 @@ pub struct SearchPage {
     writes: Entity<LibraryWrites>,
     picker: Entity<PlaylistPicker>,
     model: Entity<SearchModel>,
+    /// Where the owner's saved songs, albums, playlists and artists come from.
+    library: Entity<LibraryModel>,
+    /// The library index last handed to the search model.
+    index_rev: Option<u64>,
+    /// The field held text on the last change: a search starting from empty makes sure the
+    /// library's lists are loaded.
+    searching: bool,
     thumbs: Entity<ThumbStore>,
     field: Entity<TextField>,
     /// Tab stop of the results list (rows are not tab stops: Up and Down move between them).
@@ -144,6 +157,7 @@ impl SearchPage {
         writes: Entity<LibraryWrites>,
         picker: Entity<PlaylistPicker>,
         model: Entity<SearchModel>,
+        library: Entity<LibraryModel>,
         thumbs: Entity<ThumbStore>,
         settings: Entity<SettingsModel>,
         root_focus: FocusHandle,
@@ -168,6 +182,7 @@ impl SearchPage {
                     if this.picked.take().as_deref() != Some(text.as_str()) {
                         this.dismissed = false;
                     }
+                    this.start_searching(!text.trim().is_empty(), cx);
                     this.model.update(cx, |m, cx| m.set_query(&text, cx));
                 }
                 TextFieldEvent::Submit => this.submit(cx),
@@ -204,6 +219,7 @@ impl SearchPage {
         })
         .detach();
         cx.observe(&thumbs, |_, _, cx| cx.notify()).detach();
+        cx.observe(&library, |this, _, cx| this.sync_library(cx)).detach();
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         let mut page = Self {
@@ -211,6 +227,9 @@ impl SearchPage {
             writes,
             picker,
             model,
+            library,
+            index_rev: None,
+            searching: false,
             thumbs,
             field,
             results_focus,
@@ -230,7 +249,30 @@ impl SearchPage {
             picked: None,
         };
         page.sync_options(&initial, cx);
+        page.sync_library(cx);
         page
+    }
+
+    /// Hand the library's lists to the search model when they have changed.
+    fn sync_library(&mut self, cx: &mut Context<Self>) {
+        let (rev, index) = {
+            let library = self.library.read(cx);
+            let (rev, index) = library.search_index();
+            (rev, index.clone())
+        };
+        if self.index_rev != Some(rev) {
+            self.index_rev = Some(rev);
+            self.model.update(cx, |m, cx| m.set_library(index, cx));
+        }
+    }
+
+    /// Typing from an empty field starts a search: the library loads whatever of its lists the
+    /// screens have not (the artists, the liked songs), once.
+    fn start_searching(&mut self, has_text: bool, cx: &mut Context<Self>) {
+        if has_text && !self.searching {
+            self.library.update(cx, |l, cx| l.ensure_searchable(cx));
+        }
+        self.searching = has_text;
     }
 
     /// Hand the Settings > Search switches to the model.
@@ -245,7 +287,9 @@ impl SearchPage {
     /// Back from a page opened from here: focus returns to the results (or the field when
     /// there are none), where the cards and songs are.
     pub fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.read(cx).results().is_some() {
+        let model = self.model.read(cx);
+        let shown = model.results().is_some() || model.local_shown().is_some_and(|l| !l.is_empty());
+        if shown {
             window.focus(&self.results_focus, cx);
         } else {
             text_field::focus(&self.field, window, cx);
@@ -270,26 +314,68 @@ impl SearchPage {
         self.selected
     }
 
-    /// The songs on show (and so the keyboard's): the first few beside the Top result on All,
-    /// every one of a filtered Songs list.
+    /// The songs on show (and so the keyboard's), in the order they are drawn. On All: the first
+    /// few beside the Top result, then the library's own in its group. On Library: every saved
+    /// song that matched. Otherwise every one of a filtered Songs list.
     fn songs(&self, cx: &App) -> Vec<ListedTrack> {
         let model = self.model.read(cx);
-        let cap = match model.chip() {
-            SearchChip::All => ALL_SONGS,
+        match model.chip() {
+            SearchChip::Library => model
+                .local_shown()
+                .map(|l| l.songs.iter().take(CHIP_CAP).map(listed).collect())
+                .unwrap_or_default(),
+            chip => {
+                let cap = if chip == SearchChip::All {
+                    ALL_SONGS
+                } else {
+                    usize::MAX
+                };
+                let mut songs: Vec<ListedTrack> = model
+                    .results()
+                    .map(|r| r.songs.iter().take(cap).cloned().collect())
+                    .unwrap_or_default();
+                if chip == SearchChip::All {
+                    songs.extend(model.local_shown().into_iter().flat_map(|l| l.lead_songs()).map(listed));
+                }
+                songs
+            }
+        }
+    }
+
+    /// How many of [`Self::songs`] are the service's (the rest are the library's).
+    fn remote_songs(&self, cx: &App) -> usize {
+        let model = self.model.read(cx);
+        match model.chip() {
+            SearchChip::Library => 0,
+            SearchChip::All => model
+                .results()
+                .map_or(0, |r| r.songs.len().min(ALL_SONGS)),
             _ => usize::MAX,
-        };
-        model
-            .results()
-            .map(|r| r.songs.iter().take(cap).cloned().collect())
-            .unwrap_or_default()
+        }
     }
 
     /// The scroll container's child that holds song `index`: All lists its songs in its first
-    /// row, a Songs list has one child per song.
+    /// row and the library's in the group under it, a Songs list has one child per song, and
+    /// the Library chip puts the Songs heading first.
     fn song_child(&self, index: usize, cx: &App) -> usize {
-        match self.model.read(cx).chip() {
-            SearchChip::All => 0,
+        let model = self.model.read(cx);
+        match model.chip() {
+            SearchChip::All if index < self.remote_songs(cx) => 0,
+            SearchChip::All => self.lead_child(cx),
+            SearchChip::Library => index + 1,
             _ => index,
+        }
+    }
+
+    /// The scroll container's child that holds the "In your library" group on All: the first,
+    /// or the one after the Top result row when the page draws one.
+    fn lead_child(&self, cx: &App) -> usize {
+        let model = self.model.read(cx);
+        match (model.state(), model.results()) {
+            (SearchState::Ready | SearchState::Loading, Some(r)) if !model.is_confirmed_empty() => {
+                usize::from(r.top.is_some() || !r.songs.is_empty())
+            }
+            _ => 0,
         }
     }
 
@@ -300,10 +386,17 @@ impl SearchPage {
     }
 
     fn request_thumbs(&mut self, cx: &mut Context<Self>) {
-        let Some(results) = self.model.read(cx).results().cloned() else {
+        let model = self.model.read(cx);
+        let mut urls: Vec<String> = model
+            .results()
+            .map(|r| thumbnails(r).collect())
+            .unwrap_or_default();
+        if let Some(local) = model.local_shown() {
+            urls.extend(local_thumbnails(local, model.chip()));
+        }
+        if urls.is_empty() {
             return;
-        };
-        let urls: Vec<String> = thumbnails(&results).collect();
+        }
         self.thumbs.update(cx, |store, cx| {
             for url in &urls {
                 store.request(url, cx);
@@ -530,6 +623,65 @@ fn thumbnails(results: &SearchResults) -> impl Iterator<Item = String> + '_ {
         )
 }
 
+/// The artwork of the library rows on show: the lead rows on All, every capped list on Library.
+fn local_thumbnails(local: &LocalResults, chip: SearchChip) -> Vec<String> {
+    match chip {
+        SearchChip::All => local
+            .lead
+            .iter()
+            .filter_map(|hit| match hit {
+                LocalHit::Song(row) => row.thumbnail.clone(),
+                LocalHit::Album(c) | LocalHit::Playlist(c) => c.thumbnail.clone(),
+                LocalHit::Artist(h) => h.thumbnail.clone(),
+            })
+            .collect(),
+        SearchChip::Library => local
+            .songs
+            .iter()
+            .take(CHIP_CAP)
+            .filter_map(|r| r.thumbnail.clone())
+            .chain(
+                local
+                    .albums
+                    .iter()
+                    .chain(&local.playlists)
+                    .take(CHIP_CAP)
+                    .filter_map(|c| c.thumbnail.clone()),
+            )
+            .chain(
+                local
+                    .artists
+                    .iter()
+                    .take(CHIP_CAP)
+                    .filter_map(|h| h.thumbnail.clone()),
+            )
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A library row as the lists of search results carry songs.
+fn listed(row: &TrackRow) -> ListedTrack {
+    ListedTrack {
+        track: row.track.clone(),
+        occurrence: row.occurrence.clone(),
+        thumbnail: row.thumbnail.clone(),
+        explicit: row.explicit,
+        liked: row.liked,
+    }
+}
+
+/// A saved album, playlist or artist as the cards of search results carry them.
+fn hit_of(collection: &Collection) -> Hit {
+    Hit {
+        id: collection.id.clone(),
+        title: collection.title.clone(),
+        subtitle: collection.subtitle.clone(),
+        thumbnail: collection.thumbnail.clone(),
+        explicit: false,
+    }
+}
+
 /// A pasted link was looked up: a track plays, a page opens.
 fn open_link(target: LinkTarget, player: &Entity<PlayerModel>, on_open: &OpenTarget, cx: &mut App) {
     match target {
@@ -574,6 +726,8 @@ impl Render for SearchPage {
         let query: SharedString = model.query().to_owned().into();
         let results = model.results().cloned();
         let confirmed_empty = model.is_confirmed_empty();
+        let local: Option<Arc<LocalResults>> = model.local_shown().cloned();
+        let local_empty = model.is_local_empty();
         let more = model.more();
         let show_chips = matches!(
             state,
@@ -581,8 +735,10 @@ impl Render for SearchPage {
         ) && as_link(&query).is_none();
 
         let cards = results.as_ref().map_or(0, |r| {
-            r.albums.len() + r.artists.len() + r.playlists.len() + EXTRA_STOPS
-        });
+            r.albums.len() + r.artists.len() + r.playlists.len()
+        }) + local.as_ref().map_or(0, |l| {
+            l.albums.len().min(CHIP_CAP) + l.playlists.len().min(CHIP_CAP) + l.artists.len().min(CHIP_CAP)
+        }) + EXTRA_STOPS;
         while self.card_focus.len() < cards {
             self.card_focus
                 .push(cx.focus_handle().tab_index(7).tab_stop(true));
@@ -599,9 +755,13 @@ impl Render for SearchPage {
         self.field_was_focused = field_focused;
         let list_focused = self.results_focus.is_focused(window);
         let popover = self.popover(cx);
-        if chip != SearchChip::All && state == SearchState::Ready {
+        if chip.is_remote() && chip != SearchChip::All && state == SearchState::Ready {
             self.ask_for_more(cx);
         }
+        // The library rows of the All view: its best few, once the page has any.
+        let lead: Option<Arc<LocalResults>> = local
+            .clone()
+            .filter(|l| chip == SearchChip::All && !l.lead.is_empty());
 
         // Every item is its own child of the scroll container, so a keyboard selection can
         // scroll to it.
@@ -620,32 +780,57 @@ impl Render for SearchPage {
                     cx,
                 )]
             }
+            // The Library chip never asks the service: its list is the local answer.
+            (SearchState::Ready, _) if chip == SearchChip::Library => {
+                if local_empty {
+                    vec![self.no_results(&query, accent, cx)]
+                } else {
+                    local.as_ref().map_or_else(Vec::new, |l| {
+                        self.library_view(l, list_focused, accent, cx)
+                    })
+                }
+            }
             (SearchState::Failed(failure), _) => {
                 let model = self.model.clone();
-                vec![self.message(
+                // What the library holds is still there when the service is not.
+                let mut items = lead
+                    .as_ref()
+                    .map(|l| self.lead_group(l, false, 0, 0, list_focused, accent, cx))
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                items.push(self.message(
                     failure_text(failure).into(),
                     "Retry",
                     accent,
                     move |_, cx| model.update(cx, |m, cx| m.retry(cx)),
                     cx,
-                )]
+                ));
+                items
             }
-            (SearchState::Ready, Some(_)) if confirmed_empty => {
-                let text: SharedString = format!("No results for \u{201C}{query}\u{201D}").into();
-                let field = self.field.clone();
-                vec![self.message(
-                    text,
-                    "Clear",
-                    accent,
-                    move |window, cx| {
-                        field.update(cx, |f, cx| f.set_text("", cx));
-                        text_field::focus(&field, window, cx);
-                    },
-                    cx,
-                )]
+            (SearchState::Ready, Some(_)) if confirmed_empty => match &lead {
+                // The service found nothing, the library did: the group says so.
+                Some(l) => vec![self.lead_group(l, false, 0, 0, list_focused, accent, cx)],
+                None => vec![self.no_results(&query, accent, cx)],
+            },
+            (_, Some(results)) => self.results_list(
+                &results,
+                lead.as_deref(),
+                chip,
+                more,
+                list_focused,
+                accent,
+                cx,
+            ),
+            (SearchState::Loading, None) => {
+                // The library answers before the service does.
+                let mut items = lead
+                    .as_ref()
+                    .map(|l| self.lead_group(l, false, 0, 0, list_focused, accent, cx))
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                items.push(skeletons(chip, cx));
+                items
             }
-            (_, Some(results)) => self.results_list(&results, chip, more, list_focused, accent, cx),
-            (SearchState::Loading, None) => vec![skeletons(chip, cx)],
             // Ready without results cannot happen; show nothing rather than guess.
             (SearchState::Ready, None) => Vec::new(),
         };
@@ -853,6 +1038,7 @@ impl SearchPage {
     fn results_list(
         &self,
         results: &SearchResults,
+        lead: Option<&LocalResults>,
         chip: SearchChip,
         more: More,
         list_focused: bool,
@@ -916,6 +1102,7 @@ impl SearchPage {
                             column = column.child(self.song_row(
                                 index,
                                 song,
+                                None,
                                 list_focused,
                                 accent,
                                 cx,
@@ -924,6 +1111,22 @@ impl SearchPage {
                         row = row.child(column);
                     }
                     items.push(row.into_any_element());
+                }
+                // The library's own matches sit directly under that row.
+                if let Some(lead) = lead {
+                    let first_stop = next_stop();
+                    for _ in lead.lead.iter() {
+                        next_stop();
+                    }
+                    items.push(self.lead_group(
+                        lead,
+                        true,
+                        first_stop,
+                        songs.len(),
+                        list_focused,
+                        accent,
+                        cx,
+                    ));
                 }
                 // The Top result is also the first row of its own group; it is not shown twice.
                 let top_hit = match &results.top {
@@ -957,12 +1160,14 @@ impl SearchPage {
             }
             SearchChip::Songs => {
                 for (index, song) in results.songs.iter().enumerate() {
-                    items.push(self.song_row(index, song, list_focused, accent, cx));
+                    items.push(self.song_row(index, song, None, list_focused, accent, cx));
                 }
                 if more == More::Loading {
                     items.push(row_skeletons(MORE_SKELETON_ROWS, "search-more-skeleton", cx));
                 }
             }
+            // The Library chip has its own view (`library_view`); it never reaches here.
+            SearchChip::Library => {}
             SearchChip::Albums | SearchChip::Artists | SearchChip::Playlists
             | SearchChip::CommunityPlaylists => {
                 let (kind, hits) = match chip {
@@ -990,6 +1195,163 @@ impl SearchPage {
                 move |_, cx| model.update(cx, |m, cx| m.retry_more(cx)),
                 cx,
             ));
+        }
+        items
+    }
+
+    /// "No results for “query”" with a Clear action.
+    fn no_results(&self, query: &SharedString, accent: Accent, cx: &App) -> AnyElement {
+        let text: SharedString = format!("No results for \u{201C}{query}\u{201D}").into();
+        let field = self.field.clone();
+        self.message(
+            text,
+            "Clear",
+            accent,
+            move |window, cx| {
+                field.update(cx, |f, cx| f.set_text("", cx));
+                text_field::focus(&field, window, cx);
+            },
+            cx,
+        )
+    }
+
+    /// The "In your library" group: the library's best few matches of any kind, as rows, under
+    /// a heading with a "Show all" that opens the Library chip. Song rows are numbered from
+    /// `base` (after the service's songs on the page); the group's tab stops start at
+    /// `first_stop`; `spaced` leaves room above it (it follows something).
+    fn lead_group(
+        &self,
+        local: &LocalResults,
+        spaced: bool,
+        first_stop: usize,
+        base: usize,
+        list_focused: bool,
+        accent: Accent,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let page = cx.entity();
+        let all = div()
+            .debug_selector(|| "show-all-library".into())
+            .child(
+                TextButton::new(
+                    "show-all-library",
+                    &self.card_focus[first_stop],
+                    "Show all",
+                    accent,
+                )
+                .on_click(move |_, cx| {
+                    page.update(cx, |p, cx| p.select_chip(SearchChip::Library, cx))
+                }),
+            )
+            .into_any_element();
+        let mut song_index = base;
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .debug_selector(|| "library-group".into())
+            .child(group_header(LIBRARY_GROUP, spaced, Some(all), cx));
+        for (n, hit) in local.lead.iter().enumerate() {
+            let stop = first_stop + 1 + n;
+            column = column.child(match hit {
+                LocalHit::Song(row) => {
+                    let song = listed(row);
+                    let element = self.song_row(
+                        song_index,
+                        &song,
+                        Some("Song"),
+                        list_focused,
+                        accent,
+                        cx,
+                    );
+                    song_index += 1;
+                    element
+                }
+                LocalHit::Album(c) => self.library_row("album", n, &hit_of(c), stop, accent, cx),
+                LocalHit::Playlist(c) => {
+                    self.library_row("playlist", n, &hit_of(c), stop, accent, cx)
+                }
+                LocalHit::Artist(h) => self.library_row("artist", n, h, stop, accent, cx),
+            });
+        }
+        column.into_any_element()
+    }
+
+    /// An album, playlist or artist of the library as a row (tab stop `stop`).
+    fn library_row(
+        &self,
+        kind: &'static str,
+        index: usize,
+        hit: &Hit,
+        stop: usize,
+        accent: Accent,
+        cx: &App,
+    ) -> AnyElement {
+        let thumb = match &hit.thumbnail {
+            Some(url) => self.thumbs.read(cx).get(url),
+            None => Thumb::Missing,
+        };
+        let label = match kind {
+            "album" => "Album",
+            "playlist" => "Playlist",
+            _ => "Artist",
+        };
+        let detail: SharedString = match hit.subtitle.as_deref().filter(|s| !s.trim().is_empty()) {
+            Some(rest) => format!("{label} \u{2022} {rest}").into(),
+            None => label.into(),
+        };
+        let (target, on_open) = (target_of(kind, hit), self.on_open.clone());
+        LibraryRow::new(
+            format!("library-row-{index}"),
+            hit.title.clone(),
+            detail,
+            thumb,
+            &self.card_focus[stop],
+            accent,
+            move |window, cx| on_open(target.clone(), window, cx),
+        )
+        .circular(kind == "artist")
+        .menu(Subject::of_target(&target_of(kind, hit)))
+        .into_any_element()
+    }
+
+    /// The Library chip's list: everything the library holds for the query, grouped Songs,
+    /// Albums, Playlists, Artists, at most [`CHIP_CAP`] of each.
+    fn library_view(
+        &self,
+        local: &LocalResults,
+        list_focused: bool,
+        accent: Accent,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut items: Vec<AnyElement> = Vec::new();
+        let mut stop = 0;
+        if !local.songs.is_empty() {
+            items.push(group_header("Songs", false, None, cx));
+            for (index, row) in local.songs.iter().take(CHIP_CAP).enumerate() {
+                items.push(self.song_row(index, &listed(row), None, list_focused, accent, cx));
+            }
+        }
+        let albums: Vec<Hit> = local.albums.iter().take(CHIP_CAP).map(hit_of).collect();
+        let playlists: Vec<Hit> = local.playlists.iter().take(CHIP_CAP).map(hit_of).collect();
+        let artists: Vec<Hit> = local.artists.iter().take(CHIP_CAP).cloned().collect();
+        for (title, kind, hits) in [
+            ("Albums", "album", &albums),
+            ("Playlists", "playlist", &playlists),
+            ("Artists", "artist", &artists),
+        ] {
+            if hits.is_empty() {
+                continue;
+            }
+            items.push(group_header(title, !items.is_empty(), None, cx));
+            let cards: Vec<Card> = hits
+                .iter()
+                .enumerate()
+                .map(|(index, hit)| {
+                    stop += 1;
+                    self.hit_card(kind, index, hit, stop - 1, accent, cx)
+                })
+                .collect();
+            items.push(grid().children(cards).into_any_element());
         }
         items
     }
@@ -1142,10 +1504,13 @@ impl SearchPage {
         }
     }
 
+    /// One song. `kind` leads its second line ("Song \u{2022} Artist") where the row sits among
+    /// other kinds.
     fn song_row(
         &self,
         index: usize,
         song: &ListedTrack,
+        kind: Option<&'static str>,
         list_focused: bool,
         accent: Accent,
         cx: &App,
@@ -1157,7 +1522,17 @@ impl SearchPage {
         SongRow {
             index,
             title: song.track.title.clone().into(),
-            artists: artists_line(song),
+            artists: match kind {
+                Some(kind) => {
+                    let artists = artists_line(song);
+                    if artists.is_empty() {
+                        kind.into()
+                    } else {
+                        format!("{kind} \u{2022} {artists}").into()
+                    }
+                }
+                None => artists_line(song),
+            },
             duration: song
                 .track
                 .duration

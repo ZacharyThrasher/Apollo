@@ -3,6 +3,7 @@
 //! simulated backend and the InnerTube provider implement it.
 
 pub mod browse;
+pub mod edits;
 pub mod model;
 pub mod sim;
 pub mod source;
@@ -13,4 +14,5 @@ pub mod live;
 
 pub use model::{ArtistDetail, ArtistTarget, Detail, Load, PlayRequest, Tab, Target};
 pub use source::{ArtistContent, LibrarySource, TrackRow};
+pub use edits::{EditEvent, LibraryEdits};
 pub use writes::{LibraryWrites, Notice, WritesEvent};
