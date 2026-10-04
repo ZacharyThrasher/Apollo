@@ -65,6 +65,8 @@ pub fn core_options(cfg: &MediaConfig) -> Vec<(&'static str, String)> {
         ("idle", "yes".into()),
         ("keep-open", "no".into()),
         ("audio-client-name", "Apollo".into()),
+        // A speed other than 1 keeps the pitch (mpv puts a time-stretch filter in the chain).
+        ("audio-pitch-correction", "yes".into()),
         ("volume", cfg.volume.to_string()),
         // Memory-only, bounded buffering.
         ("cache", "yes".into()),
@@ -100,6 +102,7 @@ mod tests {
             ("load-scripts", "no"),
             ("ytdl", "no"),
             ("vid", "no"),
+            ("audio-pitch-correction", "yes"),
             ("vo", "null"),
             ("cache-on-disk", "no"),
             ("input-media-keys", "no"),

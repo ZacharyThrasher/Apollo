@@ -105,6 +105,8 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
             SqliteSettings::default_location().map(|s| Arc::new(s) as Arc<dyn SettingsBackend>),
         )
     });
+    // The saved output device and equalizer, and any change to them later.
+    crate::audio::bind(&player, &settings, cx);
     // The tray first: with one, "Start minimized to tray" opens the window hidden (no flash),
     // and without one the window always opens.
     #[cfg(windows)]

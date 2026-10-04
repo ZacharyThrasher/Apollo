@@ -26,6 +26,8 @@ use crate::ui::library::{self, LibraryView};
 use crate::ui::lyrics_pane::LyricsPane;
 use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
+use crate::ui::audio_page::AudioPage;
+use crate::ui::choice_menu::{self, ChoiceHandle, ChoiceMenu};
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::playlist_picker::{self, PlaylistPicker};
@@ -77,6 +79,8 @@ pub fn bind_keys(cx: &mut App) {
     home_page::bind_keys(cx);
     playlist_picker::bind_keys(cx);
     track_menu::bind_keys(cx);
+    choice_menu::bind_keys(cx);
+    crate::ui::vslider::bind_keys(cx);
 }
 
 /// A toast on screen, possibly on its way out.
@@ -101,6 +105,8 @@ pub struct Shell {
     picker: Entity<PlaylistPicker>,
     /// The menu a right-click or a row's More button opens.
     menu: Entity<TrackMenu>,
+    /// The pick-one popover of the Output device row and the speed button.
+    choices: Entity<ChoiceMenu>,
     /// The error on screen: it outlives the notice by the length of its fade-out.
     toast: Option<ToastShown>,
     /// Where a page opened from another route (a Search card) returns to when Back closes the
@@ -210,6 +216,9 @@ impl Shell {
         });
         cx.observe(&menu, |_, _, cx| cx.notify()).detach();
         cx.set_global(MenuHandle(menu.clone()));
+        let choices = cx.new(ChoiceMenu::new);
+        cx.observe(&choices, |_, _, cx| cx.notify()).detach();
+        cx.set_global(ChoiceHandle(choices.clone()));
         let queue_panel = cx.new(|cx| {
             QueuePanel::new(
                 player.clone(),
@@ -244,8 +253,17 @@ impl Shell {
         });
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
         let playback_page = cx.new(|cx| PlaybackPage::new(player.clone(), cx));
-        let settings_page = cx
-            .new(|cx| SettingsPage::new(account_page, playback_page, settings, player.clone(), cx));
+        let audio_page = cx.new(|cx| AudioPage::new(player.clone(), settings.clone(), cx));
+        let settings_page = cx.new(|cx| {
+            SettingsPage::new(
+                account_page,
+                playback_page,
+                audio_page,
+                settings,
+                player.clone(),
+                cx,
+            )
+        });
         let library = cx.new(|cx| {
             LibraryView::new(
                 player.clone(),
@@ -329,6 +347,7 @@ impl Shell {
             writes,
             picker,
             menu,
+            choices,
             toast: None,
             detail_origin: None,
             library_epoch: 0,
@@ -453,6 +472,10 @@ impl Shell {
 
     pub fn menu(&self) -> &Entity<TrackMenu> {
         &self.menu
+    }
+
+    pub fn choices(&self) -> &Entity<ChoiceMenu> {
+        &self.choices
     }
 
     pub fn nav_expanded(&self) -> bool {
@@ -943,6 +966,7 @@ impl Render for Shell {
         });
         let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
         let menu = self.menu.read(cx).is_open().then(|| self.menu.clone());
+        let choices = self.choices.read(cx).is_open().then(|| self.choices.clone());
 
         let fonts = cx.global::<style::Fonts>().text.clone();
         div()
@@ -993,6 +1017,7 @@ impl Render for Shell {
             .children(toast)
             .children(picker)
             .children(menu)
+            .children(choices)
     }
 }
 
