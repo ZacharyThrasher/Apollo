@@ -225,7 +225,7 @@ impl PageCache {
         let _ = std::thread::Builder::new()
             .name("apollo-page-preload".into())
             .spawn(move || {
-                let Ok(store) = Store::open(&path) else {
+                let Some(store) = open_store(&path) else {
                     return;
                 };
                 let Ok(pages) = store.pages_for(&account) else {
@@ -294,7 +294,7 @@ impl PageCache {
             }
         }
         let path = self.inner.path.as_ref()?;
-        let page = Store::open(path).ok()?.get_page(account, key).ok()??;
+        let page = open_store(path)?.get_page(account, key).ok()??;
         // The account may have changed while the file was read.
         if self.state().account.as_deref() != Some(account) {
             return None;
@@ -435,6 +435,28 @@ pub fn browse_id(id: &str) -> String {
     }
 }
 
+/// Opening runs the migrations, and two threads doing that to a new file at once fail ("table
+/// already exists", "database is locked"). Opens by the cache's threads take turns, and a failed
+/// one is tried again a few times before the work is given up.
+fn open_store(path: &std::path::Path) -> Option<Store> {
+    static OPENING: Mutex<()> = Mutex::new(());
+    for attempt in 0..6 {
+        {
+            let _turn = OPENING.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            match Store::open(path) {
+                Ok(store) => return Some(store),
+                Err(err) if attempt == 5 => eprintln!("page cache store unavailable: {err}"),
+                Err(_) => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    None
+}
+
 fn is_current_in(state: &State, ticket: &Ticket, key: &str) -> bool {
     ticket.account.is_some()
         && state.account == ticket.account
@@ -458,7 +480,7 @@ fn write_loop(path: PathBuf, rx: std::sync::mpsc::Receiver<Job>, cache: std::syn
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok()?;
         }
-        Store::open(&path).ok()
+        open_store(&path)
     };
     while let Ok(job) = rx.recv() {
         // A put publishes to memory, then is saved right here, before the next queued job.
