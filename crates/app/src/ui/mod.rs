@@ -18,6 +18,7 @@ pub mod queue_panel;
 pub mod related_pane;
 pub mod row_actions;
 pub mod search_chips;
+pub mod search_library;
 pub mod search_page;
 pub mod search_popover;
 pub mod settings_page;

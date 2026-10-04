@@ -159,6 +159,15 @@ Applied to the Search page (`ui/search_page.rs`, `ui/search_chips.rs`, `ui/top_r
 4. **Filtered lists:** Songs is the song rows, the other chips the card grid, with no heading. They page by scrolling: the next page is asked for within 600px of the end (or when the list does not fill the window), under it the shared skeleton pulse (3 rows, or one row of cards); a failed page is "Couldn't load more" with Retry. A page that adds nothing new ends the list.
 5. **No Settings rows** were added.
 
+## Search in your library decisions (coordinator brief, 2026-10-04)
+Applied to `ui/search_page.rs`, `ui/search_library.rs`, `search.rs` and `search/local.rs`; the library's own lists come from `library/model.rs`.
+1. **What is searched:** the account's own saved things, in memory: liked songs, saved albums, saved and own playlists (Liked Music included), subscribed artists. A row matches when every word typed is in its title, artist or album (a collection's title and second line, which names the artist or owner), ignoring case and accents ("beyonce" finds Beyoncé). Nothing is sent to the service for it, so it never touches the account's search history.
+2. **All:** an "In your library" group directly under the Top result row (the Top result card and the songs beside it), above Albums. Up to 4 rows, best match first across kinds (a title that starts with the text, then a title that holds it, then the other fields). Songs use the Songs group's row; albums, playlists and artists use the same 56px row (40px art, a circle for an artist) with title over "Album / Playlist / Artist \u2022 what the library says" in text.secondary; songs read "Song \u2022 artists". Right-click offers the same menus as elsewhere. The group is hidden when nothing matches. Its "Show all" jumps to the Library chip.
+3. **Library chip:** last in the row, the same pill. It lists every local match grouped Songs, Albums, Playlists, Artists with group titles (rows for songs, the shared cards for the rest), at most 200 of each kind (an unpaged list stays quick on a short query). Nothing is asked of the service for it, however much is typed on it. Empty says "No results for \u201cquery\u201d" with Clear.
+4. **Timing:** results update as you type after the suggestions' 150 ms pause, so the library's rows appear before the service's (400 ms plus the request) and stay if the service fails or finds nothing.
+5. **Loading the lists:** playlists and albums load with the app. The artists and the liked songs load with the Library screen's own reads the first time a search starts from an empty field (once; a failed read is tried again at the next search) and are kept for the session. An unlike removes the song at once; a like made elsewhere is picked up by the next search. A different account drops them.
+6. **No Settings row** was added.
+
 ## Explore decisions (coordinator brief, 2026-10-04)
 Applied to the Explore route (`ui/explore_page.rs`, `explore.rs`, provider `explore.rs`).
 1. **Nav:** "Explore" sits right after Home with the Fluent compass icon (filled when selected). Choosing it while on it closes an open mood page.

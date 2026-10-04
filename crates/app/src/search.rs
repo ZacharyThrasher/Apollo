@@ -14,6 +14,9 @@ use gpui::{Context, EventEmitter, Task};
 
 use crate::settings::{BoolSetting, SettingsBackend};
 
+pub mod local;
+use local::{LocalIndex, LocalResults};
+
 /// Settings > Search > Save recent searches.
 pub const SAVE_RECENT_SEARCHES: BoolSetting = BoolSetting::new("save_recent_searches", true);
 /// Settings > Search > Hide music videos: results keep the audio tracks only.
@@ -82,7 +85,8 @@ const RECENTS_KEY: &str = "recent_searches";
 const SUGGEST_CACHE: usize = 64;
 
 /// The row of kinds under the field: "All" is the mixed answer, the rest are the service's own
-/// filtered searches, paged.
+/// filtered searches, paged, and "Library" is the owner's own saved things (never asked of the
+/// service).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SearchChip {
     All,
@@ -91,16 +95,18 @@ pub enum SearchChip {
     Artists,
     Playlists,
     CommunityPlaylists,
+    Library,
 }
 
 impl SearchChip {
-    pub const ROW: [SearchChip; 6] = [
+    pub const ROW: [SearchChip; 7] = [
         SearchChip::All,
         SearchChip::Songs,
         SearchChip::Albums,
         SearchChip::Artists,
         SearchChip::Playlists,
         SearchChip::CommunityPlaylists,
+        SearchChip::Library,
     ];
 
     pub fn label(self) -> &'static str {
@@ -111,13 +117,19 @@ impl SearchChip {
             SearchChip::Artists => "Artists",
             SearchChip::Playlists => "Playlists",
             SearchChip::CommunityPlaylists => "Community playlists",
+            SearchChip::Library => "Library",
         }
     }
 
-    /// The service's filter, `None` for the mixed answer.
+    /// Whether the chip's rows come from the service (all but Library).
+    pub fn is_remote(self) -> bool {
+        self != SearchChip::Library
+    }
+
+    /// The service's filter, `None` for the mixed answer (and for Library, which asks nothing).
     pub fn filter(self) -> Option<SearchFilter> {
         match self {
-            SearchChip::All => None,
+            SearchChip::All | SearchChip::Library => None,
             SearchChip::Songs => Some(SearchFilter::Songs),
             SearchChip::Albums => Some(SearchFilter::Albums),
             SearchChip::Artists => Some(SearchFilter::Artists),
@@ -211,6 +223,13 @@ pub struct SearchModel {
     hide_videos: bool,
     /// The link being looked up (or that failed, for Retry).
     link: Option<ExternalLink>,
+    /// What the library holds, as the Library screen last loaded it.
+    index: Arc<LocalIndex>,
+    /// What the query found in it, and the query that answered. Local, so it is ready long before
+    /// the service answers.
+    local: Arc<LocalResults>,
+    local_for: String,
+    local_task: Option<Task<()>>,
 }
 
 impl EventEmitter<SearchEvent> for SearchModel {}
@@ -231,6 +250,10 @@ impl SearchModel {
             save_recents: SAVE_RECENT_SEARCHES.default,
             hide_videos: HIDE_MUSIC_VIDEOS.default,
             link: None,
+            index: Arc::new(LocalIndex::default()),
+            local: Arc::new(LocalResults::default()),
+            local_for: String::new(),
+            local_task: None,
         }
     }
 
@@ -301,6 +324,8 @@ impl SearchModel {
             Mode::BadLink => SearchState::BadLink,
             Mode::LinkLoading => SearchState::Loading,
             Mode::LinkFailed(f) => SearchState::Failed(f),
+            // The Library chip asks nothing: its answer is the local one.
+            Mode::Query if !self.chip.is_remote() => SearchState::Ready,
             Mode::Query => match self.pane(self.chip) {
                 Some(p) if p.loading => SearchState::Loading,
                 Some(p) => match p.failure {
@@ -325,6 +350,35 @@ impl SearchModel {
     /// A finished search that found nothing and read everything it was given.
     pub fn is_confirmed_empty(&self) -> bool {
         self.state() == SearchState::Ready && self.results().is_some_and(|r| r.is_empty())
+    }
+
+    /// What the library holds for the query (see [`Self::local_ready`]). Empty while there is
+    /// no query.
+    pub fn local(&self) -> &Arc<LocalResults> {
+        &self.local
+    }
+
+    /// What to list from the library: the answer for the query on show (the previous one while
+    /// a newer one is being worked out), `None` when nothing is searched.
+    pub fn local_shown(&self) -> Option<&Arc<LocalResults>> {
+        (self.mode == Mode::Query).then_some(&self.local)
+    }
+
+    /// `local` answers the query now in the field.
+    pub fn local_ready(&self) -> bool {
+        self.mode == Mode::Query && self.local_for == self.query
+    }
+
+    /// The library holds nothing for the query (the Library chip's empty state).
+    pub fn is_local_empty(&self) -> bool {
+        self.local_ready() && self.local.is_empty()
+    }
+
+    /// The Library screen's lists changed: look again for the query in the field.
+    pub fn set_library(&mut self, index: Arc<LocalIndex>, cx: &mut Context<Self>) {
+        self.index = index;
+        self.local_for.clear();
+        self.refresh_local(false, cx);
     }
 
     /// The service has another page of the chip on show.
@@ -416,6 +470,7 @@ impl SearchModel {
         self.suggestions.clear();
         self.suggest_task = None;
         self.link = None;
+        self.index = Arc::new(LocalIndex::default());
         self.clear(cx);
     }
 
@@ -446,6 +501,7 @@ impl SearchModel {
         } else {
             self.start(true, cx);
         }
+        self.refresh_local(true, cx);
     }
 
     /// Search for `text` now, as if it had been typed and Enter pressed (a picked suggestion or
@@ -486,6 +542,7 @@ impl SearchModel {
             return;
         }
         self.remember(cx);
+        self.refresh_local(false, cx);
         if self.mode == Mode::Query && self.answered_on_show() {
             return;
         }
@@ -522,8 +579,11 @@ impl SearchModel {
 
     /// Whether the chip on show already holds the answer to the current query.
     fn answered_on_show(&self) -> bool {
-        self.pane(self.chip)
-            .is_some_and(|p| p.answered.as_deref() == Some(self.query.as_str()))
+        // The Library chip has nothing to wait for.
+        !self.chip.is_remote()
+            || self
+                .pane(self.chip)
+                .is_some_and(|p| p.answered.as_deref() == Some(self.query.as_str()))
     }
 
     fn reset_panes(&mut self) {
@@ -534,6 +594,41 @@ impl SearchModel {
     fn clear(&mut self, cx: &mut Context<Self>) {
         self.reset_panes();
         self.mode = Mode::Idle;
+        self.local_task = None;
+        self.local = Arc::new(LocalResults::default());
+        self.local_for.clear();
+        cx.notify();
+    }
+
+    /// Look for the query in the library: after the suggestions' pause while typing, at once
+    /// otherwise. Below [`MIN_PREVIEW_CHARS`], and for a pasted link, there is nothing to look
+    /// for.
+    fn refresh_local(&mut self, debounce: bool, cx: &mut Context<Self>) {
+        self.local_task = None;
+        if self.query.chars().count() < MIN_PREVIEW_CHARS || as_link(&self.query).is_some() {
+            if !self.local_for.is_empty() {
+                self.local = Arc::new(LocalResults::default());
+                self.local_for.clear();
+                cx.notify();
+            }
+            return;
+        }
+        if self.local_for == self.query {
+            return;
+        }
+        if !debounce {
+            self.compute_local(cx);
+            return;
+        }
+        self.local_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SUGGEST_DEBOUNCE).await;
+            let _ = this.update(cx, |m, cx| m.compute_local(cx));
+        }));
+    }
+
+    fn compute_local(&mut self, cx: &mut Context<Self>) {
+        self.local = Arc::new(self.index.find(&self.query));
+        self.local_for = self.query.clone();
         cx.notify();
     }
 
@@ -541,10 +636,15 @@ impl SearchModel {
     fn start(&mut self, debounce: bool, cx: &mut Context<Self>) {
         self.mode = Mode::Query;
         let chip = self.chip;
-        self.fetch(chip, debounce, cx);
+        if chip.is_remote() {
+            self.fetch(chip, debounce, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn fetch(&mut self, chip: SearchChip, debounce: bool, cx: &mut Context<Self>) {
+        debug_assert!(chip.is_remote(), "the Library chip is never asked of the service");
         let query = self.query.clone();
         // One chip asks at a time: a list left waiting for an older query would otherwise stay
         // "loading" for good, its answer being dropped as stale.

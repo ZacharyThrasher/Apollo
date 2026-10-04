@@ -357,6 +357,7 @@ impl Shell {
                 writes.clone(),
                 picker.clone(),
                 search_model.clone(),
+                library.read(cx).model().clone(),
                 thumbs.clone(),
                 settings.clone(),
                 root_focus.clone(),
