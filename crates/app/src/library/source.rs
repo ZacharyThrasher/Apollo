@@ -4,7 +4,9 @@
 use apollo_domain::library::{Collection, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{BrowseId, Track};
-use apollo_provider::{ArtistSection, HistoryDay, HomePage, Hit, ListedTrack, RelatedArtist};
+use apollo_provider::{
+    ArtistSection, ExplorePage, HistoryDay, HomePage, Hit, ListedTrack, RelatedArtist,
+};
 
 use crate::art::DecodedArt;
 
@@ -104,6 +106,17 @@ pub trait LibrarySource: Send + Sync {
 
     /// The batch of home shelves after the one a token came from.
     fn home_more(&self, _token: &str) -> Result<HomePage, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
+    /// Explore: new releases, the song chart, chart shelves and the mood tiles. Whatever the
+    /// service would not give is left out; the call fails only when nothing at all came back.
+    fn explore(&self) -> Result<ExplorePage, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
+    /// The playlists of one mood or genre tile (the `params` of an [`ExplorePage`] tile).
+    fn mood_playlists(&self, _params: &str) -> Result<Vec<Collection>, LoadFailure> {
         Err(LoadFailure::Other)
     }
 

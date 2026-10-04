@@ -25,7 +25,7 @@ pub enum HomeItem {
 
 impl HomeItem {
     /// What the item is, with its id: two items of one shelf are the same when this matches.
-    fn key(&self) -> (&'static str, String) {
+    pub(crate) fn key(&self) -> (&'static str, String) {
         match self {
             Self::Song(t) => ("song", t.track.video_id.as_str().to_owned()),
             Self::Collection(c) => ("collection", c.id.as_str().to_owned()),
@@ -117,7 +117,7 @@ pub fn home_page(parsed: &innertube::HomePage) -> Result<HomePage, LoadFailure> 
     })
 }
 
-fn item_from_card(card: &BrowseItem) -> Option<HomeItem> {
+pub(crate) fn item_from_card(card: &BrowseItem) -> Option<HomeItem> {
     match card.kind {
         "song" => track_from_item(card).map(HomeItem::Song),
         "album" | "playlist" if card.id.starts_with(PODCAST_SHOW_PREFIX) => None,
