@@ -1,6 +1,6 @@
-//! High-level endpoint facade over the transport. Read paths plus the two writes Apollo makes:
-//! `rate` (like / unlike) and adding one track to a playlist. Playlist create, rename, delete and
-//! removal, and the library `feedback` toggles, stay out until a milestone needs them
+//! High-level endpoint facade over the transport. Read paths plus the writes Apollo makes:
+//! `rate` (like / unlike), adding one track to a playlist and `subscribe` (an artist's channel).
+//! Playlist create, rename, delete and removal, and the library `feedback` toggles, stay out until a milestone needs them
 //! (see NOTICE.md).
 
 use serde::Serialize;
@@ -538,6 +538,24 @@ impl InnerTube {
         Ok(())
     }
 
+    /// Subscribe to or unsubscribe from an artist's channel (`subscription/subscribe` and
+    /// `subscription/unsubscribe`, the requests the artist page's own button makes). `channel_id`
+    /// is the artist's `UC…` id.
+    ///
+    /// Idempotent on the service's side, but sent exactly once all the same: a timeout leaves the
+    /// outcome unknown, and the caller reads the artist page back to learn what the account
+    /// holds instead of firing the request again.
+    pub async fn subscribe(
+        &self,
+        client: &YouTubeClient,
+        channel_id: &str,
+        subscribed: bool,
+    ) -> Result<(), Error> {
+        let body = subscribe_body(self.context_for(client), channel_id);
+        self.post_once(subscribe_path(subscribed), client, &body, true).await?;
+        Ok(())
+    }
+
     /// The playlists the signed-in account can add this video to, and whether each already holds
     /// it (`playlist/get_add_to_playlist`, the request YouTube Music's own "Save to playlist"
     /// sheet makes). Only playlists the account may edit come back, which is why the picker asks
@@ -578,6 +596,25 @@ impl InnerTube {
             Err(Error::Refused("playlist edit was not accepted".into()))
         }
     }
+}
+
+fn subscribe_path(subscribed: bool) -> &'static str {
+    if subscribed {
+        "subscription/subscribe"
+    } else {
+        "subscription/unsubscribe"
+    }
+}
+
+fn subscribe_body(context: Context, channel_id: &str) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        channel_ids: [String; 1],
+    }
+    serde_json::to_value(Body { context, channel_ids: [channel_id.to_owned()] })
+        .expect("a plain struct serialises")
 }
 
 fn rate_path(rating: Rating) -> &'static str {
@@ -727,6 +764,17 @@ mod tests {
         assert_eq!(body["target"], json!({ "videoId": "dQw4w9WgXcQ" }));
         assert_eq!(body["context"]["client"]["clientName"], "WEB_REMIX");
         // The signed-in channel rides along, as on every other authenticated request.
+        assert_eq!(body["context"]["user"]["onBehalfOfUser"], "PAGE1");
+    }
+
+    #[test]
+    fn subscribing_names_one_channel_and_acts_as_the_signed_in_account() {
+        assert_eq!(subscribe_path(true), "subscription/subscribe");
+        assert_eq!(subscribe_path(false), "subscription/unsubscribe");
+        let (tube, client) = tube();
+        let body = subscribe_body(tube.context_for(&client), "UCdrake");
+        assert_eq!(body["channelIds"], json!(["UCdrake"]));
+        assert_eq!(body["context"]["client"]["clientName"], "WEB_REMIX");
         assert_eq!(body["context"]["user"]["onBehalfOfUser"], "PAGE1");
     }
 
