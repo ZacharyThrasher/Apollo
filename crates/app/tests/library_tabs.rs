@@ -10,7 +10,7 @@ use apollo_app::backend::{LibraryTrack, Ports, Prepared};
 use apollo_app::library::browse::SortKey;
 use apollo_app::library::model::{LibraryModel, Load, Tab};
 use apollo_app::library::sim::{self, SimLibrary};
-use apollo_app::library::LibraryWrites;
+use apollo_app::library::{LibraryEdits, LibraryWrites};
 use apollo_app::player::PlayerModel;
 use apollo_app::settings::LibrarySortStore;
 use apollo_app::style::Fonts;
@@ -388,7 +388,8 @@ fn sort_choices_are_saved_and_come_back(cx: &mut TestAppContext) {
     }
     // A fresh model reads it back, whatever was loaded before.
     let writes = vcx.new(|cx| LibraryWrites::new(page.player.clone(), cx));
-    let fresh = vcx.new(|cx| LibraryModel::new(page.player.clone(), writes, cx));
+    let edits = vcx.new(|_| LibraryEdits::new(page.player.clone(), writes.clone()));
+    let fresh = vcx.new(|cx| LibraryModel::new(page.player.clone(), writes, edits, cx));
     fresh.update(vcx, |m, cx| m.install_sort_store(Some(store.clone()), cx));
     vcx.run_until_parked();
     fresh.read_with(vcx, |m, _| {

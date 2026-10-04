@@ -24,6 +24,7 @@ use crate::library::writes::LibraryWrites;
 use crate::player::PlayerModel;
 use crate::style::{self, color};
 use crate::ui::button::keyboard_focused;
+use crate::ui::playlist_dialog::{self, Mode};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::tooltip::Tooltip;
@@ -65,6 +66,8 @@ struct Open {
     title: SharedString,
     playlists: Load<Vec<PlaylistTarget>>,
     cursor: usize,
+    /// The cursor is on the fixed "New playlist\u{2026}" row above the list.
+    on_new: bool,
     /// Answers for an older request (Retry, reopen) are dropped.
     request: u64,
     /// Where keyboard focus returns to when the panel closes.
@@ -124,6 +127,11 @@ impl PlaylistPicker {
         self.open.as_ref().map(|o| o.cursor)
     }
 
+    /// The cursor is on the "New playlist\u{2026}" row.
+    pub fn on_new(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.on_new)
+    }
+
     /// Open the panel for a track in the middle of the window. Focus moves into it and comes
     /// back on close.
     pub fn open(
@@ -169,6 +177,7 @@ impl PlaylistPicker {
             title: title.into(),
             playlists: Load::Loading,
             cursor: 0,
+            on_new: false,
             request: 0,
             return_focus,
             anchor,
@@ -235,6 +244,8 @@ impl PlaylistPicker {
         let Some(open) = self.open.as_mut().filter(|o| o.request == request) else {
             return;
         };
+        // With no playlist to land on, the cursor rests on the way to make one.
+        open.on_new = !matches!(&result, Ok(list) if !list.is_empty());
         open.playlists = match result {
             Ok(list) => Load::Ready(list),
             Err(failure) => Load::Failed(failure),
@@ -247,20 +258,55 @@ impl PlaylistPicker {
         let Some(open) = self.open.as_mut() else {
             return;
         };
-        let Load::Ready(list) = &open.playlists else {
-            return;
+        let len = match &open.playlists {
+            Load::Ready(list) => list.len(),
+            _ => 0,
         };
-        if list.is_empty() {
+        if open.on_new {
+            // Down leaves the New playlist row for the first playlist, if there is one.
+            if delta > 0 && len > 0 {
+                open.on_new = false;
+                open.cursor = 0;
+                self.scroll.scroll_to_item(0);
+                cx.notify();
+            }
             return;
         }
-        open.cursor = (open.cursor as isize + delta).clamp(0, list.len() as isize - 1) as usize;
+        if delta < 0 && (len == 0 || open.cursor == 0) {
+            open.on_new = true;
+            cx.notify();
+            return;
+        }
+        if len == 0 {
+            return;
+        }
+        open.cursor = (open.cursor as isize + delta).clamp(0, len as isize - 1) as usize;
         self.scroll.scroll_to_item(open.cursor);
         cx.notify();
+    }
+
+    /// Close the picker and ask for a name for a new playlist that will hold the song.
+    pub fn new_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(video) = self.open.as_ref().map(|o| o.video_id.clone()) else {
+            return;
+        };
+        self.close(window, cx);
+        playlist_dialog::open(
+            Mode::Create {
+                add_video: Some(video),
+            },
+            window,
+            cx,
+        );
     }
 
     /// Add the track to the playlist at `index` and close. A playlist that already holds it
     /// does nothing.
     pub fn choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.on_new() {
+            self.new_playlist(window, cx);
+            return;
+        }
         let Some(open) = self.open.as_ref() else {
             return;
         };
@@ -289,6 +335,8 @@ impl Focusable for PlaylistPicker {
 /// What the panel says when the list could not be loaded.
 pub const LOAD_FAILED: &str = "Couldn't load playlists";
 pub const NO_PLAYLISTS: &str = "No playlists yet";
+/// The fixed first row.
+pub const NEW_PLAYLIST: &str = "New playlist\u{2026}";
 
 impl Render for PlaylistPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -324,7 +372,8 @@ impl Render for PlaylistPicker {
                     .iter()
                     .enumerate()
                     .map(|(ix, target)| {
-                        playlist_row(ix, target, held[ix], ix == open.cursor, ring, accent, cx)
+                        let cursor = !open.on_new && ix == open.cursor;
+                        playlist_row(ix, target, held[ix], cursor, ring, accent, cx)
                     })
                     .collect();
                 div()
@@ -394,6 +443,7 @@ impl Render for PlaylistPicker {
                             .child(open.title.clone()),
                     ),
             )
+            .child(new_row(open.on_new, ring, accent, cx))
             .child(body);
 
         // A transparent layer under the popover catches the click that closes it (no scrim);
@@ -514,6 +564,7 @@ fn playlist_row(
         .on_click(cx.listener(move |m, _: &gpui::ClickEvent, window, cx| {
             if let Some(open) = m.open.as_mut() {
                 open.cursor = ix;
+                open.on_new = false;
             }
             m.choose(ix, window, cx);
         }))
@@ -539,6 +590,54 @@ fn playlist_row(
                     .text_color(color::text_secondary()),
             )
         })
+        .when(cursor && ring, |d| d.child(focus_ring_inset(accent)))
+        .into_any_element()
+}
+
+/// The fixed first row: a way to make a playlist for the song.
+fn new_row(
+    cursor: bool,
+    ring: bool,
+    accent: Accent,
+    cx: &mut Context<PlaylistPicker>,
+) -> AnyElement {
+    div()
+        .id("picker-new")
+        .debug_selector(|| "picker-new".into())
+        .relative()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(px(spacing::S3))
+        .h(px(ROW_HEIGHT))
+        .px(px(spacing::S3))
+        .rounded(px(radius::MEDIUM))
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label(NEW_PLAYLIST)
+        .bg(if cursor {
+            color::state_selected()
+        } else {
+            gpui::transparent_black()
+        })
+        .hover(|s| s.bg(color::state_hover()))
+        .on_click(cx.listener(|m, _: &gpui::ClickEvent, window, cx| m.new_playlist(window, cx)))
+        .child(
+            gpui::svg()
+                .path(Icon::Add.path())
+                .size(px(layout::ICON_SIZE))
+                .flex_none()
+                .text_color(color::text_secondary()),
+        )
+        .child(
+            style::text_style(div(), typography::BODY, cx)
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(color::text_primary())
+                .child(NEW_PLAYLIST),
+        )
         .when(cursor && ring, |d| d.child(focus_ring_inset(accent)))
         .into_any_element()
 }

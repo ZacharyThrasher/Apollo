@@ -419,6 +419,48 @@ fn a_refusal_is_a_definite_no_and_an_unreadable_answer_is_not() {
 }
 
 #[test]
+fn only_an_owner_headed_pl_playlist_is_editable_and_it_saves_on_its_bare_id() {
+    let owned_json = {
+        let mut v = playlist_json(vec![row("aaaaaaaaaaa", "s1", "Song")], None);
+        v["header"] = json!({ "musicEditablePlaylistDetailHeaderRenderer": {
+            "header": { "musicResponsiveHeaderRenderer": { "title": { "runs": [{ "text": "Mine" }] } } }
+        } });
+        v
+    };
+    let owned = parse_playlist(&owned_json);
+    let meta = meta_from_playlist(&owned, "VLPLabc123");
+    assert!(meta.owned);
+    assert_eq!(meta.save_id.as_deref(), Some("PLabc123"));
+    // The same owner header on an id that is not a user playlist is never editable.
+    assert!(!meta_from_playlist(&owned, "VLLM").owned);
+    assert!(!meta_from_playlist(&owned, "VLOLAK5uy_x").owned);
+    // Someone else's playlist has no owner header.
+    let theirs = parse_playlist(&playlist_json(vec![row("aaaaaaaaaaa", "s1", "Song")], None));
+    assert!(!meta_from_playlist(&theirs, "VLPLabc123").owned);
+}
+
+#[test]
+fn an_album_saves_on_its_audio_playlist_and_says_whether_it_is_saved() {
+    let header = |toggled: bool| {
+        json!({ "header": { "musicResponsiveHeaderRenderer": {
+            "title": { "runs": [{ "text": "Saved" }] },
+            "buttons": [{ "toggleButtonRenderer": {
+                "isToggled": toggled,
+                "defaultServiceEndpoint": { "likeEndpoint": {
+                    "status": "LIKE", "target": { "playlistId": "OLAK5uy_saved" }
+                } }
+            } }]
+        } } })
+    };
+    let saved = meta_from_album(&innertube::models::browse::parse_album(&header(true)));
+    assert_eq!(saved.save_id.as_deref(), Some("OLAK5uy_saved"));
+    assert_eq!(saved.in_library, Some(true));
+    assert!(!saved.owned);
+    let not_saved = meta_from_album(&innertube::models::browse::parse_album(&header(false)));
+    assert_eq!(not_saved.in_library, Some(false));
+}
+
+#[test]
 fn history_buckets_keep_their_order_and_drop_rows_that_cannot_play() {
     use innertube::models::browse::parse_history;
     let song = |video: &str, title: &str| {
