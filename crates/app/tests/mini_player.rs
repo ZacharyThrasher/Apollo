@@ -21,7 +21,7 @@ use apollo_app::style::Fonts;
 use apollo_app::ui::mini_player::{self, MiniPlayer};
 use apollo_app::ui::shell::{self, Shell};
 use apollo_app::url_thumbs::NoThumbs;
-use apollo_app::window_state::{self, SavedWindow, KEY_MAIN, KEY_MINI};
+use apollo_app::window_state::{self, SavedWindow, KEY_HUD, KEY_MAIN, KEY_MINI};
 use apollo_domain::model::Track;
 use apollo_domain::playback::Intent;
 use apollo_runtime::mock::{MockEngine, MockResolver};
@@ -130,7 +130,7 @@ fn open_mini(cx: &mut TestAppContext) -> (WindowHandle<MiniPlayer>, VisualTestCo
     let handle = cx
         .update(|cx| mini::window(cx))
         .expect("the mini player opened");
-    let vcx = VisualTestContext::from_window(handle.into(), cx);
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
     (handle, vcx)
 }
 
@@ -510,7 +510,7 @@ fn with_auto_hide_off_the_hud_stays_solid(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_hud_snaps_to_the_nearest_corner_once_it_sits_still(cx: &mut TestAppContext) {
     // Left near the bottom-right corner of the 1920x1080 test display.
-    let store = MemoryStore::with(&[(KEY_MINI, "1500,950,360,96,0")]);
+    let store = MemoryStore::with(&[(KEY_HUD, "1550,960,360,104,0")]);
     let (_world, handle, hand) = open_hud(cx, Some(store));
     hand.pass(0.3, cx);
     assert_eq!(
@@ -523,9 +523,11 @@ fn the_hud_snaps_to_the_nearest_corner_once_it_sits_still(cx: &mut TestAppContex
         .read_with(cx, |m, _| m.last_snap())
         .unwrap()
         .expect("snapped");
+    // It is the 320x64 panel that sits 16px in; the window has 20px of shadow room around it.
+    let pad = mini_player::HUD_PAD;
     assert_eq!(
-        (snap.x, snap.y),
-        (1920.0 - 360.0 - 16.0, 1080.0 - 96.0 - 16.0),
+        (snap.x + pad, snap.y + pad),
+        (1920.0 - 320.0 - 16.0, 1080.0 - 64.0 - 16.0),
         "16px in from the corner"
     );
 }
@@ -551,4 +553,75 @@ fn the_hud_hotkey_shows_and_hides_without_closing_the_mini_player(cx: &mut TestA
     cx.update(mini::toggle_visibility);
     cx.update(mini::dismiss);
     assert!(!cx.update(|cx| mini::is_hidden(cx)));
+}
+
+#[gpui::test]
+fn the_hud_is_a_320_by_64_panel_with_room_for_its_shadow_and_its_own_saved_place(
+    cx: &mut TestAppContext,
+) {
+    let store = MemoryStore::with(&[(KEY_MINI, "100,100,360,96,0")]);
+    let (_world, handle, hand) = open_hud(cx, Some(store.clone()));
+    hand.pass(0.1, cx);
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    let window = handle.update(cx, |_, w, _| w.bounds().size).unwrap();
+    assert_eq!(
+        (f32::from(window.width), f32::from(window.height)),
+        (mini_player::HUD_WIDTH, mini_player::HUD_HEIGHT)
+    );
+    let panel = vcx.debug_bounds("hud-panel").expect("the panel");
+    assert_eq!(
+        (f32::from(panel.size.width), f32::from(panel.size.height)),
+        (320.0, 64.0)
+    );
+    assert_eq!(
+        (f32::from(panel.origin.x), f32::from(panel.origin.y)),
+        (mini_player::HUD_PAD, mini_player::HUD_PAD)
+    );
+    // Its place is not the mini player's: the mini player's saved spot is left alone.
+    assert!(store.writes_of(KEY_MINI).is_empty());
+}
+
+#[gpui::test]
+fn under_the_pointer_the_panel_goes_opaque_and_the_controls_appear(cx: &mut TestAppContext) {
+    let (_world, handle, hand) = open_hud(cx, None);
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    let solid = |cx: &mut TestAppContext| handle.read_with(cx, |m, _| m.hud_solid()).unwrap();
+    hand.pass(0.3, cx);
+    assert_eq!(solid(cx), 0.0, "resting fill");
+    assert!(
+        vcx.debug_bounds("hud-controls").is_none(),
+        "nothing but art and text at rest"
+    );
+
+    hand.inside.set(true);
+    hand.pass(0.05, cx);
+    let part = solid(cx);
+    assert!(part > 0.0 && part < 1.0, "eased: {part}");
+    hand.pass(0.2, cx);
+    assert_eq!(solid(cx), 1.0);
+    let controls = vcx
+        .debug_bounds("hud-controls")
+        .expect("controls under the pointer");
+    // Previous, play/pause, next and the heart, 28px each, at the panel's right.
+    assert!(f32::from(controls.size.width) >= 4.0 * 28.0);
+    assert_eq!(f32::from(controls.size.height), 64.0 - 2.0);
+
+    hand.inside.set(false);
+    hand.pass(0.3, cx);
+    assert_eq!(solid(cx), 0.0);
+    assert!(vcx.debug_bounds("hud-controls").is_none());
+}
+
+#[gpui::test]
+fn a_new_track_changes_over_for_a_moment_and_then_settles(cx: &mut TestAppContext) {
+    let (world, handle, hand) = open_hud(cx, None);
+    let changing =
+        |cx: &mut TestAppContext| handle.read_with(cx, |m, _| m.changing_over()).unwrap();
+    hand.pass(0.5, cx);
+    assert!(!changing(cx));
+    world.player.update(cx, |m, cx| m.next(cx));
+    cx.run_until_parked();
+    assert!(changing(cx), "title, artist and art are crossing over");
+    hand.pass(0.3, cx);
+    assert!(!changing(cx), "settled after the swap time");
 }

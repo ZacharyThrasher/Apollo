@@ -35,7 +35,7 @@ hidden in the tray or something else has focus:
 | Ctrl+Alt+Space | Play / pause |
 | Ctrl+Alt+Right / Left | Next / previous |
 | Ctrl+Alt+Up / Down | Volume +5 / -5 |
-| Ctrl+Alt+H | Show / hide the mini player HUD (only does anything while the mini player is open) |
+| Ctrl+Alt+H | Show / hide the mini player HUD (opens the mini player if it is closed) |
 
 A combination another program already owns is skipped quietly (one line on stderr, e.g.
 `hotkeys: could not register VolumeUp: ...`); the others still work. Windows does not repeat a
