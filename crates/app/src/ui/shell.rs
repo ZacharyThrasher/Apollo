@@ -11,6 +11,7 @@ use gpui::{
 };
 
 use crate::account::AccountModel;
+use crate::blocked_artists::{BlockHandle, BlockModel};
 use crate::crate_list::{CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
@@ -27,7 +28,7 @@ use crate::page_cache::PageCache;
 use crate::player::PlayerModel;
 use crate::related::RelatedModel;
 use crate::search::{SearchModel, SearchSource};
-use crate::settings::{SettingsModel, PERSONAL_SHELVES};
+use crate::settings::{SettingsModel, MOOD_CHIPS, PERSONAL_SHELVES};
 use crate::settings::{LibrarySortStore, LyricsOpenStore, RelatedOpenStore};
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
@@ -44,6 +45,7 @@ use crate::ui::choice_menu::{self, ChoiceHandle, ChoiceMenu};
 use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus};
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
+use crate::ui::blocked_dialog::{self, BlockedDialog, BlockedDialogHandle};
 use crate::ui::playlist_dialog::{self, DialogHandle, PlaylistDialog};
 use crate::ui::playlist_picker::{self, PlaylistPicker};
 use crate::ui::queue_panel::QueuePanel;
@@ -100,6 +102,7 @@ pub fn bind_keys(cx: &mut App) {
     playlist_picker::bind_keys(cx);
     track_menu::bind_keys(cx);
     playlist_dialog::bind_keys(cx);
+    blocked_dialog::bind_keys(cx);
     choice_menu::bind_keys(cx);
     crate::ui::vslider::bind_keys(cx);
     crate::ui::mini_player::bind_keys(cx);
@@ -139,6 +142,8 @@ pub struct Shell {
     picker: Entity<PlaylistPicker>,
     /// The dialog that names, renames and confirms deleting a playlist.
     dialog: Entity<PlaylistDialog>,
+    /// The list of blocked artists, with Unblock.
+    blocked_dialog: Entity<BlockedDialog>,
     /// The menu a right-click or a row's More button opens.
     menu: Entity<TrackMenu>,
     /// The pick-one popover of the Output device row and the speed button.
@@ -159,6 +164,8 @@ pub struct Shell {
     search_account_live: bool,
     /// The Crate: songs set aside, and the page that lists them.
     crate_model: Entity<CrateModel>,
+    /// The artists the owner said not to play from radio, autoplay and the personal shelves.
+    block_model: Entity<BlockModel>,
     crate_page: Entity<CratePage>,
     /// "Queue restored", after Ctrl+Z / Ctrl+Shift+Z.
     pill: Option<PillShown>,
@@ -269,6 +276,12 @@ impl Shell {
         let crate_model = cx.new(|_| CrateModel::new());
         cx.observe(&crate_model, |_, _, cx| cx.notify()).detach();
         cx.set_global(CrateHandle(crate_model.clone()));
+        let block_model = cx.new(|_| BlockModel::new());
+        cx.set_global(BlockHandle(block_model.clone()));
+        let blocked_dialog =
+            cx.new(|cx| BlockedDialog::new(player.clone(), block_model.clone(), cx));
+        cx.observe(&blocked_dialog, |_, _, cx| cx.notify()).detach();
+        cx.set_global(BlockedDialogHandle(blocked_dialog.clone()));
         let crate_page = cx.new(|cx| {
             CratePage::new(
                 crate_model.clone(),
@@ -461,11 +474,24 @@ impl Shell {
         // Home > Personal shelves follows its Settings switch.
         let personal_on = settings.read(cx).get(&PERSONAL_SHELVES);
         home.update(cx, |h, cx| h.set_personal_enabled(personal_on, cx));
+        // So does Home > Mood chips.
+        let chips_on = settings.read(cx).get(&MOOD_CHIPS);
+        home.update(cx, |h, cx| h.set_chips_enabled(chips_on, cx));
         {
             let home = home.clone();
             cx.observe(&settings, move |_, settings, cx| {
                 let on = settings.read(cx).get(&PERSONAL_SHELVES);
                 home.update(cx, |h, cx| h.set_personal_enabled(on, cx));
+                let chips = settings.read(cx).get(&MOOD_CHIPS);
+                home.update(cx, |h, cx| h.set_chips_enabled(chips, cx));
+            })
+            .detach();
+        }
+        // Blocking or unblocking an artist changes what the personal shelves hold.
+        {
+            let home = home.clone();
+            cx.subscribe(&block_model, move |_, _, _: &crate::blocked_artists::Changed, cx| {
+                home.update(cx, |h, cx| h.refresh_personal(cx));
             })
             .detach();
         }
@@ -525,6 +551,7 @@ impl Shell {
             edits,
             picker,
             dialog,
+            blocked_dialog,
             menu,
             choices,
             sleep_menu,
@@ -534,6 +561,7 @@ impl Shell {
             library_usable: false,
             search_account_live: false,
             crate_model,
+            block_model,
             crate_page,
             pill: None,
             pill_seq: 0,
@@ -597,11 +625,14 @@ impl Shell {
             self.menu.update(cx, |m, cx| m.reset(cx));
             self.edits.update(cx, |e, cx| e.reset(cx));
             self.dialog.update(cx, |d, cx| d.reset(cx));
+            self.blocked_dialog.update(cx, |d, cx| d.reset(cx));
             self.sleep_menu.update(cx, |m, cx| m.reset(cx));
         }
         // The Crate belongs to the chosen account (a moment without one keeps what shows).
         if let Some(key) = self.account_key(cx) {
             self.crate_model
+                .update(cx, |m, cx| m.set_account(Some(key.clone()), cx));
+            self.block_model
                 .update(cx, |m, cx| m.set_account(Some(key), cx));
         }
         let model = self.account.read(cx);
@@ -721,6 +752,10 @@ impl Shell {
 
     pub fn edits(&self) -> &Entity<LibraryEdits> {
         &self.edits
+    }
+
+    pub fn blocked_dialog(&self) -> &Entity<BlockedDialog> {
+        &self.blocked_dialog
     }
 
     pub fn dialog(&self) -> &Entity<PlaylistDialog> {
@@ -1011,6 +1046,19 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.crate_model.update(cx, |m, cx| m.install(store, cx));
+    }
+
+    /// Where the blocked artists are kept between runs.
+    pub fn install_block_store(
+        &mut self,
+        store: Option<Arc<dyn crate::blocked_artists::BlockStore>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.block_model.update(cx, |m, cx| m.install(store, cx));
+    }
+
+    pub fn block_model(&self) -> &Entity<BlockModel> {
+        &self.block_model
     }
 
     /// The opaque id of the signed-in account, once it is chosen.
@@ -1462,6 +1510,11 @@ impl Render for Shell {
         let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
         let menu = self.menu.read(cx).is_open().then(|| self.menu.clone());
         let dialog = self.dialog.read(cx).is_open().then(|| self.dialog.clone());
+        let blocked_dialog = self
+            .blocked_dialog
+            .read(cx)
+            .is_open()
+            .then(|| self.blocked_dialog.clone());
         let choices = self.choices.read(cx).is_open().then(|| self.choices.clone());
         let sleep_menu = self
             .sleep_menu
@@ -1552,6 +1605,7 @@ impl Render for Shell {
             .children(picker)
             .children(menu)
             .children(dialog)
+            .children(blocked_dialog)
             .children(choices)
             .children(sleep_menu)
     }

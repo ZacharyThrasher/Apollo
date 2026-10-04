@@ -154,4 +154,19 @@ Migration {
         CREATE INDEX plays_by_account_time ON plays (account_key, played_unix);
         CREATE INDEX plays_by_account_video ON plays (account_key, video_id);
     ",
+}, Migration {
+    version: 8,
+    sql: "
+        -- Artists the owner told Apollo not to play from radio, autoplay and Home's personal
+        -- shelves, per account. Local only: nothing here is sent anywhere. `entry_key` is the
+        -- artist's channel id, or the lowercased name for an artist known only by name.
+        CREATE TABLE blocked_artists (
+            account_key TEXT    NOT NULL,
+            entry_key   TEXT    NOT NULL,
+            browse_id   TEXT,
+            name        TEXT    NOT NULL,
+            blocked_ms  INTEGER NOT NULL,
+            PRIMARY KEY (account_key, entry_key)
+        );
+    ",
 }];

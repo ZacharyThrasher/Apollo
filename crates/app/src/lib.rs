@@ -20,6 +20,7 @@ pub mod art;
 pub mod crate_list;
 pub mod assets;
 pub mod audio;
+pub mod blocked_artists;
 pub mod autostart;
 pub mod backend;
 pub mod explore;

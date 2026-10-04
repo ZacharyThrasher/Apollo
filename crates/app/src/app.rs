@@ -65,6 +65,7 @@ struct Stores {
     related_open: Option<Arc<dyn RelatedOpenStore>>,
     library_sort: Option<Arc<dyn LibrarySortStore>>,
     crate_list: Option<Arc<dyn crate::crate_list::CrateStore>>,
+    blocked: Option<Arc<dyn crate::blocked_artists::BlockStore>>,
     /// The store's file, where the lyrics cache keeps its rows too.
     db_path: Option<std::path::PathBuf>,
 }
@@ -82,6 +83,7 @@ impl Stores {
                 related_open: Some(db.clone()),
                 library_sort: Some(db.clone()),
                 crate_list: Some(db.clone()),
+                blocked: Some(db.clone()),
                 db_path: Some(db.path().to_path_buf()),
                 queue: Some(db),
             },
@@ -176,6 +178,7 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
         shell.install_related(stores.related_open.clone(), cx);
         shell.install_library_sort(stores.library_sort.clone(), cx);
         shell.install_crate_store(stores.crate_list.clone(), cx);
+        shell.install_block_store(stores.blocked.clone(), cx);
     });
     // Media keys and the SMTC overlay, on the window just opened.
     #[cfg(windows)]

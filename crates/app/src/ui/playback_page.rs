@@ -1,12 +1,27 @@
 //! Settings > Playback: the playback switches. Normalize volume, Gapless playback, Add plays to
-//! history and Pause when other audio plays.
+//! history and Pause when other audio plays, then Blocked artists: how many there are and a
+//! Manage button that opens the list.
 
-use gpui::{Context, Entity, FocusHandle, IntoElement, Render, Window};
+use gpui::{div, prelude::*, Context, Entity, FocusHandle, IntoElement, Render, Window};
 
 use crate::player::PlayerModel;
 use crate::settings::{SettingsModel, ADD_PLAYS_TO_HISTORY, PAUSE_ON_OTHER_AUDIO};
 use crate::ui::account_page::TAB_INDEX;
+use crate::ui::blocked_dialog;
 use crate::ui::settings_row::{SettingsRow, SettingsSection};
+use crate::ui::text_button::TextButton;
+
+/// The Blocked artists row.
+pub const ROW_BLOCKED: &str = "setting-blocked-artists";
+
+/// What the row says about the list: a count, or "None".
+pub fn blocked_fact(count: usize) -> String {
+    if count == 0 {
+        "None".to_owned()
+    } else {
+        count.to_string()
+    }
+}
 
 pub struct PlaybackPage {
     player: Entity<PlayerModel>,
@@ -15,6 +30,8 @@ pub struct PlaybackPage {
     focus_gapless: FocusHandle,
     focus_history: FocusHandle,
     focus_other_audio: FocusHandle,
+    focus_blocked: FocusHandle,
+    focus_manage: FocusHandle,
 }
 
 impl PlaybackPage {
@@ -25,6 +42,10 @@ impl PlaybackPage {
     ) -> Self {
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        if let Some(blocked) = crate::blocked_artists::handle(cx) {
+            // The count follows the list.
+            cx.observe(&blocked, |_, _, cx| cx.notify()).detach();
+        }
         Self {
             player,
             settings,
@@ -32,6 +53,8 @@ impl PlaybackPage {
             focus_gapless: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
             focus_history: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
             focus_other_audio: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
+            focus_blocked: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
+            focus_manage: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
         }
     }
 }
@@ -47,6 +70,7 @@ impl Render for PlaybackPage {
         let other_audio = self.settings.read(cx).get(&PAUSE_ON_OTHER_AUDIO);
         let settings = self.settings.clone();
         let for_history = self.settings.clone();
+        let blocked_count = crate::blocked_artists::handle(cx).map_or(0, |b| b.read(cx).len());
         SettingsSection::new("Playback")
             .row(
                 SettingsRow::switch(
@@ -95,6 +119,27 @@ impl Render for PlaybackPage {
                 .on_toggle(move |value, _, cx| {
                     settings.update(cx, |m, cx| m.set(&PAUSE_ON_OTHER_AUDIO, value, cx));
                 }),
+            )
+            .row(
+                SettingsRow::manage(
+                    ROW_BLOCKED,
+                    &self.focus_blocked,
+                    "Blocked artists",
+                    blocked_fact(blocked_count),
+                    accent,
+                )
+                .action(
+                    div().debug_selector(|| "setting-blocked-artists-manage".into()).child(
+                        TextButton::new(
+                            "setting-blocked-artists-manage-button",
+                            &self.focus_manage,
+                            "Manage",
+                            accent,
+                        )
+                        .on_click(|window, cx| blocked_dialog::open(window, cx)),
+                    ),
+                )
+                .on_open(|window, cx| blocked_dialog::open(window, cx)),
             )
     }
 }

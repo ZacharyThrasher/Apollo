@@ -220,9 +220,12 @@ fn assert_sane_with(
     forward
 }
 
-/// Every shelf on Home is one page stop.
+/// Every shelf on Home is one page stop, and so is the row of mood chips above them.
 fn home_items(shell: &Entity<Shell>, vcx: &mut VisualTestContext) -> usize {
-    shell.read_with(vcx, |s, cx| s.home().read(cx).shelves().len())
+    shell.read_with(vcx, |s, cx| {
+        let home = s.home().read(cx);
+        home.shelves().len() + usize::from(!home.chips().is_empty())
+    })
 }
 
 #[gpui::test]

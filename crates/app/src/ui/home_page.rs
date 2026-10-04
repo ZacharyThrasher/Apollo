@@ -6,7 +6,8 @@
 //! focus), and the row and page scroll the focused item into view. A card opens its album, artist or playlist
 //! page; a song plays with its shelf as the queue.
 //!
-//! Tab order: one stop per shelf, at index 6 after the nav rail, in reading order.
+//! Tab order: the mood chips (one stop) and then one stop per shelf, at index 6 after the nav
+//! rail, in reading order.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -24,7 +25,7 @@ use gpui::{
 };
 
 use crate::assets::Icon;
-use crate::home::{HomeModel, More, Phase};
+use crate::home::{ChipPhase, HomeModel, More, Phase};
 use crate::library::model::{ArtistTarget, Target};
 use crate::queue_source;
 use crate::motion::HoverFade;
@@ -37,6 +38,7 @@ use crate::ui::search_page::OpenTarget;
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::row_actions::{more_slot, ACTION_SIZE};
+use crate::ui::search_chips::PillRow;
 use crate::ui::tooltip::Tooltip;
 use crate::ui::track_menu::{self, Subject};
 use crate::url_thumbs::{Thumb, ThumbStore};
@@ -150,6 +152,8 @@ pub struct HomeView {
     /// The tab stops of the items, grown to the most items the page ever held.
     stops: Vec<FocusHandle>,
     action_focus: FocusHandle,
+    /// One tab stop per mood chip, grown to the most chips the row ever held.
+    chip_stops: Vec<FocusHandle>,
     /// The stop that last took keyboard focus and was scrolled into view.
     scrolled_to: Option<usize>,
 }
@@ -176,8 +180,14 @@ impl HomeView {
             rows: Vec::new(),
             stops: Vec::new(),
             action_focus: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
+            chip_stops: Vec::new(),
             scrolled_to: None,
         }
+    }
+
+    /// The mood chips' tab stops (tests).
+    pub fn chip_stops(&self) -> &[FocusHandle] {
+        &self.chip_stops
     }
 
     /// How far row `row` is scrolled sideways: zero at its start, negative as it scrolls (tests).
@@ -306,14 +316,27 @@ impl Render for HomeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
         let animate = !cx.reduce_motion();
-        let (phase, more, has_more, shelves) = {
+        let (phase, more, has_more, shelves, chips, picked, chip_phase) = {
             let m = self.model.read(cx);
-            (m.phase(), m.more(), m.has_more(), m.display_shelves())
+            (
+                m.phase(),
+                m.more(),
+                m.has_more(),
+                m.display_shelves(),
+                m.chips().to_vec(),
+                m.selected_chip().map(str::to_owned),
+                m.chip_phase(),
+            )
         };
 
         let title = style::text_style(div(), typography::PAGE_TITLE, cx)
             .text_color(color::text_primary())
             .child("Home");
+        // The mood chips sit under the title once the feed is there to be filtered.
+        let chip_row = (phase == Phase::Ready && !chips.is_empty())
+            .then(|| self.chip_row(&chips, picked.as_deref(), accent, window, cx));
+        // The title and the chips are the page's first child, so the shelves keep their places.
+        let header = div().child(title).children(chip_row);
         let page = div()
             .id("home-page")
             .flex_1()
@@ -325,7 +348,7 @@ impl Render for HomeView {
             .track_scroll(&self.page)
             .px(px(spacing::S8))
             .pt(px(spacing::S6))
-            .child(title);
+            .child(header);
 
         match phase {
             Phase::SignedOut => page.child(self.signed_out(accent)),
@@ -337,6 +360,27 @@ impl Render for HomeView {
                     "Retry",
                     accent,
                     move |_, cx| model.update(cx, |m, cx| m.retry(cx)),
+                    cx,
+                ))
+            }
+            // A picked mood: its feed loading, or what went wrong with it.
+            Phase::Ready if chip_phase == Some(ChipPhase::Loading) => {
+                page.child(skeleton_page(animate, cx))
+            }
+            Phase::Ready if matches!(chip_phase, Some(ChipPhase::Failed(_))) => {
+                let model = self.model.clone();
+                let failure = match chip_phase {
+                    Some(ChipPhase::Failed(f)) => f,
+                    _ => LoadFailure::Other,
+                };
+                page.child(self.notice(
+                    match failure {
+                        LoadFailure::Session | LoadFailure::Throttled => failure_line(failure),
+                        _ => "Couldn't load this mood".into(),
+                    },
+                    "Retry",
+                    accent,
+                    move |_, cx| model.update(cx, |m, cx| m.retry_chip(cx)),
                     cx,
                 ))
             }
@@ -364,6 +408,44 @@ impl Render for HomeView {
 }
 
 impl HomeView {
+    /// The row of mood chips: the search chips' pills, none picked until one is pressed; pressing
+    /// the picked one clears it.
+    fn chip_row(
+        &mut self,
+        chips: &[apollo_provider::HomeChip],
+        picked: Option<&str>,
+        accent: Accent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        while self.chip_stops.len() < chips.len() {
+            self.chip_stops
+                .push(cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true));
+        }
+        let labels: Vec<SharedString> = chips
+            .iter()
+            .map(|c| SharedString::from(c.title.clone()))
+            .collect();
+        let params: Vec<String> = chips.iter().map(|c| c.params.clone()).collect();
+        let active = picked.and_then(|p| params.iter().position(|q| q == p));
+        let model = self.model.clone();
+        div()
+            .debug_selector(|| "home-mood-chips".into())
+            .mt(px(spacing::S4))
+            .child(PillRow::new(
+                "mood-chip",
+                labels,
+                active,
+                accent,
+                &self.chip_stops[..chips.len()],
+                move |ix, _, cx| {
+                    let params = params[ix].clone();
+                    model.update(cx, |m, cx| m.pick_chip(&params, cx));
+                },
+            ))
+            .into_any_element()
+    }
+
     fn signed_out(&self, accent: Accent) -> AnyElement {
         let on_sign_in = self.on_sign_in.clone();
         div()

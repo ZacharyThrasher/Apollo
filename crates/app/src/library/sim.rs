@@ -13,8 +13,8 @@ use apollo_domain::library::{
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track};
 use apollo_provider::{
-    ArtistSection, ExplorePage, HistoryDay, Hit, HomeItem, HomePage, HomeShelf, ListedTrack,
-    MoodTile, RelatedArtist,
+    ArtistSection, ExplorePage, HistoryDay, Hit, HomeChip, HomeItem, HomePage, HomeShelf,
+    ListedTrack, MoodTile, RelatedArtist,
 };
 
 use super::source::{ArtistContent, LibrarySource, TrackRow};
@@ -58,6 +58,12 @@ const RADIO_BATCH: usize = 10;
 /// Token of the home feed's second and third batches.
 pub const HOME_SECOND: &str = "sim-home@2";
 pub const HOME_THIRD: &str = "sim-home@3";
+/// The simulated mood chips of the home feed, `(title, params)`.
+pub const HOME_CHIPS: [(&str, &str); 3] = [
+    ("Relax", "sim-chip-relax"),
+    ("Workout", "sim-chip-workout"),
+    ("Focus", "sim-chip-focus"),
+];
 /// Songs on the simulated "Quick picks" shelf: enough for several pages of columns.
 pub const QUICK_PICKS: usize = 20;
 
@@ -141,6 +147,8 @@ const ROAD_TRIP_FIXTURES: [usize; 3] = [0, 1, 5];
 struct SimState {
     /// Video ids in Liked Music, most recently liked first.
     liked: Vec<String>,
+    /// Video ids the account thumbs-downed ("Not interested").
+    disliked: Vec<String>,
     /// `(bare playlist id, video id)` added through `add_to_playlist`, oldest first.
     added: Vec<(String, String)>,
     writes: WriteBehaviour,
@@ -149,8 +157,11 @@ struct SimState {
     /// Writes the simulation received, `(what, video id)`, for tests.
     log: Vec<(String, String)>,
     home: HomeBehaviour,
-    /// Home requests the simulation received: `""` for the first batch, else the token.
+    /// Home requests the simulation received: `""` for the first batch, else the token, and
+    /// `chip:` and the chip's params for a mood chip.
     home_log: Vec<String>,
+    /// Makes mood chip requests fail.
+    chip_failure: Option<LoadFailure>,
     explore: ExploreBehaviour,
     /// Explore requests received.
     explore_requests: u32,
@@ -205,12 +216,14 @@ impl SimState {
     fn new() -> Self {
         Self {
             liked: FIXTURES.iter().take(6).map(|f| f.id.to_owned()).collect(),
+            disliked: Vec::new(),
             added: Vec::new(),
             writes: WriteBehaviour::default(),
             playlists: None,
             log: Vec::new(),
             home: HomeBehaviour::default(),
             home_log: Vec::new(),
+            chip_failure: None,
             explore: ExploreBehaviour::default(),
             explore_requests: 0,
             mood_log: Vec::new(),
@@ -293,6 +306,11 @@ impl SimLibrary {
         self.state().home_log.clone()
     }
 
+    /// Makes the home feed's mood chips fail (tests).
+    pub fn set_chip_failure(&self, failure: Option<LoadFailure>) {
+        self.state().chip_failure = failure;
+    }
+
     /// How the Related tab is answered from now on (tests).
     pub fn set_related_behaviour(&self, behaviour: RelatedBehaviour) {
         self.state().related = behaviour;
@@ -360,6 +378,11 @@ impl SimLibrary {
     /// Makes the playlist list fail (tests).
     pub fn set_playlists_failure(&self, failure: Option<LoadFailure>) {
         self.state().playlists = failure;
+    }
+
+    /// Video ids the account thumbs-downed, most recent first.
+    pub fn disliked_ids(&self) -> Vec<String> {
+        self.state().disliked.clone()
     }
 
     /// Video ids in Liked Music, most recently liked first.
@@ -968,6 +991,13 @@ fn home_batch(token: Option<&str>) -> Option<HomePage> {
     };
     Some(match token {
         None => HomePage {
+            chips: HOME_CHIPS
+                .iter()
+                .map(|(title, params)| HomeChip {
+                    title: (*title).into(),
+                    params: (*params).into(),
+                })
+                .collect(),
             shelves: vec![
                 shelf("Quick picks", quick),
                 shelf("Albums for you", albums),
@@ -977,6 +1007,7 @@ fn home_batch(token: Option<&str>) -> Option<HomePage> {
             skipped: 0,
         },
         Some(HOME_SECOND) => HomePage {
+            chips: Vec::new(),
             shelves: vec![
                 shelf("Artists you might like", artists),
                 shelf("From your library", playlists),
@@ -985,6 +1016,7 @@ fn home_batch(token: Option<&str>) -> Option<HomePage> {
             skipped: 0,
         },
         Some(HOME_THIRD) => HomePage {
+            chips: Vec::new(),
             shelves: vec![shelf(
                 "More albums",
                 FIXTURES.iter().rev().map(home_album).collect(),
@@ -1262,6 +1294,50 @@ impl LibrarySource for SimLibrary {
         }
     }
 
+    fn home_chip(&self, params: &str) -> Result<HomePage, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        let failure = {
+            let mut state = self.state();
+            state.home_log.push(format!("chip:{params}"));
+            state.chip_failure
+        };
+        if let Some(f) = failure {
+            return Err(f);
+        }
+        let title = HOME_CHIPS
+            .iter()
+            .find(|(_, p)| *p == params)
+            .map(|(t, _)| *t)
+            .ok_or(LoadFailure::Other)?;
+        // A mood's feed: its own shelves, built from the fixtures in a different order per mood.
+        let spin = params.bytes().map(usize::from).sum::<usize>() % FIXTURES.len();
+        let rotated = || FIXTURES.iter().enumerate().cycle().skip(spin).take(FIXTURES.len());
+        Ok(HomePage {
+            // The service sends the chip row with a filtered feed too; the app keeps its own.
+            chips: HOME_CHIPS
+                .iter()
+                .map(|(title, params)| HomeChip {
+                    title: (*title).into(),
+                    params: (*params).into(),
+                })
+                .collect(),
+            shelves: vec![
+                HomeShelf {
+                    title: format!("{title} picks"),
+                    items: rotated()
+                        .map(|(n, f)| home_song(fixture_row(f, n), f.art))
+                        .collect(),
+                },
+                HomeShelf {
+                    title: format!("{title} albums"),
+                    items: rotated().take(6).map(|(_, f)| home_album(f)).collect(),
+                },
+            ],
+            continuation: None,
+            skipped: 0,
+        })
+    }
+
     fn home_more(&self, token: &str) -> Result<HomePage, LoadFailure> {
         self.wait(PAGE_LATENCY);
         let behaviour = {
@@ -1343,6 +1419,26 @@ impl LibrarySource for SimLibrary {
             }
         }
         lands.map(|_| ())
+    }
+
+    fn set_disliked(&self, video_id: &str) -> Result<(), WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        let lands = self.write_answer("dislike".to_owned(), video_id);
+        let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        if applies {
+            // Like and dislike exclude each other, as on the service.
+            let mut state = self.state();
+            state.liked.retain(|id| id != video_id);
+            if !state.disliked.iter().any(|id| id == video_id) {
+                state.disliked.insert(0, video_id.to_owned());
+            }
+        }
+        lands.map(|_| ())
+    }
+
+    fn disliked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        Ok(Some(self.state().disliked.iter().any(|id| id == video_id)))
     }
 
     fn liked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {

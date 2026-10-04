@@ -263,7 +263,11 @@ fn right_clicking_a_song_opens_its_menu(cx: &mut TestAppContext) {
             SaveToLibrary,
             GoToArtist,
             GoToAlbum,
-            CopyLink
+            BlockArtist,
+            NotInterested,
+            CopyLink,
+            CopyTitleArtist,
+            OpenOnYoutubeMusic
         ]
     );
     let subject = page.menu.read_with(vcx, |m, _| m.subject().cloned());
@@ -415,6 +419,74 @@ fn copy_link_puts_the_watch_url_on_the_clipboard(cx: &mut TestAppContext) {
         .expect("something was copied");
     assert_eq!(copied, "https://music.youtube.com/watch?v=foundTrk001");
     assert_eq!(notice(&page, vcx), None);
+}
+
+#[gpui::test]
+fn copy_title_and_artist_puts_title_dash_artist_on_the_clipboard_silently(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_on_first_song(&page, vcx);
+    choose(&page, vcx, Command::CopyTitleArtist);
+    let copied = vcx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .expect("something was copied");
+    assert_eq!(copied, "Found One - Neon Arcade");
+    assert_eq!(notice(&page, vcx), None, "no toast for a copy");
+    assert!(!is_open(&page, vcx));
+}
+
+#[gpui::test]
+fn open_on_youtube_music_opens_the_watch_page_in_the_browser(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_on_first_song(&page, vcx);
+    assert_eq!(vcx.opened_url(), None);
+    choose(&page, vcx, Command::OpenOnYoutubeMusic);
+    assert_eq!(
+        vcx.opened_url().as_deref(),
+        Some("https://music.youtube.com/watch?v=foundTrk001")
+    );
+    assert_eq!(notice(&page, vcx), None);
+}
+
+#[gpui::test]
+fn not_interested_sends_one_thumbs_down_for_that_song(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_on_first_song(&page, vcx);
+    choose(&page, vcx, Command::NotInterested);
+    assert_eq!(page.sim.write_log(), [("dislike".to_owned(), FOUND.to_owned())]);
+    assert_eq!(page.sim.disliked_ids(), [FOUND.to_owned()]);
+    assert_eq!(notice(&page, vcx), None, "success is silent");
+    assert!(!is_open(&page, vcx));
+}
+
+#[gpui::test]
+fn dont_play_this_artist_blocks_them_and_the_item_turns_into_the_way_back(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    let blocked = page.shell.read_with(vcx, |s, _| s.block_model().clone());
+    open_on_first_song(&page, vcx);
+    let label_of = |page: &Page, vcx: &mut VisualTestContext| {
+        page.menu.read_with(vcx, |m, cx| {
+            m.labels(cx)
+                .into_iter()
+                .find(|(c, _)| *c == Command::BlockArtist)
+                .map(|(_, l)| l)
+        })
+    };
+    assert_eq!(label_of(&page, vcx).as_deref(), Some("Don't play this artist"));
+    choose(&page, vcx, Command::BlockArtist);
+    let names: Vec<String> = blocked.read_with(vcx, |m, _| {
+        m.list().entries().iter().map(|a| a.name.clone()).collect()
+    });
+    assert_eq!(names, ["Neon Arcade"]);
+    assert_eq!(notice(&page, vcx), None, "no toast for a block");
+    assert!(page.sim.write_log().is_empty(), "blocking is local: nothing is sent");
+
+    // Another song by the same artist now offers the way back, and taking it lets them in again.
+    let at = inside_row(vcx, "song-like-1");
+    right_click(vcx, at);
+    assert_eq!(label_of(&page, vcx).as_deref(), Some("Play this artist again"));
+    choose(&page, vcx, Command::BlockArtist);
+    assert!(blocked.read_with(vcx, |m, _| m.is_empty()));
 }
 
 #[gpui::test]
