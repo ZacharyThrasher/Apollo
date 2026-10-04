@@ -243,7 +243,8 @@ impl Shell {
             )
         });
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
-        let playback_page = cx.new(|cx| PlaybackPage::new(player.clone(), cx));
+        let playback_page =
+            cx.new(|cx| PlaybackPage::new(player.clone(), settings.clone(), cx));
         let settings_page = cx
             .new(|cx| SettingsPage::new(account_page, playback_page, settings, player.clone(), cx));
         let library = cx.new(|cx| {

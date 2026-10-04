@@ -3,7 +3,10 @@ use std::sync::Arc;
 use apollo_domain::account::{Validation, ValidationError};
 use apollo_domain::library::{Collection, CollectionKind, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{LoadFailure, Page};
-use innertube::{Clients, InnerTube, Rating, Session, YouTubeClient, METADATA_CLIENT};
+use innertube::{
+    Clients, InnerTube, PlaybackTracking, Rating, Session, WatchtimePing, YouTubeClient,
+    METADATA_CLIENT,
+};
 use tokio::sync::Notify;
 
 use crate::artist::{page_from_artist, ArtistPage};
@@ -259,7 +262,7 @@ impl InnerTubeSource {
 
     /// How loud YouTube measured a track (`loudnessDb`, dB against its reference level), from one
     /// metadata-only `player` request. `Ok(None)` is an answer: the service had no measurement for
-    /// the track. Nothing else in the response is read, and it carries no plays or history.
+    /// the track. Nothing else in the response is read.
     pub async fn loudness_db(&self, video_id: &str) -> Result<Option<f32>, LoadFailure> {
         let loudness = self
             .tube
@@ -267,6 +270,47 @@ impl InnerTubeSource {
             .await
             .map_err(|e| classify(&e))?;
         Ok(loudness.loudness_db)
+    }
+
+    /// Where a play of `video_id` is reported, from one metadata-only `player` request (the same
+    /// one [`loudness_db`](Self::loudness_db) makes). `Ok(None)` is an answer: the response had
+    /// no tracking URLs. Reporting itself is [`report_start`](Self::report_start) and
+    /// [`report_watchtime`](Self::report_watchtime).
+    pub async fn playback_tracking(
+        &self,
+        video_id: &str,
+    ) -> Result<Option<PlaybackTracking>, LoadFailure> {
+        self.tube
+            .player_tracking(&self.client, video_id)
+            .await
+            .map_err(|e| classify(&e))
+    }
+
+    /// Tell YouTube Music the playback `nonce` has started. One attempt; the caller decides what
+    /// a failure means (the app only logs it).
+    pub async fn report_start(
+        &self,
+        tracking: &PlaybackTracking,
+        nonce: &str,
+        position_ms: u64,
+    ) -> Result<(), LoadFailure> {
+        self.tube
+            .report_playback_start(&self.client, tracking, nonce, position_ms)
+            .await
+            .map_err(|e| classify(&e))
+    }
+
+    /// One watch-time ping for the playback `nonce`. One attempt.
+    pub async fn report_watchtime(
+        &self,
+        tracking: &PlaybackTracking,
+        nonce: &str,
+        ping: &WatchtimePing,
+    ) -> Result<(), LoadFailure> {
+        self.tube
+            .report_watchtime(&self.client, tracking, nonce, ping)
+            .await
+            .map_err(|e| classify(&e))
     }
 
     /// Best-effort `visitorData`, which the service expects alongside the cookie. A failure

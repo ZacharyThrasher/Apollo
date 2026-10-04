@@ -16,6 +16,7 @@ use crate::models::metadata::{
     self, AccountIdentity, AccountInfo, NextResult, Rating, SearchResult,
 };
 use crate::models::player::{parse_player_loudness, PlayerLoudness};
+use crate::tracking::{self, parse_playback_tracking, PlaybackTracking, WatchtimePing};
 use crate::transport::{Error, InnerTube};
 
 /// Search filter params (opaque base64). context/08.
@@ -159,10 +160,10 @@ impl InnerTube {
 
     /// How loud YouTube measured a video, from the `player` endpoint (`playerConfig.audioConfig`).
     ///
-    /// Metadata only. The response also carries stream URLs and playback-tracking pings; both are
-    /// dropped unread (audio comes from yt-dlp, and Apollo does not report plays). The request is
-    /// the plain one the web client sends before it has a stream: no signature timestamp, no
-    /// PO token, nothing that would let the answer be played. Read-only and idempotent.
+    /// Metadata only. The response also carries stream URLs; they are dropped unread (audio comes
+    /// from yt-dlp). The request is the plain one the web client sends before it has a stream:
+    /// no signature timestamp, no PO token, nothing that would let the answer be played.
+    /// Read-only and idempotent.
     pub async fn player_loudness(
         &self,
         client: &YouTubeClient,
@@ -171,6 +172,54 @@ impl InnerTube {
         let body = player_body(self.context_for(client), video_id);
         let value = self.post("player", client, &body, true).await?;
         Ok(parse_player_loudness(&value))
+    }
+
+    /// The URLs to report a play of `video_id` to, from the same metadata-only `player` request
+    /// as [`player_loudness`](Self::player_loudness). `Ok(None)` when the response has none.
+    /// Read-only; reporting is a separate step ([`report_playback_start`](Self::report_playback_start)).
+    pub async fn player_tracking(
+        &self,
+        client: &YouTubeClient,
+        video_id: &str,
+    ) -> Result<Option<PlaybackTracking>, Error> {
+        let body = player_body(self.context_for(client), video_id);
+        let value = self.post("player", client, &body, true).await?;
+        Ok(parse_playback_tracking(&value))
+    }
+
+    /// Tell YouTube Music a playback has started (the web client's `videostatsPlaybackUrl`
+    /// ping). `nonce` is this playback's [`new_nonce`]; every later ping about it reuses it.
+    /// One attempt, no retry: a lost ping is a play that is not in History, not an error.
+    pub async fn report_playback_start(
+        &self,
+        client: &YouTubeClient,
+        tracking: &PlaybackTracking,
+        nonce: &str,
+        position_ms: u64,
+    ) -> Result<(), Error> {
+        let url = tracking::playback_url(
+            &tracking.playback_url,
+            nonce,
+            &client.client_version,
+            position_ms,
+        )
+        .ok_or_else(|| Error::Other("tracking url is not a url".into()))?;
+        self.send_tracking_ping(client, &url).await
+    }
+
+    /// Send one watch-time ping for the playback `nonce` (the web client's
+    /// `videostatsWatchtimeUrl`). One attempt, no retry.
+    pub async fn report_watchtime(
+        &self,
+        client: &YouTubeClient,
+        tracking: &PlaybackTracking,
+        nonce: &str,
+        ping: &WatchtimePing,
+    ) -> Result<(), Error> {
+        let url =
+            tracking::watchtime_url(&tracking.watchtime_url, nonce, &client.client_version, ping)
+                .ok_or_else(|| Error::Other("tracking url is not a url".into()))?;
+        self.send_tracking_ping(client, &url).await
     }
 
     /// Logged-in account summary (`account/account_menu`, context/01). Requires a cookie. Also the

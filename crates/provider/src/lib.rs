@@ -18,3 +18,6 @@ pub use map::{
 };
 pub use search::{search_results, track_from_item, Hit, SearchResults};
 pub use source::InnerTubeSource;
+
+/// The play-reporting types the source speaks, so callers need not depend on the InnerTube crate.
+pub use innertube::{new_nonce, PingState, PlaybackTracking, WatchtimePing};

@@ -17,6 +17,7 @@ pub mod os_media;
 pub mod persist;
 pub mod platform;
 pub mod player;
+pub mod reporting;
 pub mod search;
 pub mod settings;
 #[cfg(windows)]
