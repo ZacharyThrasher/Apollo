@@ -133,5 +133,15 @@ Applied to the lyrics pane (`ui/lyrics_pane.rs`, `lyrics.rs`) and the Lyrics but
 5. **States:** no lyrics is a single centred "No lyrics" in text.secondary (same type as the lines); loading is the shared skeleton pulse (six bars the height of a line, starting at the third). Nothing else is explained.
 6. **Data:** LRCLIB only (`/api/get`, then `/api/search` within 2 s of the track's length), synced preferred, plain as the fallback. Looked up when a track becomes current and for the track after it; answers, including "not found", are cached in SQLite by video id (a "not found" is believed for a week).
 
+## Search decisions (coordinator brief, 2026-10-04)
+Applied to the popover under the Search field (`ui/search_popover.rs`) and `search.rs`.
+1. **Popover:** one anchored popover hangs under the field, as wide as the field, styled like the track menu (bg.overlay, 8px radius, border.subtle, 4px padding, 32px rows with a 16px Fluent search icon in text.secondary). Up to 8 rows. Up, Down, Enter and Esc work it; a click picks a row. No scrim, no helper text.
+2. **Recents:** with the field focused and empty it lists up to 10 recent searches. Each has an x (Fluent dismiss) that removes it, and the header has a small "Clear" on the right. Recents are saved when a search is made on purpose (Enter, a picked row, or playing or opening a result), newest first, one copy each, 20 kept. A pasted link is never a recent.
+3. **Suggestions:** while typing, the service's completions, asked for after a 150 ms pause (not written to history, so no 2-character minimum), cached per query. The typed text itself and repeats are left out. A failure shows nothing.
+4. **Closing:** Esc closes the popover first, then clears the field, then leaves it. Enter, a pick, and a click outside close it; typing or refocusing an empty field brings it back. Down goes to the results once it is closed.
+5. **Pasted links:** a music.youtube.com, youtube.com or youtu.be link acts on Enter with no confirmation: a track plays now, a playlist, album or artist opens its page. A link is never searched for (nothing is typed into history). A link that is not one of those says "Can't open that link" with a Clear action.
+6. **Hide music videos:** removes the video versions from the Songs group (albums, artists and playlists are untouched). It applies to the answer already on screen, with no new request.
+7. **Settings > Search** (after Playback): "Save recent searches" (on) and "Hide music videos" (off). Turning the first off forgets the list. Signing out forgets it too.
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

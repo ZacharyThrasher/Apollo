@@ -106,6 +106,11 @@ impl SettingsModel {
         }
     }
 
+    /// Where the settings are kept, for state that is not a switch (the recent searches).
+    pub fn backend(&self) -> Option<Arc<dyn SettingsBackend>> {
+        self.backend.clone()
+    }
+
     pub fn get(&self, setting: &BoolSetting) -> bool {
         if let Some(value) = self.cache.borrow().get(setting.key) {
             return *value;

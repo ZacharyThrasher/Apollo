@@ -17,4 +17,4 @@ pub use map::{
     target_from_option, track_from_song, ListedTrack,
 };
 pub use search::{search_results, track_from_item, Hit, SearchResults};
-pub use source::InnerTubeSource;
+pub use source::{InnerTubeSource, LinkTarget};

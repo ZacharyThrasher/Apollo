@@ -117,6 +117,8 @@ pub struct Shell {
     /// Whether the account could serve the library when it was last looked at; the library is
     /// loaded again when it becomes able to (see [`account_usable`]).
     library_usable: bool,
+    /// An account was signed in since the shell started: signing out then forgets its recents.
+    search_account_live: bool,
     /// The first time the account turns out to be signed out, the window opens on Settings.
     routed_to_sign_in: bool,
     /// Keeps the window-activation hook that dismisses tooltips alive.
@@ -250,8 +252,15 @@ impl Shell {
         });
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
         let playback_page = cx.new(|cx| PlaybackPage::new(player.clone(), cx));
-        let settings_page = cx
-            .new(|cx| SettingsPage::new(account_page, playback_page, settings, player.clone(), cx));
+        let settings_page = cx.new(|cx| {
+            SettingsPage::new(
+                account_page,
+                playback_page,
+                settings.clone(),
+                player.clone(),
+                cx,
+            )
+        });
         let library = cx.new(|cx| {
             LibraryView::new(
                 player.clone(),
@@ -284,6 +293,9 @@ impl Shell {
         cx.observe(&progress, |_, _, cx| cx.notify()).detach();
         cx.observe(&volume, |_, _, cx| cx.notify()).detach();
         let search_model = cx.new(|_| SearchModel::new());
+        if let Some(backend) = settings.read(cx).backend() {
+            search_model.update(cx, |m, cx| m.install_recents(backend, cx));
+        }
         let thumbs = cx.new(|_| ThumbStore::new());
         let search = cx.new(|cx| {
             SearchPage::new(
@@ -292,6 +304,7 @@ impl Shell {
                 picker.clone(),
                 search_model.clone(),
                 thumbs.clone(),
+                settings.clone(),
                 root_focus.clone(),
                 {
                     let weak = weak.clone();
@@ -339,6 +352,7 @@ impl Shell {
             detail_origin: None,
             library_epoch: 0,
             library_usable: false,
+            search_account_live: false,
             routed_to_sign_in: false,
             _activation: None,
             route: Route::Home,
@@ -385,6 +399,13 @@ impl Shell {
         }
         let model = self.account.read(cx);
         let (signed_out, by_choice) = (model.is_signed_out(), model.is_signed_out_by_choice());
+        if matches!(model.screen(), crate::account::Screen::SignedIn { .. }) {
+            self.search_account_live = true;
+        } else if by_choice && self.search_account_live {
+            // What the account searched for goes with its session.
+            self.search_account_live = false;
+            self.search_model.update(cx, |m, cx| m.forget_account(cx));
+        }
         let access = home_access(&view, signed_out, by_choice, self.home_access);
         if access != self.home_access || epoch != self.home_epoch {
             if epoch != self.home_epoch {

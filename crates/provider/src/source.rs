@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use apollo_domain::account::{Validation, ValidationError};
 use apollo_domain::library::{Collection, CollectionKind, PlaylistTarget, WriteFailure};
+use apollo_domain::links::ExternalLink;
 use apollo_domain::listing::{LoadFailure, Page};
+use apollo_domain::model::BrowseId;
 use innertube::{Clients, InnerTube, Rating, Session, YouTubeClient, METADATA_CLIENT};
 use tokio::sync::Notify;
 
@@ -14,6 +16,18 @@ use crate::map::{
     HistoryDay, ListedTrack,
 };
 use crate::search::{hit_from_item, search_results, Hit, SearchResults};
+
+/// What a pasted link points at, with enough about it to open it without a second lookup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    Track(ListedTrack),
+    Collection(Collection),
+    Artist {
+        id: BrowseId,
+        name: String,
+        thumbnail: Option<String>,
+    },
+}
 
 /// Network-backed metadata source. Every call is authenticated: there is no guest mode, and a
 /// rejected session is reported to the caller instead of being retried or healed here.
@@ -207,6 +221,74 @@ impl InnerTubeSource {
             return Err(LoadFailure::Parse);
         }
         Ok(results)
+    }
+
+    /// Typeahead for the search box: the query completions the service offers for `input`, in
+    /// its own order. Not written to the account's search history (unlike a search).
+    pub async fn suggestions(&self, input: &str) -> Result<Vec<String>, LoadFailure> {
+        let parsed = self
+            .tube
+            .search_suggestions(&self.client, input)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(parsed.queries.into_iter().map(|q| q.text).collect())
+    }
+
+    /// What a pasted link opens: the track (looked up through the panel `next` answers for it),
+    /// or the title and cover of the playlist, album or artist page it names.
+    pub async fn resolve_link(&self, link: &ExternalLink) -> Result<LinkTarget, LoadFailure> {
+        match link {
+            ExternalLink::Track { video, .. } => {
+                let next = self
+                    .tube
+                    .next(&self.client, Some(video.as_str()), None)
+                    .await
+                    .map_err(|e| classify(&e))?;
+                next.items
+                    .iter()
+                    .filter(|s| s.video_id == video.as_str())
+                    .find_map(track_from_song)
+                    .map(LinkTarget::Track)
+                    .ok_or(LoadFailure::Parse)
+            }
+            ExternalLink::Playlist(id) => {
+                let browse_id = playlist_browse_id(id.as_str());
+                let page = self
+                    .tube
+                    .playlist(&self.client, &browse_id, None)
+                    .await
+                    .map_err(|e| classify(&e))?;
+                Ok(LinkTarget::Collection(Collection {
+                    kind: CollectionKind::Playlist,
+                    id: BrowseId::new(browse_id),
+                    title: page.title.unwrap_or_else(|| "Playlist".to_owned()),
+                    subtitle: page.subtitle,
+                    thumbnail: page.thumbnail,
+                }))
+            }
+            ExternalLink::Album(id) => {
+                let page = self
+                    .tube
+                    .album(&self.client, id.as_str())
+                    .await
+                    .map_err(|e| classify(&e))?;
+                Ok(LinkTarget::Collection(Collection {
+                    kind: CollectionKind::Album,
+                    id: id.clone(),
+                    title: page.title.ok_or(LoadFailure::Parse)?,
+                    subtitle: page.subtitle,
+                    thumbnail: page.thumbnail,
+                }))
+            }
+            ExternalLink::Artist(id) => {
+                let page = self.artist(id.as_str()).await?;
+                Ok(LinkTarget::Artist {
+                    id: page.id,
+                    name: page.name,
+                    thumbnail: page.thumbnail,
+                })
+            }
+        }
     }
 
     /// Like or unlike a track on the account (`like/like`, `like/removelike`). Idempotent. A

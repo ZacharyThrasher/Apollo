@@ -262,3 +262,23 @@ fn a_missing_duration_stays_empty() {
         Some(Duration::from_secs(4 * 60 + 35))
     );
 }
+
+#[test]
+fn hiding_music_videos_drops_only_the_songs_flagged_as_videos() {
+    let song = |id: &str| ListedTrack {
+        track: Track::new(id, id),
+        occurrence: None,
+        thumbnail: None,
+        explicit: false,
+        liked: None,
+    };
+    let mut results = SearchResults {
+        songs: vec![song("aaaaaaaaaaa"), song("bbbbbbbbbbb"), song("ccccccccccc")],
+        ..SearchResults::default()
+    };
+    results.video_ids.insert("bbbbbbbbbbb".into());
+    let audio = results.without_videos();
+    let ids: Vec<&str> = audio.songs.iter().map(|s| s.track.video_id.as_str()).collect();
+    assert_eq!(ids, ["aaaaaaaaaaa", "ccccccccccc"]);
+    assert_eq!(results.songs.len(), 3, "the original is untouched");
+}
