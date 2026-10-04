@@ -33,6 +33,20 @@ fn none() -> Option<String> {
     None
 }
 
+/// Rename the playlist with this bare id (an edit that carries only the title).
+fn rename(
+    sim: &SimLibrary,
+    expect: &Option<String>,
+    id: &str,
+    title: &str,
+) -> Result<(), WriteFailure> {
+    let change = PlaylistEdit {
+        title: Some(title.into()),
+        ..PlaylistEdit::default()
+    };
+    edit(sim, expect, &playlist(id, "x"), &change)
+}
+
 fn titles(sim: &SimLibrary) -> Vec<String> {
     sim.collections().unwrap().into_iter().map(|c| c.title).collect()
 }
@@ -336,7 +350,8 @@ fn a_write_asked_in_one_account_sends_nothing_once_the_account_has_changed() {
 fn every_failure_text_is_six_words_or_fewer_and_a_dead_session_is_named() {
     for edit in [
         Edit::Create,
-        Edit::Rename,
+        Edit::SaveQueue,
+        Edit::Update,
         Edit::Delete,
         Edit::RemoveSong,
         Edit::MoveSong,
@@ -368,4 +383,171 @@ fn only_playlists_the_service_lets_people_save_are_offered_for_saving() {
     assert!(!is_saveable_playlist_id("LM"));
     assert!(!is_saveable_playlist_id("OLAK5uy_abc"));
     assert!(!is_saveable_playlist_id(""));
+}
+
+// ---- edit playlist (description and visibility) --------------------------------------------------
+
+fn change(description: Option<&str>, privacy: Option<Privacy>) -> PlaylistEdit {
+    PlaylistEdit {
+        title: None,
+        description: description.map(str::to_owned),
+        privacy,
+    }
+}
+
+#[test]
+fn an_edit_sends_only_what_changed_and_the_service_holds_it_afterwards() {
+    let sim = SimLibrary::instant();
+    let road = playlist("PLsimroad", "Road Trip");
+    edit(&sim, &none(), &road, &change(Some("Songs for the highway"), Some(Privacy::Unlisted)))
+        .unwrap();
+    assert_eq!(
+        sim.playlist_details("PLsimroad"),
+        (Some("Songs for the highway".into()), Some(Privacy::Unlisted))
+    );
+    assert_eq!(sim.write_log().len(), 1, "one write carries every part");
+    assert!(
+        !sim.write_log()[0].0.contains("title="),
+        "the title was not asked to change: {:?}",
+        sim.write_log()
+    );
+}
+
+#[test]
+fn an_edit_that_changes_nothing_is_not_sent() {
+    let sim = SimLibrary::instant();
+    let road = playlist("PLsimroad", "Road Trip");
+    assert_eq!(edit(&sim, &none(), &road, &PlaylistEdit::default()), Ok(()));
+    assert!(sim.write_log().is_empty());
+}
+
+#[test]
+fn clearing_a_description_is_an_edit_of_its_own() {
+    let sim = SimLibrary::instant();
+    let road = playlist("PLsimroad", "Road Trip");
+    edit(&sim, &none(), &road, &change(Some("old"), None)).unwrap();
+    edit(&sim, &none(), &road, &change(Some(""), None)).unwrap();
+    assert_eq!(sim.playlist_details("PLsimroad").0.as_deref(), Some(""));
+}
+
+#[test]
+fn an_edit_with_a_lost_reply_is_confirmed_by_reading_every_part_back() {
+    let sim = SimLibrary::instant();
+    let road = playlist("PLsimroad", "Road Trip");
+    sim.set_write_behaviour(WriteBehaviour::LandsReplyLost);
+    assert_eq!(
+        edit(&sim, &none(), &road, &change(Some("Night drives"), Some(Privacy::Public))),
+        Ok(())
+    );
+    // A write that did not land is not believed, whatever the reply says.
+    sim.set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Unknown));
+    let long = playlist("PLsimlong", "Long Haul");
+    assert_eq!(
+        edit(&sim, &none(), &long, &change(Some("Elsewhere"), None)),
+        Err(WriteFailure::Unknown)
+    );
+    assert_eq!(sim.write_log().len(), 2, "each sent once");
+}
+
+#[test]
+fn an_edit_is_never_sent_for_what_the_account_does_not_own_or_from_another_account() {
+    let sim = SimLibrary::instant();
+    for id in ["LM", "OLAK5uy_x", "RDCLAK5uy_x", "VLPLsimroad", ""] {
+        assert_eq!(
+            edit(&sim, &none(), &playlist(id, "x"), &change(Some("d"), None)),
+            Err(WriteFailure::Rejected),
+            "{id}"
+        );
+    }
+    sim.set_account(Some("1:channel-a"));
+    let asked_in = sim.account_token();
+    sim.set_account(Some("1:channel-b"));
+    assert_eq!(
+        edit(&sim, &asked_in, &playlist("PLsimroad", "x"), &change(Some("d"), None)),
+        Err(WriteFailure::Rejected)
+    );
+    assert!(sim.write_log().is_empty());
+}
+
+// ---- save the queue as a playlist ------------------------------------------------------------
+
+fn videos(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|s| (*s).to_owned()).collect()
+}
+
+#[test]
+fn a_saved_queue_is_a_private_playlist_holding_its_songs_in_order() {
+    let sim = SimLibrary::instant();
+    let ids = videos(&["vidAAAAAAA1", "vidAAAAAAA2", "vidAAAAAAA3"]);
+    let id = create_with(&sim, &none(), &known(&sim), "My queue", Privacy::Private, &ids).unwrap();
+    assert!(is_user_playlist_id(&id));
+    assert_eq!(sim.created_with(&id), ids);
+    assert_eq!(sim.playlist_details(&id).1, Some(Privacy::Private));
+    assert!(titles(&sim).contains(&"My queue".to_owned()));
+    assert_eq!(sim.write_log().len(), 1, "one write for the playlist and its songs");
+}
+
+#[test]
+fn a_saved_queue_whose_reply_is_lost_is_found_by_reading_back_and_never_sent_twice() {
+    let sim = SimLibrary::instant();
+    sim.set_write_behaviour(WriteBehaviour::LandsReplyLost);
+    let ids = videos(&["vidAAAAAAA1"]);
+    let id = create_with(&sim, &none(), &known(&sim), "Night queue", Privacy::Private, &ids).unwrap();
+    assert!(titles(&sim).contains(&"Night queue".to_owned()));
+    assert_eq!(sim.created_with(&id), ids);
+    assert_eq!(sim.write_log().len(), 1);
+    // A write that did not land finds nothing and fails.
+    let sim = SimLibrary::instant();
+    sim.set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Unknown));
+    assert_eq!(
+        create_with(&sim, &none(), &known(&sim), "Never", Privacy::Private, &ids),
+        Err(WriteFailure::Unknown)
+    );
+}
+
+// ---- songs in the library --------------------------------------------------------------------
+
+#[test]
+fn a_song_is_saved_to_the_library_and_taken_out_again() {
+    let sim = SimLibrary::instant();
+    sim.preset_library_songs(&["vidAAAAAAA1"]);
+    set_song_saved(&sim, &none(), "vidAAAAAAA2", true).unwrap();
+    assert_eq!(sim.library_song_ids(), ["vidAAAAAAA2", "vidAAAAAAA1"]);
+    set_song_saved(&sim, &none(), "vidAAAAAAA1", false).unwrap();
+    assert_eq!(sim.library_song_ids(), ["vidAAAAAAA2"]);
+    assert_eq!(sim.write_log().len(), 2);
+}
+
+#[test]
+fn a_song_toggle_with_a_lost_reply_is_confirmed_by_the_songs_list_and_a_missed_one_is_not() {
+    let sim = SimLibrary::instant();
+    sim.preset_library_songs(&[]);
+    sim.set_write_behaviour(WriteBehaviour::LandsReplyLost);
+    assert_eq!(set_song_saved(&sim, &none(), "vidAAAAAAA1", true), Ok(()));
+    assert_eq!(sim.library_song_ids(), ["vidAAAAAAA1"]);
+    sim.set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Unknown));
+    assert_eq!(
+        set_song_saved(&sim, &none(), "vidAAAAAAA2", true),
+        Err(WriteFailure::Unknown)
+    );
+    assert_eq!(sim.write_log().len(), 2, "each sent once");
+}
+
+#[test]
+fn a_song_toggle_is_not_sent_from_another_account_or_for_nothing() {
+    let sim = SimLibrary::instant();
+    sim.set_account(Some("1:channel-a"));
+    let asked_in = sim.account_token();
+    sim.set_account(Some("1:channel-b"));
+    assert_eq!(set_song_saved(&sim, &asked_in, "vidAAAAAAA1", true), Err(WriteFailure::Rejected));
+    assert_eq!(set_song_saved(&sim, &none(), "", true), Err(WriteFailure::Rejected));
+    assert!(sim.write_log().is_empty());
+}
+
+#[test]
+fn every_page_of_the_songs_list_is_read_for_a_read_back() {
+    let sim = SimLibrary::instant();
+    sim.preset_long_library_songs();
+    let rows = all_song_rows(&sim).expect("whole list");
+    assert_eq!(rows.len(), crate::library::sim::LONG_SONGS);
 }

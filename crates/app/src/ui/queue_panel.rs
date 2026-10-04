@@ -24,6 +24,7 @@ use crate::player::{format_time, PlayerModel, QueueHeading, QueueRow, QueueView,
 use crate::queue_source;
 use crate::url_thumbs::{Thumb, ThumbStore};
 use crate::style::{self, color};
+use crate::ui::anchor;
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus, PaneTabs};
@@ -219,6 +220,7 @@ pub struct QueuePanel {
     focus_shuffle: FocusHandle,
     focus_repeat: FocusHandle,
     focus_clear: FocusHandle,
+    focus_more: FocusHandle,
     focus_autoplay: FocusHandle,
     focus_source: FocusHandle,
     focus_list: FocusHandle,
@@ -259,6 +261,7 @@ impl QueuePanel {
             focus_shuffle: stop(cx, TAB_SHUFFLE),
             focus_repeat: stop(cx, TAB_REPEAT),
             focus_clear: stop(cx, TAB_CLEAR),
+            focus_more: stop(cx, TAB_CLEAR),
             focus_autoplay: stop(cx, TAB_AUTOPLAY),
             focus_source: stop(cx, TAB_SOURCE),
             focus_list: stop(cx, TAB_LIST),
@@ -920,6 +923,7 @@ impl Render for QueuePanel {
         self.view = view;
         let ready = player_view.status == Status::Ready;
         let has_upcoming = !self.view.upcoming.is_empty();
+        let has_current = self.view.current.is_some();
         let accent = player_view.accent;
 
         let (repeat_icon, repeat_label, repeat_on) = match player_view.repeat {
@@ -1011,6 +1015,30 @@ impl Render for QueuePanel {
                                     p.update(cx, |m, cx| m.clear_upcoming(cx));
                                 }
                             }),
+                        ),
+                    )
+                    // Save as playlist… lives in this menu.
+                    .child(
+                        div().debug_selector(|| "queue-more".into()).child(
+                            anchor::anchored(
+                                "queue-more",
+                                IconButton::new(
+                                    "queue-more",
+                                    &self.focus_more,
+                                    Icon::MoreHorizontal,
+                                    "More",
+                                    accent,
+                                )
+                                .enabled(ready && has_current)
+                                .on_click(|window, cx| {
+                                    track_menu::open(
+                                        Subject::Queue,
+                                        track_menu::Anchor::Key("queue-more".into()),
+                                        window,
+                                        cx,
+                                    )
+                                }),
+                            ),
                         ),
                     )
             );

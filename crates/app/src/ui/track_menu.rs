@@ -95,6 +95,8 @@ pub enum Subject {
     Track(TrackSubject),
     /// An album or playlist card.
     Collection(Collection),
+    /// The queue, from the More button of its header.
+    Queue,
     /// An artist, from the artist page's More button.
     Artist(ArtistSubject),
 }
@@ -180,9 +182,12 @@ pub enum Command {
     RemoveFromCrate,
     SaveToLibrary,
     RemoveFromLibrary,
-    Rename,
+    /// Opens the Edit playlist dialog (name, description, privacy).
+    EditPlaylist,
     DeletePlaylist,
     RemoveFromPlaylist,
+    /// Save the queue as a new playlist.
+    SaveQueue,
     /// The thumbs-down: tell YouTube Music this song is not wanted.
     NotInterested,
     /// "Title - Artist" on the clipboard.
@@ -234,6 +239,9 @@ pub struct Facts {
     pub saved: Option<bool>,
     /// Whether the song is in the Crate (its item then takes it out).
     pub in_crate: bool,
+    /// Whether the library holds the song; `None` where nothing has offered a way to change that
+    /// (the item is then left out).
+    pub song_saved: Option<bool>,
     /// Whether the artist the block item acts on is blocked now (its item then lets them back).
     pub artist_blocked: bool,
 }
@@ -274,7 +282,7 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             out.push(vec![item(Command::CopyLink, Icon::Link, "Copy link")]);
             if facts.own_playlist {
                 out.push(vec![
-                    item(Command::Rename, Icon::Edit, "Rename\u{2026}"),
+                    item(Command::EditPlaylist, Icon::Edit, "Edit playlist\u{2026}"),
                     item(Command::DeletePlaylist, Icon::Delete, "Delete playlist\u{2026}"),
                 ]);
             }
@@ -295,11 +303,27 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                         item(Command::AddToCrate, Icon::BoxRegular, "Add to Crate")
                     },
                 ],
-                vec![if liked {
-                    item(Command::ToggleLike, Icon::HeartFilled, "Remove from Liked")
-                } else {
-                    item(Command::ToggleLike, Icon::HeartRegular, "Like")
-                }],
+                {
+                    let mut group = vec![if liked {
+                        item(Command::ToggleLike, Icon::HeartFilled, "Remove from Liked")
+                    } else {
+                        item(Command::ToggleLike, Icon::HeartRegular, "Like")
+                    }];
+                    match facts.song_saved {
+                        Some(false) => group.push(item(
+                            Command::SaveToLibrary,
+                            Icon::LibraryRegular,
+                            "Save to library",
+                        )),
+                        Some(true) => group.push(item(
+                            Command::RemoveFromLibrary,
+                            Icon::LibraryFilled,
+                            "Remove from library",
+                        )),
+                        None => {}
+                    }
+                    group
+                },
             ];
             let mut places = Vec::new();
             if artist_of(&t.track).is_some() {
@@ -340,6 +364,11 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             }
             out
         }
+        Subject::Queue => vec![vec![item(
+            Command::SaveQueue,
+            Icon::PlaylistAdd,
+            "Save as playlist\u{2026}",
+        )]],
     }
 }
 
@@ -385,8 +414,35 @@ pub fn link_of(subject: &Subject) -> String {
     match subject {
         Subject::Track(t) => links::track_url(&t.track.video_id),
         Subject::Collection(c) => links::collection_url(c),
+        Subject::Queue => String::new(),
         Subject::Artist(a) => format!("https://music.youtube.com/channel/{}", a.id.as_str()),
     }
+}
+
+/// The name the Save as playlist dialog starts with: the place the queue plays from, else a
+/// generic one.
+pub fn queue_playlist_name(heading: Option<&crate::player::QueueHeading>) -> String {
+    use apollo_domain::queue::SourceKind;
+    match heading {
+        Some(crate::player::QueueHeading::Source(source)) => match source.kind {
+            SourceKind::Radio | SourceKind::LikedSongs => source.label(),
+            _ => source.name.clone(),
+        },
+        _ => "My queue".to_owned(),
+    }
+}
+
+/// The songs of a queue as a playlist would hold them: everything the panel lists, in its order,
+/// each song once.
+pub fn queue_video_ids(view: &crate::player::QueueView) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    view.history
+        .iter()
+        .chain(view.current.iter())
+        .chain(view.upcoming.iter())
+        .map(|row| row.video_id.clone())
+        .filter(|id| seen.insert(id.clone()))
+        .collect()
 }
 
 // ---- where it goes ---------------------------------------------------------------------------
@@ -616,6 +672,10 @@ impl TrackMenu {
                 Facts {
                     in_crate: crate::crate_list::handle(cx)
                         .is_some_and(|c| c.read(cx).contains(t.track.video_id.as_str())),
+                    song_saved: self
+                        .edits
+                        .read(cx)
+                        .song_saved(t.track.video_id.as_str(), cx),
                     artist_blocked: blocked(blocked_artist_of(&t.track)),
                     ..Facts::default()
                 },
@@ -638,6 +698,7 @@ impl TrackMenu {
                     },
                 )
             }
+            Subject::Queue => (false, Facts::default()),
         };
         groups_with(&open.subject, liked, facts)
     }
@@ -859,7 +920,7 @@ impl TrackMenu {
                 let artist = match &subject {
                     Subject::Track(t) => blocked_artist_of(&t.track),
                     Subject::Artist(a) => Some(a.blocked()),
-                    Subject::Collection(_) => None,
+                    Subject::Collection(_) | Subject::Queue => None,
                 };
                 if let (Some(artist), Some(model)) = (artist, crate::blocked_artists::handle(cx)) {
                     model.update(cx, |m, cx| {
@@ -896,8 +957,24 @@ impl TrackMenu {
             (Command::RemoveFromLibrary, Subject::Collection(c)) => {
                 self.edits.update(cx, |e, cx| e.set_saved(c, false, cx));
             }
-            (Command::Rename, Subject::Collection(c)) => {
-                playlist_dialog::open(Mode::Rename(c), window, cx);
+            (Command::SaveToLibrary, Subject::Track(t)) => {
+                let video = t.track.video_id.as_str().to_owned();
+                self.edits.update(cx, |e, cx| e.set_song_saved(video, true, cx));
+            }
+            (Command::RemoveFromLibrary, Subject::Track(t)) => {
+                let video = t.track.video_id.as_str().to_owned();
+                self.edits.update(cx, |e, cx| e.set_song_saved(video, false, cx));
+            }
+            (Command::SaveQueue, Subject::Queue) => {
+                let view = self.player.read(cx).queue_view();
+                let video_ids = queue_video_ids(&view);
+                if !video_ids.is_empty() {
+                    let name = queue_playlist_name(view.heading.as_ref());
+                    playlist_dialog::open(Mode::FromQueue { name, video_ids }, window, cx);
+                }
+            }
+            (Command::EditPlaylist, Subject::Collection(c)) => {
+                playlist_dialog::open(Mode::Edit(c), window, cx);
             }
             (Command::DeletePlaylist, Subject::Collection(c)) => {
                 playlist_dialog::open(Mode::Delete(c), window, cx);
@@ -1304,7 +1381,7 @@ mod tests {
                 vec![Play, Shuffle],
                 vec![AddToQueue, StartRadio],
                 vec![CopyLink],
-                vec![Rename, DeletePlaylist],
+                vec![EditPlaylist, DeletePlaylist],
             ]
         );
     }
@@ -1329,7 +1406,7 @@ mod tests {
         );
         // Never both, and never Rename or Delete for what is not yours.
         let all: Vec<Command> = commands_with(&card(), saved(true)).into_iter().flatten().collect();
-        assert!(!all.contains(&SaveToLibrary) && !all.contains(&Rename) && !all.contains(&DeletePlaylist));
+        assert!(!all.contains(&SaveToLibrary) && !all.contains(&EditPlaylist) && !all.contains(&DeletePlaylist));
     }
 
     #[test]

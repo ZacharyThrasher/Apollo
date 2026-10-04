@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use apollo_domain::account::{Validation, ValidationError};
 use apollo_domain::library::{
-    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistTarget, WriteFailure,
+    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy,
+    WriteFailure,
 };
 use apollo_domain::links::ExternalLink;
 use apollo_domain::listing::{LoadFailure, Page};
@@ -16,6 +17,7 @@ use tokio::sync::Notify;
 use crate::artist::{page_from_artist, ArtistPage};
 use crate::explore::{explore_page, mood_playlists, worst, ExplorePage};
 use crate::home::{home_page, HomePage};
+use crate::marks::LibraryMarks;
 use crate::map::{
     account_validation, classify, classify_write, collections_from_grid, history_days,
     liked_from_rating, meta_from_album, meta_from_playlist, page_from_album, page_from_continuation,
@@ -24,6 +26,9 @@ use crate::map::{
 use crate::search::{
     hit_from_item, search_page, search_results, Hit, SearchFilter, SearchPage, SearchResults,
 };
+
+/// The browse id of Library > Songs: the songs saved to the library, apart from Liked Music.
+const LIBRARY_SONGS_BROWSE_ID: &str = "FEmusic_liked_videos";
 
 /// What a pasted link points at, with enough about it to open it without a second lookup.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +48,8 @@ pub enum LinkTarget {
 pub struct InnerTubeSource {
     tube: InnerTube,
     client: YouTubeClient,
+    /// What rows said about the library (shared with every source built from the same marks).
+    marks: Arc<LibraryMarks>,
 }
 
 impl InnerTubeSource {
@@ -70,7 +77,26 @@ impl InnerTubeSource {
         Ok(Self {
             tube: InnerTube::new(session, proxy)?,
             client,
+            marks: Arc::new(LibraryMarks::default()),
         })
+    }
+
+    /// Note library tokens in `marks` instead of a store of this source's own, so a source made
+    /// for search and one made for the library see the same songs.
+    pub fn with_marks(mut self, marks: Arc<LibraryMarks>) -> Self {
+        self.marks = marks;
+        self
+    }
+
+    /// Whether the library holds a song, as the last row of it said, when that row also gave the
+    /// means to change it.
+    pub fn song_saved(&self, video_id: &str) -> Option<bool> {
+        self.marks.state(video_id)
+    }
+
+    /// Forget every library token (the account changed).
+    pub fn forget_library_marks(&self) {
+        self.marks.clear();
     }
 
     /// Bootstraps the anonymous `visitorData` the service expects on requests, once. A failure
@@ -104,6 +130,12 @@ impl InnerTubeSource {
     pub fn set_session(&self, cookie_header: String, data_sync_id: Option<String>) {
         self.tube.set_cookie(Some(cookie_header));
         self.tube.set_data_sync_id(data_sync_id);
+    }
+
+    fn note_sections(&self, sections: &[innertube::Section]) {
+        for section in sections {
+            self.marks.note_items(&section.items);
+        }
     }
 
     /// The account's library playlists (every page of the grid, deduplicated by the client).
@@ -164,6 +196,9 @@ impl InnerTubeSource {
             .history(&self.client)
             .await
             .map_err(|e| classify(&e))?;
+        for group in &groups {
+            self.marks.note_songs(&group.items);
+        }
         Ok(history_days(&groups))
     }
 
@@ -175,6 +210,19 @@ impl InnerTubeSource {
             .playlist(&self.client, &playlist_browse_id(browse_id), None)
             .await
             .map_err(|e| classify(&e))?;
+        self.marks.note_songs(&page.items);
+        Ok(page_from_playlist(&page))
+    }
+
+    /// The songs saved to the library, first page (Library > Songs): a plain list of rows with a
+    /// paging token, read through [`Self::continuation`] like a playlist's.
+    pub async fn library_songs(&self) -> Result<Page<ListedTrack>, LoadFailure> {
+        let page = self
+            .tube
+            .playlist(&self.client, LIBRARY_SONGS_BROWSE_ID, None)
+            .await
+            .map_err(|e| classify(&e))?;
+        self.marks.note_songs(&page.items);
         Ok(page_from_playlist(&page))
     }
 
@@ -189,6 +237,7 @@ impl InnerTubeSource {
             .playlist(&self.client, &browse, None)
             .await
             .map_err(|e| classify(&e))?;
+        self.marks.note_songs(&page.items);
         Ok((page_from_playlist(&page), meta_from_playlist(&page, &browse)))
     }
 
@@ -202,6 +251,7 @@ impl InnerTubeSource {
             .album(&self.client, browse_id)
             .await
             .map_err(|e| classify(&e))?;
+        self.marks.note_songs(&page.items);
         Ok((page_from_album(&page), meta_from_album(&page)))
     }
 
@@ -211,6 +261,7 @@ impl InnerTubeSource {
             .album(&self.client, browse_id)
             .await
             .map_err(|e| classify(&e))?;
+        self.marks.note_songs(&page.items);
         Ok(page_from_album(&page))
     }
 
@@ -221,6 +272,7 @@ impl InnerTubeSource {
             .artist(&self.client, browse_id)
             .await
             .map_err(|e| classify(&e))?;
+        self.marks.note_songs(&page.top_songs);
         page_from_artist(&page, browse_id)
     }
 
@@ -231,6 +283,7 @@ impl InnerTubeSource {
             .home(&self.client, None)
             .await
             .map_err(|e| classify(&e))?;
+        self.note_sections(&parsed.sections);
         home_page(&parsed)
     }
 
@@ -252,6 +305,7 @@ impl InnerTubeSource {
             .home_continuation(&self.client, token)
             .await
             .map_err(|e| classify(&e))?;
+        self.note_sections(&parsed.sections);
         home_page(&parsed)
     }
 
@@ -263,6 +317,7 @@ impl InnerTubeSource {
             .related(&self.client, video_id)
             .await
             .map_err(|e| classify(&e))?;
+        self.note_sections(&parsed.sections);
         home_page(&parsed)
     }
 
@@ -319,6 +374,7 @@ impl InnerTubeSource {
             .playlist_continuation(&self.client, token)
             .await
             .map_err(|e| classify(&e))?;
+        self.marks.note_songs(&page.items);
         Ok(page_from_continuation(&page))
     }
 
@@ -336,6 +392,8 @@ impl InnerTubeSource {
             .search_all(&self.client, query, true)
             .await
             .map_err(|e| classify(&e))?;
+        self.marks.note_items(&parsed.top);
+        self.marks.note_items(&parsed.songs);
         let results = search_results(&parsed);
         if results.is_empty() && results.skipped > 0 {
             return Err(LoadFailure::Parse);
@@ -355,6 +413,7 @@ impl InnerTubeSource {
             .search_filtered(&self.client, query, filter.params())
             .await
             .map_err(|e| classify(&e))?;
+        self.marks.note_items(&parsed.items);
         let page = search_page(&parsed);
         if page.results.is_empty() && page.results.skipped > 0 {
             return Err(LoadFailure::Parse);
@@ -369,6 +428,7 @@ impl InnerTubeSource {
             .search_continuation(&self.client, token)
             .await
             .map_err(|e| classify(&e))?;
+        self.marks.note_items(&parsed.items);
         Ok(search_page(&parsed))
     }
 
@@ -507,6 +567,7 @@ impl InnerTubeSource {
                     .map_err(|e| classify(&e))?;
             }
         }
+        self.marks.note_songs(&next.items);
         Ok(radio_tracks(&next.items, video_id))
     }
 
@@ -519,6 +580,7 @@ impl InnerTubeSource {
             .next(&self.client, None, Some(playlist_id))
             .await
             .map_err(|e| classify(&e))?;
+        self.marks.note_songs(&next.items);
         Ok(radio_tracks(&next.items, ""))
     }
 
@@ -598,6 +660,61 @@ impl InnerTubeSource {
             .rename_playlist(&self.client, bare_playlist_id(playlist_id), title)
             .await
             .map_err(|e| classify_write(&e))
+    }
+
+    /// Create a playlist that already holds `video_ids`, in order, and return its bare id. One
+    /// write, never retried: an unknown outcome comes back as [`WriteFailure::Unknown`].
+    pub async fn create_playlist_with(
+        &self,
+        title: &str,
+        description: &str,
+        privacy: Privacy,
+        video_ids: &[String],
+    ) -> Result<String, WriteFailure> {
+        self.tube
+            .create_playlist_with(&self.client, title, description, privacy.service_word(), video_ids)
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// Change the title, description and visibility of a playlist the account owns: only what
+    /// `edit` carries is sent, in one request. Never retried.
+    pub async fn edit_playlist(
+        &self,
+        playlist_id: &str,
+        edit: &PlaylistEdit,
+    ) -> Result<(), WriteFailure> {
+        self.tube
+            .edit_playlist(
+                &self.client,
+                bare_playlist_id(playlist_id),
+                edit.title.as_deref(),
+                edit.description.as_deref(),
+                edit.privacy.map(Privacy::service_word),
+            )
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// Add a song to the library (`saved`) or take it out, by the token its row carried. A song
+    /// no row has offered the change for is [`WriteFailure::Rejected`] without anything sent.
+    /// Never retried: an unknown outcome is read back from Library > Songs by the caller.
+    pub async fn set_song_saved(&self, video_id: &str, saved: bool) -> Result<(), WriteFailure> {
+        let Some(token) = self.marks.token(video_id, saved) else {
+            return Err(WriteFailure::Rejected);
+        };
+        self.tube
+            .library_feedback(&self.client, &token)
+            .await
+            .map_err(|e| classify_write(&e))?;
+        self.marks.set(video_id, saved);
+        Ok(())
+    }
+
+    /// The library holds the song (`saved`) or not, learned some other way than by this source's
+    /// own write (the caller read the library back).
+    pub fn note_song_saved(&self, video_id: &str, saved: bool) {
+        self.marks.set(video_id, saved);
     }
 
     /// Remove one row (`set_video_id` is the row's own token) of a playlist the account owns.

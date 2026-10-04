@@ -130,6 +130,7 @@ struct Focus {
     tab_albums: FocusHandle,
     tab_artists: FocusHandle,
     tab_history: FocusHandle,
+    tab_songs: FocusHandle,
     tab_stats: FocusHandle,
     /// The sort button, and the popover it opens (not a tab stop).
     sort: FocusHandle,
@@ -218,6 +219,9 @@ pub struct LibraryView {
     focus: Focus,
     playlists_scroll: UniformListScrollHandle,
     albums_scroll: UniformListScrollHandle,
+    /// The Songs tab's virtualized list and its filter field (made when the tab first shows).
+    songs_scroll: UniformListScrollHandle,
+    songs_filter: Option<Entity<TextField>>,
     /// The Artists tab's and the History tab's scrolling columns.
     artists_scroll: ScrollHandle,
     history_scroll: ScrollHandle,
@@ -311,6 +315,7 @@ impl LibraryView {
             tab_albums: stop(cx, 6),
             tab_artists: stop(cx, 6),
             tab_history: stop(cx, 6),
+            tab_songs: stop(cx, 6),
             tab_stats: stop(cx, 6),
             sort: stop(cx, 7),
             sort_menu: cx.focus_handle(),
@@ -348,6 +353,8 @@ impl LibraryView {
             focus,
             playlists_scroll: UniformListScrollHandle::new(),
             albums_scroll: UniformListScrollHandle::new(),
+            songs_scroll: UniformListScrollHandle::new(),
+            songs_filter: None,
             artists_scroll: ScrollHandle::new(),
             history_scroll: ScrollHandle::new(),
             stats_scroll: ScrollHandle::new(),
@@ -521,9 +528,14 @@ impl LibraryView {
         model.depth() == 0 && model.tab() == Tab::Stats
     }
 
-    /// The playlist or album page on screen: its filter field, once it has one.
+    /// The track list on screen's filter field (a playlist or album page's, or the Songs tab's),
+    /// once it has one.
     pub fn filter_field(&self, cx: &App) -> Option<Entity<TextField>> {
-        self.model.read(cx).detail()?;
+        let model = self.model.read(cx);
+        if model.songs_open() {
+            return self.songs_filter.clone();
+        }
+        model.detail()?;
         self.pages.last()?.filter.clone()
     }
 
@@ -546,10 +558,7 @@ impl LibraryView {
 
     /// The rows of the playlist or album on screen that the filter keeps.
     fn visible(&self, cx: &App) -> Visible {
-        let Some(d) = self.model.read(cx).detail() else {
-            return Visible::All(0);
-        };
-        Visible::of(d.listing.items(), &self.filter_text(cx))
+        Visible::of(self.model.read(cx).list_rows(), &self.filter_text(cx))
     }
 
     /// Esc with a filter in use clears it before it closes the page. Whether it did.
@@ -570,6 +579,26 @@ impl LibraryView {
             return Some(field);
         }
         self.model.read(cx).detail()?;
+        let field = self.new_filter(window, cx);
+        self.pages.last_mut()?.filter = Some(field.clone());
+        Some(field)
+    }
+
+    /// The Songs tab's filter field, made on first use.
+    pub(super) fn ensure_songs_filter(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TextField> {
+        if let Some(field) = self.songs_filter.clone() {
+            return field;
+        }
+        let field = self.new_filter(window, cx);
+        self.songs_filter = Some(field.clone());
+        field
+    }
+
+    fn new_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextField> {
         let focus = cx.focus_handle().tab_index(9).tab_stop(true);
         let clear = cx.focus_handle().tab_index(9).tab_stop(true);
         let field = cx.new(|_| TextField::new("Filter", focus, clear));
@@ -584,8 +613,7 @@ impl LibraryView {
             TextFieldEvent::Submit => window.focus(&this.focus.list, cx),
         })
         .detach();
-        self.pages.last_mut()?.filter = Some(field.clone());
-        Some(field)
+        field
     }
 
     fn scroll_handle(&self, cx: &App) -> &UniformListScrollHandle {
@@ -596,6 +624,8 @@ impl LibraryView {
                 .map_or(&self.playlists_scroll, |page| &page.list)
         } else if model.tab() == Tab::Playlists {
             &self.playlists_scroll
+        } else if model.tab() == Tab::Songs {
+            &self.songs_scroll
         } else {
             &self.albums_scroll
         }
@@ -610,6 +640,7 @@ impl LibraryView {
         match model.detail() {
             Some(_) => self.visible(cx).len(),
             None if model.tab() == Tab::History => model.history_count(),
+            None if model.tab() == Tab::Songs => self.visible(cx).len(),
             None if model.tab() == Tab::Stats => model.stats_row_count(),
             None if model.tab() == Tab::Artists => 0,
             None => model.list(model.tab()).len(),
@@ -646,7 +677,7 @@ impl LibraryView {
 
     fn page_rows(&self, cx: &App) -> isize {
         let model = self.model.read(cx);
-        let row = if model.depth() > 0 || matches!(model.tab(), Tab::History | Tab::Stats) {
+        let row = if model.depth() > 0 || matches!(model.tab(), Tab::History | Tab::Songs | Tab::Stats) {
             TRACK_ROW
         } else {
             COLLECTION_ROW
@@ -689,6 +720,12 @@ impl LibraryView {
             }
             None if model.tab() == Tab::History => {
                 self.model.update(cx, |m, cx| m.play_history(index, cx));
+            }
+            None if model.tab() == Tab::Songs => {
+                if let Some(real) = self.visible(cx).get(index) {
+                    self.model
+                        .update(cx, |m, cx| m.request_play(PlayRequest::row(real), cx));
+                }
             }
             None if model.tab() == Tab::Stats => self.activate_stat(index, window, cx),
             None => {
@@ -896,6 +933,7 @@ impl LibraryView {
         let body: AnyElement = match tab {
             Tab::Artists => self.render_artists_tab(accent, window, cx),
             Tab::History => self.render_history_tab(accent, window, cx),
+            Tab::Songs => self.render_songs_tab(accent, window, cx),
             Tab::Stats => self.render_stats_tab(accent, window, cx),
             Tab::Playlists | Tab::Albums => {
                 let (state, count) = {
@@ -979,6 +1017,7 @@ impl LibraryView {
                 Tab::Albums => "Albums",
                 Tab::Artists => "Artists",
                 Tab::History => "History",
+                Tab::Songs => "Songs",
                 Tab::Stats => "Stats",
             },
             ListKind::Tracks => "Tracks",
@@ -1063,7 +1102,7 @@ impl LibraryView {
             model.history_at(self.selected)?
         } else {
             let real = self.visible(cx).get(self.selected)?;
-            model.detail()?.listing.items().get(real)?.clone()
+            model.list_rows().get(real)?.clone()
         };
         Some((row.track, row.thumbnail))
     }
@@ -1093,7 +1132,7 @@ impl LibraryView {
             }
         } else {
             let real = self.visible(cx).get(self.selected)?;
-            model.detail()?.listing.items().get(real)?.clone()
+            model.list_rows().get(real)?.clone()
         };
         Some((
             row.track.video_id.as_str().to_owned(),
@@ -1502,6 +1541,7 @@ impl LibraryView {
         let (ix, real) = (frame.ix, frame.real);
         // The History tab's rows are track rows with no page behind them.
         let history = self.history_open(cx);
+        let songs = self.model.read(cx).songs_open();
         let (row, album_collection, loading, failure, skipped, editable): (
             Option<TrackRow>,
             bool,
@@ -1517,6 +1557,16 @@ impl LibraryView {
                 (row, false, false, None, 0, None)
             } else if history {
                 (model.history_at(real), false, false, None, 0, None)
+            } else if songs {
+                let page = model.songs();
+                (
+                    model.list_rows().get(real).cloned(),
+                    false,
+                    page.is_loading(),
+                    page.failure(),
+                    page.listing.skipped(),
+                    None,
+                )
             } else {
                 let d = model.detail().expect("a page is open");
                 (

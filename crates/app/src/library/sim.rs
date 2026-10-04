@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apollo_domain::library::{
-    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistTarget, WriteFailure,
-    LIKED_MUSIC_BROWSE_ID,
+    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy,
+    WriteFailure, LIKED_MUSIC_BROWSE_ID,
 };
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track};
@@ -29,6 +29,10 @@ pub const PAGE_SIZE: usize = 100;
 pub const LONG_LEN: usize = 3_000;
 
 pub const LONG_ID: &str = "VLPLsimlong";
+/// The simulated Library > Songs list, paged like the long playlist when it is long.
+pub const SONGS_ID: &str = "FEmusic_liked_videos";
+/// How many songs `preset_long_library_songs` puts in the list: three pages.
+pub const LONG_SONGS: usize = 250;
 pub const EMPTY_ID: &str = "VLPLsimempty";
 pub const BROKEN_ID: &str = "VLPLsimbroken";
 const ROAD_TRIP_ID: &str = "VLPLsimroad";
@@ -197,6 +201,15 @@ struct SimState {
     mixes: Vec<String>,
     /// Makes `artist` fail once the page has been seen (the read-back after an unknown write).
     artist_fails: Option<LoadFailure>,
+    /// Video ids in Library > Songs, most recently added first.
+    songs: Vec<String>,
+    /// Songs whose row offered no library toggle, so nothing can be done about them from here.
+    no_toggle: HashSet<String>,
+    /// What playlists were last given as a description and a visibility, by bare id.
+    descriptions: HashMap<String, String>,
+    privacies: HashMap<String, Privacy>,
+    /// The videos a playlist was created with, by bare id.
+    created_with: HashMap<String, Vec<String>>,
 }
 
 impl SimState {
@@ -231,6 +244,17 @@ impl SimState {
             subscribed: Vec::new(),
             mixes: Vec::new(),
             artist_fails: None,
+            songs: vec![
+                FIXTURES[3].id.to_owned(),
+                FIXTURES[1].id.to_owned(),
+                format!("{GENERATED_PREFIX}{:05}", 0),
+                format!("{GENERATED_PREFIX}{:05}", 1),
+                format!("{GENERATED_PREFIX}{:05}", 2),
+            ],
+            no_toggle: HashSet::new(),
+            descriptions: HashMap::new(),
+            privacies: HashMap::new(),
+            created_with: HashMap::new(),
         }
     }
 }
@@ -403,6 +427,51 @@ impl SimLibrary {
     }
 
     /// Liked Music as the service holds it now.
+    /// The video ids in Library > Songs, most recently added first.
+    pub fn library_song_ids(&self) -> Vec<String> {
+        self.state().songs.clone()
+    }
+
+    /// Replace Library > Songs with exactly these videos.
+    pub fn preset_library_songs(&self, ids: &[&str]) {
+        self.state().songs = ids.iter().map(|id| (*id).to_owned()).collect();
+    }
+
+    /// Fill Library > Songs with [`LONG_SONGS`] generated songs (paged).
+    pub fn preset_long_library_songs(&self) {
+        self.state().songs = (0..LONG_SONGS)
+            .map(|n| format!("{GENERATED_PREFIX}{:05}", n + 10))
+            .collect();
+    }
+
+    /// Make this song's row offer no library toggle (the menu then has no save item for it).
+    pub fn hide_library_toggle(&self, video_id: &str) {
+        self.state().no_toggle.insert(video_id.to_owned());
+    }
+
+    /// The description and visibility a playlist was last given.
+    pub fn playlist_details(&self, bare_id: &str) -> (Option<String>, Option<Privacy>) {
+        let state = self.state();
+        (
+            state.descriptions.get(bare_id).cloned(),
+            state.privacies.get(bare_id).copied(),
+        )
+    }
+
+    /// The videos a playlist was created holding.
+    pub fn created_with(&self, bare_id: &str) -> Vec<String> {
+        self.state().created_with.get(bare_id).cloned().unwrap_or_default()
+    }
+
+    fn song_rows(&self) -> Vec<TrackRow> {
+        self.state()
+            .songs
+            .iter()
+            .enumerate()
+            .map(|(n, id)| song_row(id, n))
+            .collect()
+    }
+
     fn liked_rows(&self) -> Vec<TrackRow> {
         self.state()
             .liked
@@ -505,6 +574,27 @@ fn liked_row(id: &str, n: usize) -> TrackRow {
             liked: Some(true),
         },
     }
+}
+
+/// A Library > Songs row for a video id: the fixture or generated track when it is one, else a
+/// plain row named for the id. Library rows carry no occurrence token.
+fn song_row(id: &str, n: usize) -> TrackRow {
+    let mut row = match FIXTURES.iter().find(|f| f.id == id) {
+        Some(f) => fixture_row(f, n),
+        None => match id.strip_prefix(GENERATED_PREFIX).and_then(|n| n.parse::<usize>().ok()) {
+            Some(g) => generated_row(g),
+            None => TrackRow {
+                track: Track::new(id, format!("Song {id}")),
+                occurrence: None,
+                thumbnail: None,
+                explicit: false,
+                liked: None,
+            },
+        },
+    };
+    row.occurrence = None;
+    row.liked = None;
+    row
 }
 
 /// The collections the simulation lists, in service order (Liked Music first, as the service
@@ -968,6 +1058,9 @@ impl SimLibrary {
         if id == LIKED_MUSIC_BROWSE_ID {
             return Some(self.liked_rows());
         }
+        if id == SONGS_ID {
+            return Some(self.song_rows());
+        }
         let bare = id.strip_prefix("VL").unwrap_or(id);
         if let Some(rows) = self.state().edited_rows.get(bare) {
             return Some(rows.clone());
@@ -1038,15 +1131,23 @@ impl LibrarySource for SimLibrary {
         let key = collection.library_key().to_owned();
         let state = self.state();
         let meta = match collection.kind {
-            CollectionKind::Playlist => PageMeta {
-                owned: owned_ids(&state).contains(&key),
-                save_id: Some(key),
-                in_library: None,
-            },
+            CollectionKind::Playlist => {
+                let owned = owned_ids(&state).contains(&key);
+                PageMeta {
+                    owned,
+                    description: owned.then(|| state.descriptions.get(&key).cloned()).flatten(),
+                    privacy: owned
+                        .then(|| state.privacies.get(&key).copied().unwrap_or_default()),
+                    save_id: Some(key),
+                    in_library: None,
+                }
+            }
             CollectionKind::Album => PageMeta {
                 owned: false,
                 save_id: Some(album_save_id(&key)),
                 in_library: Some(library_now(&state).iter().any(|c| c.library_key() == key)),
+                description: None,
+                privacy: None,
             },
         };
         Ok((page, meta))
@@ -1059,6 +1160,39 @@ impl LibrarySource for SimLibrary {
         let offset: usize = offset.parse().map_err(|_| LoadFailure::Parse)?;
         let rows = self.rows(id).ok_or(LoadFailure::Other)?;
         Ok(page_of(id, rows, offset))
+    }
+
+    fn library_songs(&self) -> Result<Page<TrackRow>, LoadFailure> {
+        self.wait(LATENCY);
+        if let Some(f) = self.state().tabs {
+            return Err(f);
+        }
+        Ok(page_of(SONGS_ID, self.song_rows(), 0))
+    }
+
+    fn song_saved(&self, video_id: &str) -> Option<bool> {
+        let state = self.state();
+        (!state.no_toggle.contains(video_id)).then(|| state.songs.iter().any(|id| id == video_id))
+    }
+
+    fn set_song_saved(&self, video_id: &str, saved: bool) -> Result<(), WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        if self.state().no_toggle.contains(video_id) {
+            return Err(WriteFailure::Rejected);
+        }
+        let lands = self.write_answer(
+            if saved { "song-save" } else { "song-unsave" }.to_owned(),
+            video_id,
+        );
+        let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        if applies {
+            let mut state = self.state();
+            state.songs.retain(|id| id != video_id);
+            if saved {
+                state.songs.insert(0, video_id.to_owned());
+            }
+        }
+        lands.map(|_| ())
     }
 
     fn artist(&self, id: &BrowseId) -> Result<ArtistContent, LoadFailure> {
@@ -1407,13 +1541,65 @@ impl LibrarySource for SimLibrary {
         reply
     }
 
-    fn rename_playlist(&self, playlist_id: &str, title: &str) -> Result<(), WriteFailure> {
+    fn create_playlist_with(
+        &self,
+        title: &str,
+        description: &str,
+        privacy: Privacy,
+        video_ids: &[String],
+    ) -> Result<String, WriteFailure> {
         self.wait(PAGE_LATENCY);
-        let (applies, reply) = self.begin_write(format!("rename:{title}"), playlist_id);
+        let (applies, reply) = self.begin_write(format!("create-with:{}", video_ids.len()), title);
+        let id = {
+            let mut state = self.state();
+            let id = format!("PLsimnew{:03}", state.next_playlist);
+            if applies {
+                state.next_playlist += 1;
+                state.created.insert(0, (id.clone(), title.to_owned()));
+                let rows: Vec<TrackRow> = video_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(n, video)| {
+                        let mut row = liked_row(video, n);
+                        row.occurrence = Some(format!("occ-created-{id}-{n}"));
+                        row.liked = None;
+                        row
+                    })
+                    .collect();
+                state.edited_rows.insert(id.clone(), rows);
+                state.created_with.insert(id.clone(), video_ids.to_vec());
+                state.descriptions.insert(id.clone(), description.to_owned());
+                state.privacies.insert(id.clone(), privacy);
+            }
+            id
+        };
+        reply.map(|()| id)
+    }
+
+    fn edit_playlist(&self, playlist_id: &str, edit: &PlaylistEdit) -> Result<(), WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        let mut parts = Vec::new();
+        if let Some(title) = &edit.title {
+            parts.push(format!("title={title}"));
+        }
+        if let Some(description) = &edit.description {
+            parts.push(format!("description={description}"));
+        }
+        if let Some(privacy) = edit.privacy {
+            parts.push(format!("privacy={}", privacy.service_word()));
+        }
+        let (applies, reply) = self.begin_write(format!("edit:{}", parts.join(";")), playlist_id);
         if applies {
-            self.state()
-                .titles
-                .insert(playlist_id.to_owned(), title.to_owned());
+            let mut state = self.state();
+            if let Some(title) = &edit.title {
+                state.titles.insert(playlist_id.to_owned(), title.clone());
+            }
+            if let Some(description) = &edit.description {
+                state.descriptions.insert(playlist_id.to_owned(), description.clone());
+            }
+            if let Some(privacy) = edit.privacy {
+                state.privacies.insert(playlist_id.to_owned(), privacy);
+            }
         }
         reply
     }
@@ -1573,7 +1759,7 @@ fn library_now(state: &SimState) -> Vec<Collection> {
 
 fn page_of(id: &str, rows: Vec<TrackRow>, offset: usize) -> Page<TrackRow> {
     // Only the long playlist is paged; everything else arrives in one page.
-    let size = if id == LONG_ID { PAGE_SIZE } else { usize::MAX };
+    let size = if id == LONG_ID || id == SONGS_ID { PAGE_SIZE } else { usize::MAX };
     let end = offset.saturating_add(size).min(rows.len());
     let continuation = (end < rows.len()).then(|| format!("{id}@{end}"));
     Page {

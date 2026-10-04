@@ -8,14 +8,16 @@
 //! change is offered back to the account, which merges it only if its epoch still matches: the
 //! same rule the resolver follows. Nothing here logs a cookie, a query or a result.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use apollo_account::identity::cookie_header_for;
 use apollo_account::jar::CookieJar;
 use apollo_account::service::{AccountService, IdentityState};
 use apollo_domain::links::ExternalLink;
 use apollo_domain::listing::LoadFailure;
-use apollo_provider::{InnerTubeSource, LinkTarget, SearchFilter, SearchPage, SearchResults};
+use apollo_provider::{
+    InnerTubeSource, LibraryMarks, LinkTarget, SearchFilter, SearchPage, SearchResults,
+};
 use apollo_services_common::{unix_now, SessionProvider, SessionUnavailable};
 
 use crate::search::SearchSource;
@@ -84,9 +86,17 @@ struct Synced {
 #[derive(Default)]
 pub(super) struct SyncedSource {
     synced: Mutex<Option<Synced>>,
+    /// Where the sources made here note what rows say about the library, when the caller wants
+    /// them shared with the library screen's own source.
+    marks: Option<Arc<LibraryMarks>>,
 }
 
 impl SyncedSource {
+    /// Sources that note library tokens in `marks`.
+    pub(super) fn with_marks(marks: Arc<LibraryMarks>) -> Self {
+        Self { synced: Mutex::new(None), marks: Some(marks) }
+    }
+
     pub(super) fn source_for(
         &self,
         session: &RequestSession,
@@ -105,6 +115,10 @@ impl SyncedSource {
                     session.data_sync_id.clone(),
                 )
                 .map_err(|_| LoadFailure::Other)?;
+                let source = match &self.marks {
+                    Some(marks) => source.with_marks(marks.clone()),
+                    None => source,
+                };
                 *synced = Some(Synced {
                     epoch: session.epoch,
                     source,
@@ -123,7 +137,9 @@ pub struct AccountSearch {
 }
 
 impl AccountSearch {
-    pub fn new(account: AccountService) -> Result<Self, String> {
+    /// `marks` is where search rows' library tokens are kept: the library screen's source reads
+    /// them from the same place, so a song found in Search can be saved from its menu.
+    pub fn new(account: AccountService, marks: Arc<LibraryMarks>) -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("apollo-search")
@@ -133,7 +149,7 @@ impl AccountSearch {
         Ok(Self {
             account,
             runtime,
-            sources: SyncedSource::default(),
+            sources: SyncedSource::with_marks(marks),
         })
     }
 }

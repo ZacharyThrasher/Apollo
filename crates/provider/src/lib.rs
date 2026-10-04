@@ -7,6 +7,7 @@ mod artist;
 mod explore;
 mod home;
 mod map;
+mod marks;
 mod search;
 mod source;
 
@@ -23,6 +24,7 @@ pub use search::{
     search_page, search_results, track_from_item, Hit, SearchFilter, SearchPage, SearchResults,
     TopResult,
 };
+pub use marks::LibraryMarks;
 pub use source::{InnerTubeSource, LinkTarget};
 
 /// The play-reporting types the source speaks, so callers need not depend on the InnerTube crate.

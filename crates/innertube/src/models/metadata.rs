@@ -106,7 +106,7 @@ pub struct SongItem {
 /// separate write from the rating, and the only handle on it is an opaque token minted with the
 /// row. That is why this rides along on every `SongItem` instead of being asked for later, and why
 /// a row we built ourselves can't offer the action.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LibraryToggle {
     /// Whether the song is in the library right now, per the menu YouTube sent with the row.
     pub in_library: bool,
@@ -755,7 +755,7 @@ fn removable(node: &Value) -> bool {
 /// toggles that must not match: "Add to liked songs" (FAVORITE/UNFAVORITE, a rating and a
 /// different list) and "Pin to Listen again" (KEEP/KEEP_OFF). Live-checked 2026-08-28: search rows
 /// send BOOKMARK_BORDER/BOOKMARK; the LIBRARY_* spellings are kept as YouTube has used them too.
-fn library_toggle(node: &Value) -> Option<LibraryToggle> {
+pub(crate) fn library_toggle(node: &Value) -> Option<LibraryToggle> {
     /// The bookmark is empty when the song is not in the library — that direction adds it.
     const ADDS: [&str; 2] = ["BOOKMARK_BORDER", "LIBRARY_ADD"];
     /// Filled: it is in there, and this direction takes it out.
