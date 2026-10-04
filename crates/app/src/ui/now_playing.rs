@@ -4,6 +4,7 @@
 
 use std::rc::Rc;
 
+use apollo_domain::audio::{speed_label, NORMAL_SPEED, SPEEDS};
 use apollo_theme::tokens::{ambient, layout, lyrics, radius, spacing, typography};
 use gpui::{
     div, img, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, ImageSource,
@@ -17,6 +18,7 @@ use crate::style::{self, color};
 use crate::ui::anchor;
 use crate::ui::art_tile::art_tile_fluid;
 use crate::ui::button::{Handler, IconButton};
+use crate::ui::choice_menu::{self, Choice};
 use crate::ui::lyrics_pane::LyricsPane;
 use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus, PaneTabs};
 use crate::ui::player_bar::text_line;
@@ -25,11 +27,16 @@ use crate::ui::related_pane::RelatedPane;
 use crate::ui::row_actions::{heart_icon, heart_label};
 use crate::ui::sleep_menu;
 use crate::ui::slider::SliderState;
+use crate::ui::text_button::TextButton;
 use crate::ui::transport::{self, on_off, TransportFocus};
 
 /// Tab order: after the nav rail, before the queue panel and the player bar.
 /// Where the add-to-playlist popover of Now Playing is anchored.
 const PLAYLIST_ANCHOR: &str = "np-playlist-anchor";
+/// Where the speed popover hangs from.
+const SPEED_ANCHOR: &str = "np-speed-anchor";
+/// How wide the speed popover is: four short rows.
+const SPEED_MENU_WIDTH: f32 = 120.0;
 /// Where the sleep timer popover is anchored.
 const SLEEP_ANCHOR: &str = "np-sleep-anchor";
 const TAB_CLOSE: isize = 6;
@@ -75,6 +82,7 @@ pub struct NowPlaying {
     focus_close: FocusHandle,
     focus_like: FocusHandle,
     focus_playlist: FocusHandle,
+    focus_speed: FocusHandle,
     focus_sleep: FocusHandle,
     focus: TransportFocus,
     progress: Entity<SliderState>,
@@ -107,6 +115,7 @@ impl NowPlaying {
             // Same slot as the transport: they sit above it, so they come first.
             focus_like: stop(cx, TAB_TRANSPORT),
             focus_playlist: stop(cx, TAB_TRANSPORT),
+            focus_speed: stop(cx, TAB_TRANSPORT),
             focus_sleep: stop(cx, TAB_TRANSPORT),
             focus: TransportFocus {
                 shuffle: stop(cx, TAB_TRANSPORT),
@@ -200,6 +209,38 @@ impl Render for NowPlaying {
                 }
             });
             let add = anchor::anchored(PLAYLIST_ANCHOR, add);
+            // Playback speed: the current one as a text button (1.0x until changed, and again
+            // on each launch), in full strength once it is not normal.
+            let speed = self.player.read(cx).speed();
+            let mut speed_button =
+                TextButton::new("np-speed", &self.focus_speed, speed_label(speed), v.accent)
+                    .on_click({
+                        let player = self.player.clone();
+                        move |window, cx| {
+                            let current = player.read(cx).speed();
+                            let choices = SPEEDS
+                                .iter()
+                                .map(|s| Choice::new(speed_label(*s), *s == current))
+                                .collect();
+                            let player = player.clone();
+                            choice_menu::open(
+                                SPEED_ANCHOR,
+                                SPEED_MENU_WIDTH,
+                                choices,
+                                move |index, _, cx| {
+                                    if let Some(speed) = SPEEDS.get(index) {
+                                        player.update(cx, |p, cx| p.set_speed(*speed, cx));
+                                    }
+                                },
+                                window,
+                                cx,
+                            );
+                        }
+                    });
+            if speed != NORMAL_SPEED {
+                speed_button = speed_button.strong();
+            }
+            let speed_button = anchor::anchored(SPEED_ANCHOR, speed_button);
             let on = v.sleep.is_on();
             let moon = IconButton::new(
                 "np-sleep",
@@ -230,11 +271,13 @@ impl Render for NowPlaying {
             div()
                 .flex()
                 .flex_row()
+                .items_center()
                 .flex_none()
                 .gap(px(spacing::S1))
                 .child(div().debug_selector(|| "np-like".into()).child(like))
                 .child(div().debug_selector(|| "np-playlist".into()).child(add))
                 .child(div().debug_selector(|| "np-sleep".into()).child(moon))
+                .child(div().debug_selector(|| "np-speed".into()).child(speed_button))
         });
 
         let text = div()
