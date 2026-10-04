@@ -266,7 +266,10 @@ fn sign_out_handler(
             // The saved queue is the account's own: it goes with the session.
             m.forget_saved_queue();
         });
-        // So is the Crate.
+        // So are the Crate and the blocked artists.
+        if let Some(blocked) = crate::blocked_artists::handle(cx) {
+            blocked.update(cx, |m, cx| m.forget(cx));
+        }
         if let Some(crate_model) = crate::crate_list::handle(cx) {
             crate_model.update(cx, |m, cx| m.forget(cx));
         }

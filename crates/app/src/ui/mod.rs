@@ -2,6 +2,7 @@ pub mod account_page;
 pub mod anchor;
 pub mod art_tile;
 pub mod audio_page;
+pub mod blocked_dialog;
 pub mod button;
 pub mod card;
 pub mod crate_page;

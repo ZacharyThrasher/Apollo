@@ -12,6 +12,7 @@
 //! * The saved queue is bound to an opaque account key; a different account
 //!   (or logout) purges it instead of replaying it.
 
+mod blocked;
 mod crate_list;
 mod lyrics;
 mod loudness;

@@ -38,11 +38,7 @@ const OUTLINE: f32 = 1.0;
 
 #[derive(IntoElement)]
 pub struct ChipRow {
-    active: SearchChip,
-    accent: Accent,
-    /// One tab stop per chip, in [`SearchChip::ROW`] order.
-    focus: Vec<FocusHandle>,
-    on_pick: Rc<dyn Fn(SearchChip, &mut Window, &mut App) + 'static>,
+    row: PillRow,
 }
 
 impl ChipRow {
@@ -52,7 +48,54 @@ impl ChipRow {
         focus: &[FocusHandle],
         on_pick: impl Fn(SearchChip, &mut Window, &mut App) + 'static,
     ) -> Self {
+        let labels = SearchChip::ROW.iter().map(|c| SharedString::from(c.label())).collect();
+        let active = SearchChip::ROW.iter().position(|c| *c == active);
         Self {
+            row: PillRow::new(
+                "search-chip",
+                labels,
+                active,
+                accent,
+                focus,
+                move |ix, window, cx| on_pick(SearchChip::ROW[ix], window, cx),
+            ),
+        }
+    }
+}
+
+impl RenderOnce for ChipRow {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.row.render(window, cx)
+    }
+}
+
+/// A row of pills, one of which may be active: the search chips and Home's mood chips are both
+/// this. Left and Right move between the pills and Enter picks the one in focus; the row is one
+/// tab stop (the active pill, or the first when none is).
+#[derive(IntoElement)]
+pub struct PillRow {
+    /// Names the row's elements: `{prefix}-{label}` is each pill's id and test selector.
+    prefix: &'static str,
+    labels: Vec<SharedString>,
+    active: Option<usize>,
+    accent: Accent,
+    /// One tab stop per pill, in label order.
+    focus: Vec<FocusHandle>,
+    on_pick: Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>,
+}
+
+impl PillRow {
+    pub fn new(
+        prefix: &'static str,
+        labels: Vec<SharedString>,
+        active: Option<usize>,
+        accent: Accent,
+        focus: &[FocusHandle],
+        on_pick: impl Fn(usize, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            prefix,
+            labels,
             active,
             accent,
             focus: focus.to_vec(),
@@ -61,7 +104,7 @@ impl ChipRow {
     }
 }
 
-impl RenderOnce for ChipRow {
+impl RenderOnce for PillRow {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let handles = self.focus.clone();
         let step = move |delta: isize| {
@@ -79,26 +122,32 @@ impl RenderOnce for ChipRow {
         let pick_on = self.on_pick.clone();
         let pick = move |window: &mut Window, cx: &mut App| {
             if let Some(at) = pick_handles.iter().position(|h| h.is_focused(window)) {
-                pick_on(SearchChip::ROW[at], window, cx);
+                pick_on(at, window, cx);
             }
         };
-        let chips: Vec<_> = SearchChip::ROW
+        let stop = self.active.unwrap_or(0);
+        let chips: Vec<_> = self
+            .labels
             .into_iter()
             .zip(self.focus)
-            .map(|(chip, focus)| {
+            .enumerate()
+            .map(|(ix, (label, focus))| {
+                let on_pick = self.on_pick.clone();
                 chip_view(
-                    chip,
-                    chip == self.active,
+                    self.prefix,
+                    label,
+                    Some(ix) == self.active,
+                    ix == stop,
                     self.accent,
                     focus,
-                    self.on_pick.clone(),
+                    move |window, cx| on_pick(ix, window, cx),
                     window,
                     cx,
                 )
             })
             .collect();
         div()
-            .id("search-chips")
+            .id(SharedString::from(format!("{}s", self.prefix)))
             .key_context(KEY_CONTEXT)
             .on_action(move |_: &ChipLeft, window, cx| left(window, cx))
             .on_action(move |_: &ChipRight, window, cx| right(window, cx))
@@ -111,16 +160,19 @@ impl RenderOnce for ChipRow {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn chip_view(
-    chip: SearchChip,
+    prefix: &'static str,
+    label: SharedString,
     active: bool,
+    tab_stop: bool,
     accent: Accent,
     focus: FocusHandle,
-    on_pick: Rc<dyn Fn(SearchChip, &mut Window, &mut App) + 'static>,
+    on_pick: impl Fn(&mut Window, &mut App) + 'static,
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
-    let id: SharedString = format!("search-chip-{}", chip.label()).into();
+    let id: SharedString = format!("{prefix}-{label}").into();
     let fade = window.use_keyed_state(id.clone(), cx, |_, _| HoverFade::default());
     let (level, moving) = fade.read(cx).level(Instant::now());
     if moving {
@@ -129,7 +181,6 @@ fn chip_view(
     let animations = !cx.reduce_motion();
     let ring = keyboard_focused(&focus, window);
     let accent = color::accent(accent);
-    let label = chip.label();
     style::text_style(div(), typography::BODY, cx)
         .debug_selector({
             let id = id.to_string();
@@ -159,9 +210,9 @@ fn chip_view(
         .whitespace_nowrap()
         .cursor_pointer()
         // One stop for the row: the active chip. The rest take focus from the arrows.
-        .track_focus(&focus.clone().tab_stop(active))
+        .track_focus(&focus.clone().tab_stop(tab_stop))
         .role(gpui::Role::Button)
-        .aria_label(label)
+        .aria_label(label.clone())
         .on_hover(move |hovered, _, cx| {
             fade.update(cx, |s, cx| {
                 s.set(*hovered, Instant::now(), animations);
@@ -171,7 +222,7 @@ fn chip_view(
         .on_click(move |event, window, cx| {
             // The keyboard picks through `ChipPick`; Space is the play/pause key.
             if !matches!(event, gpui::ClickEvent::Keyboard(_)) {
-                on_pick(chip, window, cx);
+                on_pick(window, cx);
             }
         })
         .child(

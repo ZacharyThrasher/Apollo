@@ -679,6 +679,19 @@ impl InnerTube {
         Ok(())
     }
 
+    /// [`Self::rate`] sent exactly once, whatever happens (no transport retry). For a rating the
+    /// owner asked for by hand where the outcome of a timeout is read back rather than guessed.
+    pub async fn rate_once(
+        &self,
+        client: &YouTubeClient,
+        video_id: &str,
+        rating: Rating,
+    ) -> Result<(), Error> {
+        let body = rate_body(self.context_for(client), video_id);
+        self.post_once(rate_path(rating), client, &body, true).await?;
+        Ok(())
+    }
+
     /// Subscribe to or unsubscribe from an artist's channel (`subscription/subscribe` and
     /// `subscription/unsubscribe`, the requests the artist page's own button makes). `channel_id`
     /// is the artist's `UC…` id.

@@ -706,3 +706,81 @@ fn album_cards_and_song_cards_on_shelves_have_menus(cx: &mut TestAppContext) {
     right_click(vcx, "home-2-2");
     assert!(matches!(menu_subject(&page, vcx), Some(Subject::Track(_))));
 }
+
+// ---- mood chips -----------------------------------------------------------------------------------
+
+fn shown(page: &Page, vcx: &mut VisualTestContext) -> Vec<String> {
+    page.home.read_with(vcx, |m, _| {
+        m.display_shelves().iter().map(|s| s.title.clone()).collect()
+    })
+}
+
+#[gpui::test]
+fn the_mood_chips_sit_under_the_header_and_nothing_is_picked_at_first(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    assert!(vcx.debug_bounds("home-mood-chips").is_some());
+    for label in ["Relax", "Workout", "Focus"] {
+        let id = format!("mood-chip-{label}");
+        assert!(
+            vcx.debug_bounds(Box::leak(id.into_boxed_str())).is_some(),
+            "{label} is a pill"
+        );
+    }
+    assert_eq!(page.home.read_with(vcx, |m, _| m.selected_chip().map(str::to_owned)), None);
+    assert_eq!(shown(&page, vcx)[0], "Quick picks");
+}
+
+#[gpui::test]
+fn a_mood_replaces_the_feed_and_tapping_it_again_brings_the_feed_back(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    let feed = shown(&page, vcx);
+
+    click(vcx, "mood-chip-Relax");
+    assert_eq!(
+        page.home.read_with(vcx, |m, _| m.selected_chip().map(str::to_owned)),
+        Some("sim-chip-relax".to_string())
+    );
+    let mood = shown(&page, vcx);
+    assert_eq!(mood[0], "Relax picks", "{mood:?}");
+    assert_ne!(mood, feed);
+    assert!(page.library.home_log().contains(&"chip:sim-chip-relax".to_string()));
+
+    click(vcx, "mood-chip-Relax");
+    assert_eq!(page.home.read_with(vcx, |m, _| m.selected_chip().map(str::to_owned)), None);
+    assert_eq!(shown(&page, vcx), feed, "the whole feed is back");
+}
+
+#[gpui::test]
+fn picking_another_mood_switches_to_it(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    click(vcx, "mood-chip-Relax");
+    click(vcx, "mood-chip-Workout");
+    assert_eq!(shown(&page, vcx)[0], "Workout picks");
+}
+
+#[gpui::test]
+fn a_mood_that_fails_says_so_and_retry_loads_it(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.library.set_chip_failure(Some(LoadFailure::Network));
+    click(vcx, "mood-chip-Focus");
+    assert!(vcx.debug_bounds("home-notice-action").is_some(), "Retry is on screen");
+    page.library.set_chip_failure(None);
+    click(vcx, "home-notice-action");
+    assert_eq!(shown(&page, vcx)[0], "Focus picks");
+}
+
+#[gpui::test]
+fn the_mood_chips_switch_hides_the_row_and_drops_a_picked_mood(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    let feed = shown(&page, vcx);
+    click(vcx, "mood-chip-Relax");
+    let settings = page.shell.read_with(vcx, |s, cx| s.settings(cx));
+    settings.update(vcx, |m, cx| m.set(&apollo_app::settings::MOOD_CHIPS, false, cx));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("home-mood-chips").is_none());
+    assert_eq!(shown(&page, vcx), feed, "the feed shows in full without chips");
+
+    settings.update(vcx, |m, cx| m.set(&apollo_app::settings::MOOD_CHIPS, true, cx));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("home-mood-chips").is_some());
+}

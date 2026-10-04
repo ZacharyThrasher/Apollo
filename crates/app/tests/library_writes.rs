@@ -879,3 +879,80 @@ fn a_queue_rows_heart_follows_a_like_made_elsewhere(cx: &mut TestAppContext) {
     click(vcx, "queue-like-2");
     assert_eq!(liked(&page, vcx, PLAIN), Some(false));
 }
+
+// ---- not interested --------------------------------------------------------------------------
+
+#[gpui::test]
+fn not_interested_is_sent_once_and_a_liked_song_stops_being_liked(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.writes
+        .update(vcx, |w, cx| w.not_interested(LIKED, cx));
+    assert_eq!(liked(&page, vcx, LIKED), Some(false), "the heart goes at once");
+    assert!(page.writes.read_with(vcx, |w, _| w.is_disliking(LIKED)));
+    vcx.run_until_parked();
+    assert_eq!(log(&page), [entry("dislike", LIKED)]);
+    assert_eq!(page.sim.disliked_ids(), [LIKED.to_owned()]);
+    assert!(!page.sim.liked_ids().contains(&LIKED.to_owned()), "the service dropped the like");
+    assert_eq!(liked(&page, vcx, LIKED), Some(false));
+    assert!(page.writes.read_with(vcx, |w, _| w.is_disliked(LIKED) && !w.is_disliking(LIKED)));
+    assert_eq!(notice(&page, vcx), None, "success is silent");
+    // Asking again sends nothing.
+    page.writes
+        .update(vcx, |w, cx| w.not_interested(LIKED, cx));
+    vcx.run_until_parked();
+    assert_eq!(log(&page).len(), 1);
+}
+
+#[gpui::test]
+fn a_refused_not_interested_puts_the_heart_back_and_says_so(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.sim
+        .set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Rejected));
+    page.writes
+        .update(vcx, |w, cx| w.not_interested(LIKED, cx));
+    vcx.run_until_parked();
+    assert_eq!(liked(&page, vcx, LIKED), Some(true), "still liked");
+    assert_eq!(notice(&page, vcx).as_deref(), Some("Couldn't send that"));
+    assert_eq!(log(&page).len(), 1, "a definite no is not read back or retried");
+    assert!(page.sim.disliked_ids().is_empty());
+    assert!(!page.writes.read_with(vcx, |w, _| w.is_disliked(LIKED)));
+}
+
+#[gpui::test]
+fn a_lost_reply_is_read_back_and_a_landed_thumbs_down_stands(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    next_track(&page, vcx);
+    page.sim.set_write_behaviour(WriteBehaviour::LandsReplyLost);
+    page.writes
+        .update(vcx, |w, cx| w.not_interested(PLAIN, cx));
+    vcx.run_until_parked();
+    assert_eq!(log(&page), [entry("dislike", PLAIN)], "sent once, never retried");
+    assert!(page.writes.read_with(vcx, |w, _| w.is_disliked(PLAIN)));
+    assert_eq!(notice(&page, vcx), None);
+}
+
+#[gpui::test]
+fn a_lost_reply_for_a_thumbs_down_that_did_not_land_is_an_error(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.sim
+        .set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Unknown));
+    page.writes
+        .update(vcx, |w, cx| w.not_interested(LIKED, cx));
+    vcx.run_until_parked();
+    assert_eq!(log(&page), [entry("dislike", LIKED)], "sent once, never retried");
+    assert_eq!(liked(&page, vcx, LIKED), Some(true));
+    assert_eq!(notice(&page, vcx).as_deref(), Some("Couldn't send that"));
+    assert!(!page.writes.read_with(vcx, |w, _| w.is_disliked(LIKED)));
+}
+
+#[gpui::test]
+fn not_interested_waits_out_a_like_that_is_still_out(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    next_track(&page, vcx);
+    page.writes.update(vcx, |w, cx| w.toggle_like(PLAIN, cx));
+    page.writes
+        .update(vcx, |w, cx| w.not_interested(PLAIN, cx));
+    assert_eq!(notice(&page, vcx).as_deref(), Some("Try again in a moment"));
+    vcx.run_until_parked();
+    assert_eq!(log(&page), [entry("like", PLAIN)], "the two never cross");
+}

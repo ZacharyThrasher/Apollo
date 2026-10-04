@@ -251,6 +251,14 @@ impl LibrarySource for InnerTubeLibrary {
         })
     }
 
+    fn home_chip(&self, params: &str) -> Result<HomePage, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.home_chip(params).await
+        })
+    }
+
     fn home_more(&self, token: &str) -> Result<HomePage, LoadFailure> {
         let source = self.source()?;
         self.rt
@@ -308,6 +316,22 @@ impl LibrarySource for InnerTubeLibrary {
         self.rt.block_on(async {
             source.ensure_visitor_data().await;
             source.set_liked(video_id, liked).await
+        })
+    }
+
+    fn set_disliked(&self, video_id: &str) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.set_disliked(video_id).await
+        })
+    }
+
+    fn disliked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.disliked(video_id).await
         })
     }
 

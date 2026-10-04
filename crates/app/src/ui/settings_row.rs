@@ -2,9 +2,10 @@
 //! label on the left and the app's switch pill on the right. No helper text. A row is one focus stop and one
 //! click target; Enter toggles it (Space stays the global play/pause key).
 //!
-//! Two variants share the row: [`SettingsRow::select`] shows the current choice and a chevron
-//! on the right and opens a popover when pressed, and [`SettingsRow::action`] puts a control
-//! (a text button) beside a switch; pressing the control does not flip the switch.
+//! Three variants share the row: [`SettingsRow::select`] shows the current choice and a chevron
+//! on the right and opens a popover when pressed, [`SettingsRow::action`] puts a control
+//! (a text button) beside a switch; pressing the control does not flip the switch, and
+//! [`SettingsRow::manage`] shows a short fact (a count) and a control, with no switch.
 
 use std::time::Instant;
 
@@ -105,6 +106,8 @@ pub struct SettingsRow {
     value: Option<SharedString>,
     /// A control shown before the switch.
     action: Option<AnyElement>,
+    /// A manage row: this text (a count) in text.secondary and the control, no switch.
+    fact: Option<SharedString>,
     ring: gpui::Hsla,
     accent: Accent,
     on_toggle: Option<Toggle>,
@@ -125,6 +128,7 @@ impl SettingsRow {
             on,
             value: None,
             action: None,
+            fact: None,
             ring: color::accent(accent),
             accent,
             on_toggle: None,
@@ -143,6 +147,21 @@ impl SettingsRow {
     ) -> Self {
         let mut row = Self::switch(id, focus, label, false, accent);
         row.value = Some(value.into());
+        row
+    }
+
+    /// A row with no switch: `fact` (a count, say) in text.secondary and the control given to
+    /// [`SettingsRow::action`] on the right. Pressing the row itself runs
+    /// [`SettingsRow::on_open`], like pressing the control.
+    pub fn manage(
+        id: &'static str,
+        focus: &FocusHandle,
+        label: impl Into<SharedString>,
+        fact: impl Into<SharedString>,
+        accent: Accent,
+    ) -> Self {
+        let mut row = Self::switch(id, focus, label, false, accent);
+        row.fact = Some(fact.into());
         row
     }
 
@@ -166,7 +185,7 @@ impl SettingsRow {
 }
 
 impl RenderOnce for SettingsRow {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let on = self.on;
         let animations = !cx.reduce_motion();
         let state = window.use_keyed_state(ElementId::from(self.id), cx, |_, _| RowState {
@@ -181,10 +200,19 @@ impl RenderOnce for SettingsRow {
         let hover_state = state.clone();
         let id = self.id;
         let value = self.value.clone();
-        let is_select = value.is_some();
-        let accessible = match &value {
-            Some(value) => SharedString::from(format!("{}, {}", self.label, value)),
-            None => self.label.clone(),
+        let is_manage = self.fact.is_some();
+        let is_select = value.is_some() || is_manage;
+        let accessible = match (&value, &self.fact) {
+            (Some(value), _) => SharedString::from(format!("{}, {}", self.label, value)),
+            (None, Some(fact)) => SharedString::from(format!("{}, {}", self.label, fact)),
+            (None, None) => self.label.clone(),
+        };
+        let fact = self.fact.clone();
+        // The control sits beside the switch, or (a manage row) beside the fact.
+        let (fact_action, switch_action) = if is_manage {
+            (self.action.take(), None)
+        } else {
+            (None, self.action.take())
         };
 
         div()
@@ -235,8 +263,29 @@ impl RenderOnce for SettingsRow {
                     .text_color(color::text_primary())
                     .child(self.label),
             )
+            .when_some(fact, |d, fact| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(spacing::S3))
+                        .child(
+                            style::text_style(div(), typography::BODY, cx)
+                                .debug_selector(|| format!("{}-fact", id))
+                                .text_color(color::text_secondary())
+                                .child(fact),
+                        )
+                        .children(fact_action.map(|control| {
+                            div()
+                                .flex_none()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(control)
+                        })),
+                )
+            })
             .when(!is_select, |d| {
-                d.children(self.action.map(|control| {
+                d.children(switch_action.map(|control| {
                     // The control's own clicks stay its own: stopped here, the row never sees
                     // the press and so does not flip.
                     div()
