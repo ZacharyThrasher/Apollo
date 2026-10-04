@@ -311,3 +311,76 @@ fn schema_has_no_secret_bearing_columns() {
         }
     }
 }
+
+// ---- the Crate -------------------------------------------------------------------------------
+
+fn crate_row(id: &str, added_ms: i64) -> crate::CrateRow {
+    crate::CrateRow {
+        track: rich_track(id),
+        thumbnail: Some(format!("https://example.invalid/{id}.jpg")),
+        added_ms,
+    }
+}
+
+fn crate_ids(rows: &[crate::CrateRow]) -> Vec<&str> {
+    rows.iter().map(|r| r.track.video_id.as_str()).collect()
+}
+
+#[test]
+fn the_crate_round_trips_newest_first() {
+    let mut store = Store::open_in_memory().unwrap();
+    assert!(store.crate_load("acct").unwrap().is_empty());
+    store.crate_add("acct", &crate_row("a", 10)).unwrap();
+    store.crate_add("acct", &crate_row("b", 20)).unwrap();
+    // The same millisecond: the later insert is the newer.
+    store.crate_add("acct", &crate_row("c", 20)).unwrap();
+    let rows = store.crate_load("acct").unwrap();
+    assert_eq!(crate_ids(&rows), ["c", "b", "a"]);
+    assert_eq!(rows[2], crate_row("a", 10), "tracks come back whole");
+}
+
+#[test]
+fn adding_a_song_twice_keeps_one_copy_where_it_was() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.crate_add("acct", &crate_row("a", 10)).unwrap();
+    store.crate_add("acct", &crate_row("b", 20)).unwrap();
+    store.crate_add("acct", &crate_row("a", 30)).unwrap();
+    let rows = store.crate_load("acct").unwrap();
+    assert_eq!(crate_ids(&rows), ["b", "a"]);
+    assert_eq!(rows[1].added_ms, 10);
+}
+
+#[test]
+fn removing_and_clearing_the_crate() {
+    let mut store = Store::open_in_memory().unwrap();
+    for (i, id) in ["a", "b", "c"].iter().enumerate() {
+        store.crate_add("acct", &crate_row(id, i as i64)).unwrap();
+    }
+    store.crate_remove("acct", "b").unwrap();
+    assert_eq!(crate_ids(&store.crate_load("acct").unwrap()), ["c", "a"]);
+    store.crate_clear("acct").unwrap();
+    assert!(store.crate_load("acct").unwrap().is_empty());
+    // The artists went with their songs.
+    let n: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM crate_artists", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn the_crate_never_crosses_accounts() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.crate_add("acct-1", &crate_row("a", 1)).unwrap();
+    assert!(store.crate_load("acct-2").unwrap().is_empty());
+    // The first account's crate is gone, not merely hidden.
+    assert!(store.crate_load("acct-1").unwrap().is_empty());
+}
+
+#[test]
+fn sign_out_purges_the_crate() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.crate_add("acct", &crate_row("a", 1)).unwrap();
+    store.crate_purge().unwrap();
+    assert!(store.crate_load("acct").unwrap().is_empty());
+}

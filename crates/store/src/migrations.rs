@@ -78,4 +78,30 @@ Migration {
             fetched_at INTEGER NOT NULL
         );
     ",
+}, Migration {
+    version: 4,
+    sql: "
+        -- The Crate: songs set aside to remember, per account. Track fields only.
+        CREATE TABLE crate_items (
+            account_key TEXT    NOT NULL,
+            video_id    TEXT    NOT NULL,
+            title       TEXT    NOT NULL,
+            album_title TEXT,
+            album_id    TEXT,
+            duration_ms INTEGER,
+            thumbnail   TEXT,
+            added_ms    INTEGER NOT NULL,
+            PRIMARY KEY (account_key, video_id)
+        );
+        CREATE TABLE crate_artists (
+            account_key TEXT    NOT NULL,
+            video_id    TEXT    NOT NULL,
+            pos         INTEGER NOT NULL,
+            name        TEXT    NOT NULL,
+            browse_id   TEXT,
+            PRIMARY KEY (account_key, video_id, pos),
+            FOREIGN KEY (account_key, video_id)
+                REFERENCES crate_items (account_key, video_id) ON DELETE CASCADE
+        );
+    ",
 }];

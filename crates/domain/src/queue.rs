@@ -289,6 +289,28 @@ impl Queue {
         self.canonical.retain(|c| keep.contains(c));
     }
 
+    /// The id the next entry will get. Ids below it have been used; ids at or above never have.
+    pub fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// Put `entry`, which is not in this queue, in the current slot as a row the user removed:
+    /// it keeps playing but is left out of future cycles. What was current moves to history,
+    /// unless it was itself removed. Used when a queue from the past is put back around a track
+    /// that is playing now and was not part of it. `entry`'s id must be below [`Queue::next_id`].
+    pub fn keep_playing(&mut self, entry: QueueEntry) {
+        debug_assert!(entry.id.0 < self.next_id && !self.contains(entry.id));
+        if let Some(prev) = self.current.take() {
+            if !prev.removed {
+                self.history.push(prev.entry);
+            }
+        }
+        self.current = Some(Current {
+            entry,
+            removed: true,
+        });
+    }
+
     /// Make an upcoming or history entry the current one (the user picked it in the queue).
     ///
     /// Jumping forward moves the current entry and everything skipped into history, in play

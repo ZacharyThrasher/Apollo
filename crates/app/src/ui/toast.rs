@@ -81,3 +81,55 @@ pub fn toast(
         .justify_center()
         .child(pill)
 }
+
+/// How long the undo pill stays, fade-out included.
+pub const PILL_FOR: Duration = Duration::from_secs(2);
+
+/// The one success message the app shows: after Ctrl+Z / Ctrl+Shift+Z, because putting the queue
+/// back is otherwise invisible. The same pill as the error toast without the icon: bg.overlay,
+/// text.secondary, bottom-centre above the player bar. It cannot be clicked and takes no focus.
+pub fn pill(
+    id: u64,
+    text: gpui::SharedString,
+    fade: Fade,
+    animate: bool,
+    cx: &App,
+) -> impl IntoElement {
+    let pill = style::text_style(div(), typography::BODY, cx)
+        .id(("queue-pill", id))
+        .debug_selector(|| "queue-pill".into())
+        .flex()
+        .flex_row()
+        .items_center()
+        .px(px(spacing::S3))
+        .py(px(spacing::S2))
+        .rounded(px(radius::LARGE))
+        .bg(color::bg_overlay())
+        .border_1()
+        .border_color(color::border_subtle())
+        .text_color(color::text_secondary())
+        .role(gpui::Role::Status)
+        .aria_label(text.clone())
+        .child(text);
+    let pill: AnyElement = if animate {
+        let leaving = fade == Fade::Out;
+        pill.with_animation(
+            ("queue-pill-fade", id * 2 + u64::from(leaving)),
+            Animation::new(FADE),
+            move |el, t| el.opacity(if leaving { 1.0 - t } else { t }),
+        )
+        .into_any_element()
+    } else {
+        pill.into_any_element()
+    };
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom(px(layout::PLAYER_BAR_HEIGHT + spacing::S4))
+        .flex()
+        .flex_row()
+        .justify_center()
+        // The row spans the window; only the pill itself takes mouse events.
+        .child(pill)
+}

@@ -309,6 +309,30 @@ impl Coordinator {
         fx
     }
 
+    /// Put `queue` in place of the live one (undo and redo). When it has the same entry current
+    /// as the live queue, nothing audible changes: playback carries on and only what is up next
+    /// differs. When it names another track (or none), what was playing is stopped and that
+    /// track is left paused at `position_ms`, the way a restart leaves it: the next Play opens
+    /// it there.
+    pub fn replace_queue(&mut self, queue: Queue, position_ms: u64) -> Vec<Effect> {
+        let same = queue.current().map(|e| e.id) == self.queue.current().map(|e| e.id);
+        let mut fx = Vec::new();
+        if same {
+            self.queue = queue;
+            self.reconcile_preload(&mut fx);
+            return fx;
+        }
+        self.stop_all(&mut fx);
+        self.queue = queue;
+        self.skipped.clear();
+        self.error = None;
+        self.preload_failed = None;
+        if self.queue.current().is_some() {
+            self.position_ms = position_ms;
+        }
+        fx
+    }
+
     // ---- reducer ------------------------------------------------------
 
     pub fn handle(&mut self, event: Event) -> Vec<Effect> {
@@ -928,6 +952,41 @@ mod tests {
             result: Ok(LeaseId(2)),
         });
         assert!(has_open(&fx));
+    }
+
+    #[test]
+    fn replacing_the_queue_around_the_same_track_does_not_touch_playback() {
+        let mut c = Coordinator::default();
+        let (load, _) = start_playing(&mut c, &["a", "b", "c"]);
+        let mut q = Queue::restore(c.queue().snapshot()).unwrap();
+        q.clear_upcoming();
+        let fx = c.replace_queue(q, 0);
+        assert!(!fx.contains(&Effect::Stop));
+        assert!(!fx.contains(&Effect::Cancel { load }));
+        assert_eq!(c.phase(), Phase::Playing);
+        assert_eq!(c.active_load(), Some(load));
+        assert_eq!(c.queue().upcoming().count(), 0);
+    }
+
+    #[test]
+    fn replacing_the_queue_with_another_current_track_leaves_it_paused_at_its_position() {
+        let mut c = Coordinator::default();
+        let (load, _) = start_playing(&mut c, &["a", "b"]);
+        let mut other = Queue::new();
+        other.play_context(tracks(&["x", "y"]), 0);
+        let fx = c.replace_queue(other, 42_000);
+        assert!(fx.contains(&Effect::Cancel { load }));
+        assert!(fx.contains(&Effect::Stop));
+        assert_eq!(c.intent(), Intent::Paused);
+        assert_eq!(c.phase(), Phase::Idle);
+        assert_eq!(c.position_ms(), 42_000);
+        assert_eq!(cur(&c), "x");
+        // The next Play resolves it and opens it where it was left.
+        let fx = c.handle(Event::Play);
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Resolve { resume_ms: 42_000, .. }
+        )));
     }
 
     #[test]
