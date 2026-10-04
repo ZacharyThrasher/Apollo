@@ -2,11 +2,17 @@
 //! main window, for keeping music in a corner of the screen while the main window is away.
 //!
 //! Square art on the left (double-click it to go back), title and artist in the middle, previous,
-//! play/pause and next on the right, a thin accent progress line along the bottom edge, and an
-//! expand button in the top-right corner that shows while the pointer is over the window.
-//! Everything that is not art or a button drags the window.
+//! play/pause and next on the right with a compact volume slider under them, a thin accent
+//! progress line along the bottom edge, and an expand button in the top-right corner that shows
+//! while the pointer is over the window. Everything that is not art or a button drags the
+//! window, and the mouse wheel anywhere over it changes the volume by 5%.
 //!
-//! **HUD mode** (Settings > Window) turns the same window into an overlay for watching and
+//! Left alone for a few seconds the controls fade out and then the whole window dims; the
+//! pointer coming back restores both at once (`hud.rs`, `IdleFade`). With "Show lyrics" on, the
+//! current synced lyric line sits under the artist (here and in the HUD), cross-fading as it
+//! changes. All of it is Settings > Mini player.
+//!
+//! **HUD mode** (Settings > Mini player) turns the same window into an overlay for watching and
 //! controlling music over a game: a 320x64 panel (art, title, artist, a thin progress line) on
 //! a transparent window with room around it for its shadow, always on top, never the active
 //! window (it cannot take the keyboard), and click-through until the pointer is over it. Over
@@ -21,25 +27,33 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use apollo_lyrics::Lyrics;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use gpui::{
-    actions, black, div, point, prelude::*, px, relative, white, AnyElement, App, BoxShadow,
-    ClickEvent, Context, Div, Entity, FocusHandle, Focusable, IntoElement, KeyBinding,
-    ParentElement, Render, RenderImage, SharedString, Styled, Subscription, Window,
-    WindowControlArea,
+    actions, black, canvas, div, point, prelude::*, px, relative, white, AnyElement, App,
+    BoxShadow, ClickEvent, Context, DispatchPhase, Div, Entity, FocusHandle, Focusable,
+    IntoElement, KeyBinding, ParentElement, Render, RenderImage, ScrollDelta, ScrollWheelEvent,
+    SharedString, Styled, Subscription, Window, WindowControlArea,
 };
 
 use crate::assets::Icon;
-use crate::hud::{HudFade, Swap, SETTLE, SWAP_SLIDE};
+use crate::hud::{
+    wheel_steps, HudFade, IdleFade, LineFade, Swap, SETTLE, SWAP_SLIDE, WHEEL_VOLUME_STEP,
+};
 use crate::library::LibraryWrites;
+use crate::lyrics::{current_line, LyricsModel, LyricsState};
 use crate::player::{PlayerModel, Status};
-use crate::settings::{SettingsModel, HUD_AUTO_HIDE, MINI_PLAYER_ON_TOP};
-use crate::style::color;
+use crate::settings::{
+    SettingsModel, HUD_AUTO_HIDE, MINI_DIM, MINI_FADE_CONTROLS, MINI_PLAYER_ON_TOP,
+    MINI_SHOW_LYRICS, MINI_SHOW_VOLUME,
+};
+use crate::style::{self, color};
 use crate::ui::art_tile::{art_tile, art_tile_rounded};
 use crate::ui::button::IconButton;
 use crate::ui::player_bar::text_line;
 use crate::ui::row_actions::{heart_icon, heart_label};
 use crate::ui::shell::{NextTrack, PreviousTrack, TogglePlay};
+use crate::ui::slider::{Slider, SliderState};
 use crate::window_state::{self, Rect};
 
 actions!(apollo_mini, [ExpandMiniPlayer]);
@@ -57,6 +71,12 @@ const PLAY_BUTTON: f32 = 36.0;
 /// The expand button is a small corner glyph, not a main control.
 const EXPAND_BUTTON: f32 = 24.0;
 const PROGRESS_HEIGHT: f32 = 2.0;
+/// The compact volume slider under the transport buttons.
+const VOLUME_WIDTH: f32 = 72.0;
+/// The transport row: previous, play/pause, next and the gaps between.
+const CONTROLS_W: f32 = 2.0 * SIDE_BUTTON + PLAY_BUTTON + 2.0 * spacing::S1;
+/// One line of lyrics: 12px type, so a 16px row.
+const LYRIC_LINE_H: f32 = 16.0;
 /// How often the HUD looks at where the pointer is (clicks fall through it, so it gets no
 /// mouse events to tell it).
 pub const POLL: Duration = Duration::from_millis(50);
@@ -102,6 +122,13 @@ enum Region {
     Expand,
 }
 
+/// The lyric lines on screen for one frame, each with its opacity: the current one, and the
+/// one leaving while the cross-fade runs. Empty still takes the row's room.
+#[derive(Clone, Default)]
+struct LyricParts {
+    lines: Vec<(SharedString, f32)>,
+}
+
 /// What the HUD shows of a track, kept so a change can cross-fade from the last one.
 #[derive(Clone)]
 struct Shown {
@@ -128,6 +155,7 @@ pub struct MiniPlayer {
     player: Entity<PlayerModel>,
     settings: Entity<SettingsModel>,
     writes: Entity<LibraryWrites>,
+    lyrics: Entity<LyricsModel>,
     /// Goes back to the main window.
     on_expand: Rc<dyn Fn(&mut Window, &mut App)>,
     focus: FocusHandle,
@@ -152,6 +180,16 @@ pub struct MiniPlayer {
     prev: Option<Shown>,
     swap: Swap,
     like: FocusHandle,
+    /// How visible the controls and the window are (the plain mini player).
+    idle: IdleFade,
+    volume_state: Entity<SliderState>,
+    volume_focus: FocusHandle,
+    /// Touchpad scroll not yet worth a volume step.
+    wheel_carry: f32,
+    /// The lyric line showing, and the one it is cross-fading away from.
+    lyric: Option<SharedString>,
+    lyric_prev: Option<SharedString>,
+    lyric_fade: LineFade,
     /// Where the window has sat still since when, and the spot it was last snapped for.
     settle: Option<(Rect, Instant)>,
     snapped: Option<Rect>,
@@ -167,6 +205,7 @@ impl MiniPlayer {
         player: Entity<PlayerModel>,
         settings: Entity<SettingsModel>,
         writes: Entity<LibraryWrites>,
+        lyrics: Entity<LyricsModel>,
         hud: bool,
         on_expand: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
@@ -190,23 +229,47 @@ impl MiniPlayer {
                     this.shown = now_shown;
                 }
                 if text {
-                    // A new song: the HUD shows itself again for a moment.
+                    // A new song: it shows itself again for a moment.
                     let now = (this.clock)();
                     this.fade.wake(now);
+                    this.idle.wake(now);
                 }
+                this.sync_lyric(cx);
                 cx.notify();
             }),
             cx.observe(&settings, |_, _, cx| cx.notify()),
             cx.observe(&writes, |_, _, cx| cx.notify()),
+            cx.observe(&lyrics, |this, _, cx| {
+                this.sync_lyric(cx);
+                cx.notify();
+            }),
         ];
         let view = player.read(cx).view();
-        let auto_hide = settings.read(cx).get(&HUD_AUTO_HIDE);
-        Self {
+        let (auto_hide, fade_controls, dim) = {
+            let s = settings.read(cx);
+            (
+                s.get(&HUD_AUTO_HIDE),
+                s.get(&MINI_FADE_CONTROLS),
+                s.get(&MINI_DIM),
+            )
+        };
+        let now = Instant::now();
+        let mut this = Self {
             hud,
-            fade: HudFade::new(Instant::now(), auto_hide),
+            fade: HudFade::new(now, auto_hide),
+            idle: IdleFade::new(now, fade_controls, dim),
+            volume_state: cx.new(|_| SliderState::default()),
+            volume_focus: cx.focus_handle(),
+            wheel_carry: 0.0,
+            lyric: None,
+            lyric_prev: None,
+            lyric_fade: LineFade::default(),
+            lyrics,
             pointer_inside: false,
-            // The shadow's margin around the panel is not the HUD.
-            pointer: Rc::new(|window| crate::platform::pointer_over(window, HUD_PAD)),
+            // In HUD mode the shadow's margin around the panel is not the HUD.
+            pointer: Rc::new(move |window| {
+                crate::platform::pointer_over(window, if hud { HUD_PAD } else { 0.0 })
+            }),
             clock: Rc::new(Instant::now),
             click_through: None,
             shown: Shown {
@@ -232,7 +295,50 @@ impl MiniPlayer {
             rounded: false,
             on_top: None,
             _subs: subs,
+        };
+        this.lyric = this.current_lyric(cx);
+        this
+    }
+
+    /// The synced lyric line being sung now, if the track has synced lyrics and a line has
+    /// started. A blank line (an instrumental gap) shows nothing.
+    fn current_lyric(&self, cx: &App) -> Option<SharedString> {
+        let player = self.player.read(cx);
+        let video = player.current_video()?;
+        let LyricsState::Ready(lyrics) = self.lyrics.read(cx).state(Some(video.as_str())) else {
+            return None;
+        };
+        let Lyrics::Synced(lines) = &*lyrics else {
+            return None;
+        };
+        let line = lines.get(current_line(lines, player.view().position_ms)?)?;
+        let text = line.text.trim();
+        (!text.is_empty()).then(|| SharedString::from(text.to_owned()))
+    }
+
+    /// Follows the lyrics to the current line, cross-fading when it changes.
+    fn sync_lyric(&mut self, cx: &mut Context<Self>) {
+        let line = self.current_lyric(cx);
+        if line != self.lyric {
+            self.lyric_prev = std::mem::replace(&mut self.lyric, line);
+            self.lyric_fade.start((self.clock)());
+            cx.notify();
         }
+    }
+
+    /// The lyric line the window is showing (tests).
+    pub fn lyric_line(&self) -> Option<&str> {
+        self.lyric.as_deref()
+    }
+
+    /// How visible the plain mini player's controls are, 0 to 1.
+    pub fn controls_level(&self) -> f32 {
+        self.idle.controls()
+    }
+
+    /// How visible the plain mini player's window is, 1.0 solid to 0.6 dimmed.
+    pub fn window_level(&self) -> f32 {
+        self.idle.window()
     }
 
     /// Gives the keyboard to the window (Space, Ctrl+arrows and Esc work at once).
@@ -287,19 +393,28 @@ impl MiniPlayer {
     /// Replaces the clock the fade runs on (tests).
     pub fn set_clock(&mut self, clock: impl Fn() -> Instant + 'static, cx: &App) {
         self.clock = Rc::new(clock);
-        let auto_hide = self.settings.read(cx).get(&HUD_AUTO_HIDE);
-        self.fade = HudFade::new((self.clock)(), auto_hide);
+        let (auto_hide, fade_controls, dim) = {
+            let s = self.settings.read(cx);
+            (
+                s.get(&HUD_AUTO_HIDE),
+                s.get(&MINI_FADE_CONTROLS),
+                s.get(&MINI_DIM),
+            )
+        };
+        let now = (self.clock)();
+        self.fade = HudFade::new(now, auto_hide);
+        self.idle = IdleFade::new(now, fade_controls, dim);
     }
 
-    /// Starts what HUD mode needs: the window never becomes the active one, clicks pass
-    /// through it, and a poll follows the pointer, the fade and where the window is dropped.
-    pub fn start_hud(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.hud {
-            return;
+    /// Starts what the window needs to move on its own: a poll follows the pointer and drives
+    /// the fades. In HUD mode the window also never becomes the active one, clicks pass through
+    /// it, and the poll watches where the window is dropped.
+    pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hud {
+            crate::platform::set_no_activate(window);
+            self.click_through = Some(true);
+            crate::platform::set_click_through(window, true);
         }
-        crate::platform::set_no_activate(window);
-        self.click_through = Some(true);
-        crate::platform::set_click_through(window, true);
         cx.spawn_in(window, async move |this, cx| loop {
             cx.background_executor().timer(POLL).await;
             if this
@@ -320,11 +435,20 @@ impl MiniPlayer {
         let inside = (self.pointer)(window);
         if inside != self.pointer_inside {
             self.pointer_inside = inside;
-            self.fade.set_hovered(inside);
-            // Solid and clickable under the pointer; otherwise the game gets every click.
-            self.click_through = Some(!inside);
-            crate::platform::set_click_through(window, !inside);
             changed = true;
+            if self.hud {
+                self.fade.set_hovered(inside);
+                // Solid and clickable under the pointer; otherwise the game gets every click.
+                self.click_through = Some(!inside);
+                crate::platform::set_click_through(window, !inside);
+            }
+        }
+        if !self.hud {
+            changed |= self.step_idle(now, cx);
+            if changed {
+                cx.notify();
+            }
+            return;
         }
         let auto_hide = self.settings.read(cx).get(&HUD_AUTO_HIDE);
         self.fade.set_auto_hide(auto_hide, now);
@@ -335,6 +459,7 @@ impl MiniPlayer {
             let _ = self.swap.progress(now, !cx.reduce_motion());
             changed = true;
         }
+        changed |= self.lyric_fade.is_running();
 
         // The panel is what snaps, not the window around it.
         let rect = Rect::from_bounds(window.bounds());
@@ -357,6 +482,38 @@ impl MiniPlayer {
         }
     }
 
+    /// Moves the plain mini player's idle fade on: true when anything changed.
+    fn step_idle(&mut self, now: Instant, cx: &App) -> bool {
+        let (fade_controls, dim) = {
+            let s = self.settings.read(cx);
+            (s.get(&MINI_FADE_CONTROLS), s.get(&MINI_DIM))
+        };
+        let before = (self.idle.controls(), self.idle.window());
+        self.idle.set_options(fade_controls, dim, now);
+        self.idle.set_animated(!cx.reduce_motion());
+        self.idle.set_hovered(self.expand_visible(), now);
+        self.idle.step(now);
+        let moved = before != (self.idle.controls(), self.idle.window());
+        moved || self.lyric_fade.is_running()
+    }
+
+    /// A turn of the mouse wheel or a touchpad scroll: five percent of volume a notch.
+    fn wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        if self.hud || !self.settings.read(cx).get(&MINI_SHOW_VOLUME) {
+            return;
+        }
+        let (y, lines) = match event.delta {
+            ScrollDelta::Lines(delta) => (delta.y, true),
+            ScrollDelta::Pixels(delta) => (f32::from(delta.y), false),
+        };
+        let (steps, carry) = wheel_steps(self.wheel_carry, y, lines);
+        self.wheel_carry = carry;
+        if steps != 0 {
+            let delta = (steps.clamp(-10, 10) as i8) * WHEEL_VOLUME_STEP;
+            self.player.update(cx, |m, cx| m.nudge_volume(delta, cx));
+        }
+    }
+
     /// The always-on-top choice last handed to the platform; `None` before the first frame.
     pub fn on_top_applied(&self) -> Option<bool> {
         self.on_top
@@ -372,6 +529,11 @@ impl MiniPlayer {
             let _ = this.update(cx, |m, cx| {
                 if m.hover[region as usize] != *hovered {
                     m.hover[region as usize] = *hovered;
+                    // Coming back restores the controls and the window at once, not on the
+                    // next poll.
+                    let now = (m.clock)();
+                    let over = m.expand_visible();
+                    m.idle.set_hovered(over, now);
                     cx.notify();
                 }
             });
@@ -421,6 +583,11 @@ impl MiniPlayer {
         let accent = v.accent;
         let ready = v.status == Status::Ready;
         let controls = ready && v.has_track;
+        let (show_volume, show_lyrics) = {
+            let s = self.settings.read(cx);
+            (s.get(&MINI_SHOW_VOLUME), s.get(&MINI_SHOW_LYRICS))
+        };
+        let controls_level = self.idle.controls();
 
         let (play_icon, play_label) = if v.busy {
             (Icon::Spinner, "Pause")
@@ -435,9 +602,7 @@ impl MiniPlayer {
                 .enabled(controls)
         };
         let transport = div()
-            .id("mini-controls")
-            .occlude()
-            .on_hover(self.hover_listener(Region::Controls, cx))
+            .id("mini-transport")
             .flex()
             .flex_row()
             .flex_none()
@@ -481,6 +646,64 @@ impl MiniPlayer {
                     }),
             );
 
+        // The volume slider shares the main app's volume: same value, same saving.
+        let volume_value = if v.muted {
+            0.0
+        } else {
+            f32::from(v.volume) / 100.0
+        };
+        let volume = div()
+            .id("mini-volume")
+            .debug_selector(|| "mini-volume".into())
+            .w(px(VOLUME_WIDTH))
+            .child(
+                Slider::new(
+                    "mini-volume-slider",
+                    &self.volume_state,
+                    &self.volume_focus,
+                    "Volume",
+                    accent,
+                )
+                .value(volume_value)
+                .value_text(format!("{}%", (volume_value * 100.0).round() as u32))
+                .enabled(ready)
+                .on_change({
+                    let p = self.player.clone();
+                    move |frac, committed, _, cx| {
+                        let percent = (frac * 100.0).round() as u8;
+                        p.update(cx, |m, cx| {
+                            m.set_volume(percent, cx);
+                            if committed {
+                                m.save_volume();
+                            }
+                        });
+                    }
+                }),
+            );
+
+        // On the right: the buttons with the volume under them. They fade out when idle, and
+        // while they are gone the text takes their room.
+        let right = (controls_level > 0.0).then(|| {
+            div()
+                .id("mini-controls")
+                .debug_selector(|| "mini-controls".into())
+                .occlude()
+                .on_hover(self.hover_listener(Region::Controls, cx))
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right(px(spacing::S2))
+                .w(px(CONTROLS_W))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .opacity(controls_level)
+                .child(transport)
+                .when(show_volume, |d| d.child(volume))
+        });
+        let reserve = (CONTROLS_W + spacing::S3) * controls_level;
+
         // Double-clicking the art goes back to the main window.
         let art = div()
             .id("mini-art")
@@ -498,11 +721,16 @@ impl MiniPlayer {
             })
             .child(art_tile(ART, v.art.clone()));
 
+        let lyric = show_lyrics.then(|| {
+            let parts = self.lyric_parts(window, cx);
+            Self::lyric_row(&parts, cx)
+        });
         let text = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
+            .mr(px(reserve))
             .child(text_line(
                 "mini-title",
                 v.title.clone(),
@@ -516,7 +744,8 @@ impl MiniPlayer {
                 typography::BODY,
                 color::text_secondary(),
                 cx,
-            ));
+            ))
+            .children(lyric);
 
         let fraction = match v.duration_ms {
             Some(total) if total > 0 => (v.position_ms as f32 / total as f32).clamp(0.0, 1.0),
@@ -561,6 +790,27 @@ impl MiniPlayer {
                 )
         });
 
+        // The wheel is read for the whole window: the art and the buttons block the pointer from
+        // the root, so a listener there would miss them.
+        let wheel = {
+            let this = cx.weak_entity();
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    let this = this.clone();
+                    window.on_mouse_event(
+                        move |event: &ScrollWheelEvent, phase: DispatchPhase, _, cx: &mut App| {
+                            if phase == DispatchPhase::Capture && bounds.contains(&event.position) {
+                                let _ = this.update(cx, |m, cx| m.wheel(event, cx));
+                            }
+                        },
+                    );
+                },
+            )
+            .absolute()
+            .size_full()
+        };
+
         div()
             .id("mini-player")
             .key_context(KEY_CONTEXT)
@@ -582,6 +832,8 @@ impl MiniPlayer {
             .size_full()
             .overflow_hidden()
             .bg(color::bg_base())
+            // Idle: the whole window dims, content and background together.
+            .opacity(self.idle.window())
             // Under everything: wherever nothing else is, the pointer drags the window.
             .child(
                 div()
@@ -601,17 +853,72 @@ impl MiniPlayer {
                     .gap(px(spacing::S3))
                     .px(px(spacing::S2))
                     .child(art)
-                    .child(text)
-                    .child(transport),
+                    .child(text),
             )
+            .children(right)
             .child(progress)
+            .child(wheel)
             .children(expand)
     }
 }
 
 impl MiniPlayer {
-    /// One title-over-artist column, centred, `dy` pixels down from its place and at `opacity`.
-    fn hud_column(shown: &Shown, dy: f32, opacity: f32, right: f32, cx: &App) -> Div {
+    /// The lyric lines to draw now, moving the cross-fade on and asking for frames while it runs.
+    fn lyric_parts(&mut self, window: &mut Window, cx: &App) -> LyricParts {
+        let progress = self
+            .lyric_fade
+            .progress((self.clock)(), !cx.reduce_motion());
+        if progress.is_some() {
+            window.request_animation_frame();
+        } else {
+            self.lyric_prev = None;
+        }
+        let t = progress.unwrap_or(1.0);
+        let mut lines = Vec::new();
+        if let Some(line) = &self.lyric {
+            lines.push((line.clone(), t));
+        }
+        if let (Some(prev), Some(_)) = (&self.lyric_prev, progress) {
+            lines.push((prev.clone(), 1.0 - t));
+        }
+        LyricParts { lines }
+    }
+
+    /// One line of lyrics, 12px text.secondary, single line with an ellipsis; the lines in
+    /// `parts` are laid over each other so they cross-fade in place.
+    fn lyric_row(parts: &LyricParts, cx: &App) -> Div {
+        let mut row = div()
+            .debug_selector(|| "mini-lyric".into())
+            .relative()
+            .w_full()
+            .h(px(LYRIC_LINE_H))
+            .flex_none();
+        for (text, opacity) in &parts.lines {
+            row = row.child(
+                style::text_style(
+                    div().absolute().top_0().left_0().right_0(),
+                    typography::HUD_ARTIST,
+                    cx,
+                )
+                .truncate()
+                .text_color(color::text_secondary())
+                .opacity(*opacity)
+                .child(text.clone()),
+            );
+        }
+        row
+    }
+
+    /// One title-over-artist column, centred, `dy` pixels down from its place and at `opacity`,
+    /// with the lyric row under the artist when lyrics are on.
+    fn hud_column(
+        shown: &Shown,
+        dy: f32,
+        opacity: f32,
+        right: f32,
+        lyric: Option<&LyricParts>,
+        cx: &App,
+    ) -> Div {
         let line = |text: SharedString, style: typography::TextStyle, c: gpui::Hsla| {
             crate::style::text_style(div(), style, cx)
                 .truncate()
@@ -638,6 +945,7 @@ impl MiniPlayer {
                 typography::HUD_ARTIST,
                 color::text_secondary(),
             ))
+            .when_some(lyric, |d, parts| d.child(Self::lyric_row(parts, cx)))
     }
 
     /// The HUD: only the 320x64 panel, with the window around it left see-through for its shadow.
@@ -657,6 +965,10 @@ impl MiniPlayer {
         } else {
             self.prev = None;
         }
+        let show_lyrics = self.settings.read(cx).get(&MINI_SHOW_LYRICS);
+        let lyric = show_lyrics.then(|| self.lyric_parts(window, cx));
+        // The leaving title keeps the row's room but not the line itself.
+        let gap = show_lyrics.then(LyricParts::default);
         let solid = self.fade.solid();
         let fill = HUD_FILL_ALPHA + (1.0 - HUD_FILL_ALPHA) * solid;
         // Room for the controls over the end of the text, eased in with them.
@@ -679,6 +991,7 @@ impl MiniPlayer {
                         -SWAP_SLIDE * t,
                         1.0 - t,
                         reserve,
+                        gap.as_ref(),
                         cx,
                     ))
                     .child(Self::hud_column(
@@ -686,6 +999,7 @@ impl MiniPlayer {
                         SWAP_SLIDE * (1.0 - t),
                         t,
                         reserve,
+                        lyric.as_ref(),
                         cx,
                     ))
                 },
@@ -696,7 +1010,16 @@ impl MiniPlayer {
                         .prev
                         .as_ref()
                         .is_some_and(|prev| prev.text_differs(&self.shown))),
-                |d| d.child(Self::hud_column(&self.shown, 0.0, 1.0, reserve, cx)),
+                |d| {
+                    d.child(Self::hud_column(
+                        &self.shown,
+                        0.0,
+                        1.0,
+                        reserve,
+                        lyric.as_ref(),
+                        cx,
+                    ))
+                },
             );
 
         // Double-clicking the art goes back to the main window; a new cover fades in over the old.
