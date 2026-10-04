@@ -83,6 +83,10 @@ icons! {
     MoonFilled => "weather-moon-filled",
     BoxRegular => "box-regular",
     BoxFilled => "box-filled",
+    Copy => "copy-regular",
+    Open => "open-regular",
+    ThumbDislike => "thumb-dislike-regular",
+    PersonProhibited => "person-prohibited-regular",
 }
 
 pub struct Assets;

@@ -5,6 +5,10 @@
 //!   ([`Access::Open`]). Shelves after it come in on demand ([`HomeModel::load_more`]).
 //! * Reopening Home after [`STALE_AFTER`] fetches the first batch again in the background; what
 //!   is on screen stays until the new one arrives, and a failed refresh leaves it alone.
+//! * The mood chips above the feed ("Relax", "Workout") come with the first batch. Picking one
+//!   asks the service for that mood's feed and shows it in place of the feed; picking it again
+//!   clears it. A chip's feed is not paged, not cached and not refreshed: leaving the chip
+//!   brings the ordinary feed back as it was.
 //! * A different account (or a sign-out) drops everything, and answers still in flight for the
 //!   old one are discarded (`rev`).
 //! * The first batch is also kept in the page cache ([`crate::page_cache`]). At launch it is drawn
@@ -17,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use apollo_domain::listing::LoadFailure;
-use apollo_provider::{HomeItem, HomePage, HomeShelf};
+use apollo_provider::{HomeChip, HomeItem, HomePage, HomeShelf};
 use gpui::{Context, Entity};
 
 use crate::library::LibrarySource;
@@ -52,6 +56,21 @@ pub enum Phase {
     Loading,
     Ready,
     Failed(LoadFailure),
+}
+
+/// What the picked mood chip's feed is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChipPhase {
+    Loading,
+    Ready,
+    Failed(LoadFailure),
+}
+
+/// The mood chip that is picked and the feed it asked for.
+struct ChipFeed {
+    params: String,
+    phase: ChipPhase,
+    shelves: Vec<Arc<HomeShelf>>,
 }
 
 /// The state of the batch after the last one on screen.
@@ -99,6 +118,14 @@ pub struct HomeModel {
     personal_for: Option<String>,
     /// Bumped by every personal refresh and drop; an older answer is dropped.
     personal_rev: u64,
+    /// Home > Mood chips: the chip row is shown.
+    chips_on: bool,
+    /// The chips the feed came with, in the service's order.
+    chips: Vec<HomeChip>,
+    /// The chip that is picked.
+    chip: Option<ChipFeed>,
+    /// Bumped by every pick, clear and reset; an older chip answer is dropped.
+    chip_rev: u64,
 }
 
 impl HomeModel {
@@ -127,6 +154,10 @@ impl HomeModel {
             personal: Vec::new(),
             personal_for: None,
             personal_rev: 0,
+            chips_on: true,
+            chips: Vec::new(),
+            chip: None,
+            chip_rev: 0,
         };
         model.try_start(cx);
         model
@@ -157,12 +188,129 @@ impl HomeModel {
     /// What Home draws: the feed's shelves with the personal shelves right after the first of
     /// them. Without a feed there is nothing to put them in.
     pub fn display_shelves(&self) -> Vec<Arc<HomeShelf>> {
+        // A picked mood replaces the feed (and the personal shelves with it).
+        if let Some(chip) = &self.chip {
+            return chip.shelves.clone();
+        }
         let mut shown = self.shelves.clone();
         if self.personal_on && !shown.is_empty() {
             let at = 1.min(shown.len());
             shown.splice(at..at, self.personal.iter().cloned());
         }
         shown
+    }
+
+    /// The mood chips to draw: none while the switch is off.
+    pub fn chips(&self) -> &[HomeChip] {
+        if self.chips_on {
+            &self.chips
+        } else {
+            &[]
+        }
+    }
+
+    /// The token of the picked chip.
+    pub fn selected_chip(&self) -> Option<&str> {
+        self.chip.as_ref().map(|c| c.params.as_str())
+    }
+
+    /// What the picked chip's feed is doing; `None` when no chip is picked.
+    pub fn chip_phase(&self) -> Option<ChipPhase> {
+        self.chip.as_ref().map(|c| c.phase)
+    }
+
+    /// Home > Mood chips, on or off. Turning it off also drops a picked chip.
+    pub fn set_chips_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.chips_on == on {
+            return;
+        }
+        self.chips_on = on;
+        if !on {
+            self.drop_chip();
+        }
+        cx.notify();
+    }
+
+    /// A chip was pressed: its feed replaces Home's, or, when it is the picked one, the ordinary
+    /// feed comes back.
+    pub fn pick_chip(&mut self, params: &str, cx: &mut Context<Self>) {
+        if self.selected_chip() == Some(params) {
+            self.clear_chip(cx);
+            return;
+        }
+        if !self.chips_on || !self.chips.iter().any(|c| c.params == params) {
+            return;
+        }
+        self.request_chip(params.to_owned(), cx);
+    }
+
+    /// The ordinary feed again.
+    pub fn clear_chip(&mut self, cx: &mut Context<Self>) {
+        if self.chip.is_some() {
+            self.drop_chip();
+            cx.notify();
+        }
+    }
+
+    /// Ask for the picked chip's feed again after a failure.
+    pub fn retry_chip(&mut self, cx: &mut Context<Self>) {
+        if let Some(ChipFeed {
+            params,
+            phase: ChipPhase::Failed(_),
+            ..
+        }) = &self.chip
+        {
+            let params = params.clone();
+            self.request_chip(params, cx);
+        }
+    }
+
+    fn drop_chip(&mut self) {
+        self.chip = None;
+        self.chip_rev += 1;
+    }
+
+    fn request_chip(&mut self, params: String, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone().filter(|_| self.access == Access::Open) else {
+            return;
+        };
+        self.chip_rev += 1;
+        let rev = self.chip_rev;
+        self.requests += 1;
+        self.chip = Some(ChipFeed {
+            params: params.clone(),
+            phase: ChipPhase::Loading,
+            shelves: Vec::new(),
+        });
+        cx.spawn(async move |this, cx| {
+            let asked = params.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { source.home_chip(&asked) })
+                .await;
+            let _ = this.update(cx, |m, cx| m.finish_chip(rev, result, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_chip(&mut self, rev: u64, result: Result<HomePage, LoadFailure>, cx: &mut Context<Self>) {
+        if rev != self.chip_rev {
+            return;
+        }
+        let Some(chip) = self.chip.as_mut() else {
+            return;
+        };
+        match result {
+            Ok(page) if !page.shelves.is_empty() => {
+                chip.shelves = page.shelves.into_iter().map(Arc::new).collect();
+                chip.phase = ChipPhase::Ready;
+            }
+            // A mood with nothing in it reads like a feed that would not load: Retry asks again.
+            Ok(_) => chip.phase = ChipPhase::Failed(LoadFailure::Parse),
+            Err(failure) => chip.phase = ChipPhase::Failed(failure),
+        }
+        cx.notify();
     }
 
     /// The personal shelves worked out so far (tests).
@@ -197,6 +345,7 @@ impl HomeModel {
         let Some(account) = PageCache::try_global(cx).and_then(|c| c.account()) else {
             return;
         };
+        let blocked = crate::blocked_artists::snapshot(cx);
         if self.personal_for.as_deref() != Some(account.as_str()) {
             // Another account's shelves must not show while its own are worked out.
             self.personal.clear();
@@ -215,7 +364,7 @@ impl HomeModel {
                         Some(now - crate::stats::report::ON_REPEAT_DAYS * 24 * 60 * 60),
                     );
                     let all = log.totals(&asked, None);
-                    crate::stats::report::personal_shelves(&recent, &all, now)
+                    crate::stats::report::personal_shelves(&recent, &all, now, &blocked)
                 })
                 .await;
             let _ = this.update(cx, |m, cx| {
@@ -251,7 +400,7 @@ impl HomeModel {
 
     /// Whether another batch can be asked for.
     pub fn has_more(&self) -> bool {
-        self.continuation.is_some() && self.shelves.len() < MAX_SHELVES
+        self.chip.is_none() && self.continuation.is_some() && self.shelves.len() < MAX_SHELVES
     }
 
     pub fn is_refreshing(&self) -> bool {
@@ -359,6 +508,8 @@ impl HomeModel {
         self.cached_for = None;
         self.fresh_seen = false;
         self.restoring = None;
+        self.chips.clear();
+        self.drop_chip();
     }
 
     // ---- the page cache ---------------------------------------------------------------------
@@ -415,6 +566,7 @@ impl HomeModel {
         }
         let age = cached.age();
         self.shelves = cached.value.shelves.into_iter().map(Arc::new).collect();
+        self.chips = cached.value.chips;
         // A saved continuation token is not believed: the next batch comes after the refresh.
         self.continuation = None;
         self.from_cache = true;
@@ -426,12 +578,19 @@ impl HomeModel {
     }
 
     /// Keeps a fresh first batch for the next launch.
-    fn remember(&self, ticket: Option<&Ticket>, shelves: &[HomeShelf], cx: &Context<Self>) {
+    fn remember(
+        &self,
+        ticket: Option<&Ticket>,
+        shelves: &[HomeShelf],
+        chips: &[HomeChip],
+        cx: &Context<Self>,
+    ) {
         if let (Some(cache), Some(ticket)) = (PageCache::try_global(cx), ticket) {
             cache.put(
                 ticket,
                 keys::HOME.to_owned(),
                 HomePage {
+                    chips: chips.to_vec(),
                     shelves: shelves.to_vec(),
                     continuation: None,
                     skipped: 0,
@@ -485,8 +644,9 @@ impl HomeModel {
         self.loading = false;
         match result {
             Ok(page) => {
-                self.remember(ticket.as_ref(), &page.shelves, cx);
+                self.remember(ticket.as_ref(), &page.shelves, &page.chips, cx);
                 self.failure = None;
+                self.chips = page.chips;
                 self.shelves = page.shelves.into_iter().map(Arc::new).collect();
                 self.continuation = page.continuation;
                 self.loaded_at = Some(Instant::now());
@@ -544,7 +704,11 @@ impl HomeModel {
         // The exception is a dead session behind cached shelves: that is said out loud.
         match result {
             Ok(page) if !page.shelves.is_empty() => {
-                self.remember(ticket.as_ref(), &page.shelves, cx);
+                self.remember(ticket.as_ref(), &page.shelves, &page.chips, cx);
+                // A refresh that sent no chips keeps the ones on screen.
+                if !page.chips.is_empty() {
+                    self.chips = page.chips;
+                }
                 self.shelves = page.shelves.into_iter().map(Arc::new).collect();
                 self.continuation = page.continuation;
                 self.loaded_at = Some(Instant::now());
@@ -565,7 +729,12 @@ impl HomeModel {
     /// The next batch of shelves, appended below the last. A no-op while one is in flight, after
     /// a failure (use [`Self::retry_more`]), at the end of the feed and during a refresh.
     pub fn load_more(&mut self, cx: &mut Context<Self>) {
-        if self.more != More::Idle || self.refreshing || self.loading || !self.asked {
+        if self.more != More::Idle
+            || self.refreshing
+            || self.loading
+            || !self.asked
+            || self.chip.is_some()
+        {
             return;
         }
         self.start_more(cx);

@@ -138,13 +138,23 @@ impl LibraryModel {
         };
         detail.mix = None;
         cx.notify();
-        let rows: Vec<(Track, Option<String>)> = match result {
+        let mut rows: Vec<(Track, Option<String>)> = match result {
             Ok(rows) => rows
                 .into_iter()
                 .map(|r| (r.track, r.thumbnail))
                 .collect(),
             Err(_) => Vec::new(),
         };
+        if kind == MixKind::Radio {
+            // A radio does not add a blocked artist's songs. The first row is the seed the
+            // owner asked for, so it stays.
+            let blocked = crate::blocked_artists::snapshot(cx);
+            if !rows.is_empty() && !blocked.is_empty() {
+                let seed = rows.remove(0);
+                rows.retain(|(track, _)| !blocked.blocks(track));
+                rows.insert(0, seed);
+            }
+        }
         match (kind, rows.is_empty()) {
             (MixKind::Radio, false) => {
                 // The radio carries on from its first track; the player's own shuffle stays.

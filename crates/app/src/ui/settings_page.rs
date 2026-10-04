@@ -1,6 +1,7 @@
 //! Settings: one scrolling column of sections. Account first (its own page), then the sections
-//! of switches built from [`SettingsSection`] and [`SettingsRow`]: Playback, Home, Audio, Search,
-//! Window, Discord, Keyboard, then Data (its own page: the export and the diagnostics report).
+//! of switches built from [`SettingsSection`] and [`SettingsRow`]: Playback, Home (Personal
+//! shelves, Mood chips), Audio, Search, Window, Discord, Keyboard, then Data (its own page: the
+//! export and the diagnostics report).
 
 use apollo_theme::tokens::spacing;
 use gpui::{
@@ -13,7 +14,7 @@ use crate::player::PlayerModel;
 use crate::search::{HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES};
 use crate::settings::{
     BoolSetting, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS, HUD_AUTO_HIDE,
-    MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP, PERSONAL_SHELVES, START_MINIMIZED_TO_TRAY,
+    MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP, MOOD_CHIPS, PERSONAL_SHELVES, START_MINIMIZED_TO_TRAY,
 };
 use crate::ui::account_page::{self, AccountPage};
 use crate::ui::audio_page::AudioPage;
@@ -103,16 +104,25 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(11, cx);
+        let h = self.handles(12, cx);
 
-        let home_section = SettingsSection::new("Home").row(self.bool_row(
-            "setting-personal-shelves",
-            "Personal shelves",
-            &PERSONAL_SHELVES,
-            &h[10],
-            accent,
-            cx,
-        ));
+        let home_section = SettingsSection::new("Home")
+            .row(self.bool_row(
+                "setting-personal-shelves",
+                "Personal shelves",
+                &PERSONAL_SHELVES,
+                &h[10],
+                accent,
+                cx,
+            ))
+            .row(self.bool_row(
+                "setting-mood-chips",
+                "Mood chips",
+                &MOOD_CHIPS,
+                &h[11],
+                accent,
+                cx,
+            ));
 
         let search_section = SettingsSection::new("Search")
             .row(self.bool_row(

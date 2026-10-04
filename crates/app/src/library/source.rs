@@ -116,6 +116,12 @@ pub trait LibrarySource: Send + Sync {
         Err(LoadFailure::Other)
     }
 
+    /// The home feed filtered to a mood chip (`params` is a chip's token from an earlier home
+    /// answer).
+    fn home_chip(&self, _params: &str) -> Result<HomePage, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
     /// The batch of home shelves after the one a token came from.
     fn home_more(&self, _token: &str) -> Result<HomePage, LoadFailure> {
         Err(LoadFailure::Other)
@@ -163,6 +169,18 @@ pub trait LibrarySource: Send + Sync {
 
     /// Whether the account has liked a track; `None` when the service did not say.
     fn liked(&self, _video_id: &str) -> Result<Option<bool>, LoadFailure> {
+        Ok(None)
+    }
+
+    /// Tell the service the account is not interested in a track (the thumbs-down). Sent once,
+    /// never retried: when the outcome is unknown the caller reads [`Self::disliked`] back. A
+    /// liked track is no longer liked afterwards.
+    fn set_disliked(&self, _video_id: &str) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    /// Whether the account has thumbs-downed a track; `None` when the service did not say.
+    fn disliked(&self, _video_id: &str) -> Result<Option<bool>, LoadFailure> {
         Ok(None)
     }
 

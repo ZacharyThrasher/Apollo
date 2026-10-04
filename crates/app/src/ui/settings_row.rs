@@ -2,11 +2,12 @@
 //! label on the left and the app's switch pill on the right. No helper text. A row is one focus stop and one
 //! click target; Enter toggles it (Space stays the global play/pause key).
 //!
-//! Three variants share the row: [`SettingsRow::select`] shows the current choice and a chevron
+//! Four variants share the row: [`SettingsRow::select`] shows the current choice and a chevron
 //! on the right and opens a popover when pressed, [`SettingsRow::action`] puts a control (a text
 //! button) beside a switch or a select's choice (pressing the control does not flip the switch
-//! or open the popover), and [`SettingsRow::plain`] is a label with only such a control: no
-//! switch, no row click, and no focus stop of its own.
+//! or open the popover), [`SettingsRow::plain`] is a label with only such a control: no
+//! switch, no row click, and no focus stop of its own, and [`SettingsRow::manage`] shows a short
+//! fact (a count) and a control, with no switch and no chevron.
 
 use std::time::Instant;
 
@@ -120,6 +121,8 @@ pub struct SettingsRow {
     value: Option<SharedString>,
     /// A control shown before the switch.
     action: Option<AnyElement>,
+    /// A manage row: this text (a count) in text.secondary and the control, no switch.
+    fact: Option<SharedString>,
     ring: gpui::Hsla,
     accent: Accent,
     on_toggle: Option<Toggle>,
@@ -140,6 +143,7 @@ impl SettingsRow {
             on,
             value: None,
             action: None,
+            fact: None,
             ring: color::accent(accent),
             accent,
             on_toggle: None,
@@ -156,6 +160,7 @@ impl SettingsRow {
             on: false,
             value: None,
             action: None,
+            fact: None,
             ring: color::accent(accent),
             accent,
             on_toggle: None,
@@ -174,6 +179,21 @@ impl SettingsRow {
     ) -> Self {
         let mut row = Self::switch(id, focus, label, false, accent);
         row.value = Some(value.into());
+        row
+    }
+
+    /// A row with no switch: `fact` (a count, say) in text.secondary and the control given to
+    /// [`SettingsRow::action`] on the right. Pressing the row itself runs
+    /// [`SettingsRow::on_open`], like pressing the control.
+    pub fn manage(
+        id: &'static str,
+        focus: &FocusHandle,
+        label: impl Into<SharedString>,
+        fact: impl Into<SharedString>,
+        accent: Accent,
+    ) -> Self {
+        let mut row = Self::switch(id, focus, label, false, accent);
+        row.fact = Some(fact.into());
         row
     }
 
@@ -213,18 +233,24 @@ impl RenderOnce for SettingsRow {
             .is_some_and(|focus| keyboard_focused(focus, window));
         let plain = self.focus.is_none();
         let handler = self.on_toggle;
+        let fact = self.fact.clone();
+        let is_manage = fact.is_some();
+        let mut action = self.action;
+        // A manage row keeps its control next to the fact.
+        let beside_fact = if is_manage { action.take() } else { None };
         let (beside_switch, beside_choice) = if self.value.is_some() {
-            (None, self.action)
+            (None, action)
         } else {
-            (self.action, None)
+            (action, None)
         };
         let hover_state = state.clone();
         let id = self.id;
         let value = self.value.clone();
-        let is_select = value.is_some();
-        let accessible = match &value {
-            Some(value) => SharedString::from(format!("{}, {}", self.label, value)),
-            None => self.label.clone(),
+        let is_select = value.is_some() || is_manage;
+        let accessible = match (&value, &fact) {
+            (Some(value), _) => SharedString::from(format!("{}, {}", self.label, value)),
+            (None, Some(fact)) => SharedString::from(format!("{}, {}", self.label, fact)),
+            (None, None) => self.label.clone(),
         };
 
         div()
@@ -282,6 +308,22 @@ impl RenderOnce for SettingsRow {
                     .child(self.label),
             )
             .children(control_slot(beside_switch))
+            .when_some(fact, |d, fact| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(spacing::S3))
+                        .child(
+                            style::text_style(div(), typography::BODY, cx)
+                                .debug_selector(|| format!("{}-fact", id))
+                                .text_color(color::text_secondary())
+                                .child(fact),
+                        )
+                        .children(control_slot(beside_fact)),
+                )
+            })
             .when(!is_select && !plain, |d| {
                 d.child(
                     div()

@@ -234,6 +234,17 @@ impl InnerTubeSource {
         home_page(&parsed)
     }
 
+    /// The home feed filtered to one mood chip (`params` is a chip's token from an earlier home
+    /// answer): the same shelves as the feed, for that mood.
+    pub async fn home_chip(&self, params: &str) -> Result<HomePage, LoadFailure> {
+        let parsed = self
+            .tube
+            .home(&self.client, Some(params))
+            .await
+            .map_err(|e| classify(&e))?;
+        home_page(&parsed)
+    }
+
     /// The batch of home shelves after the one a token came from.
     pub async fn home_continuation(&self, token: &str) -> Result<HomePage, LoadFailure> {
         let parsed = self
@@ -442,6 +453,27 @@ impl InnerTubeSource {
             .rate(&self.client, video_id, rating)
             .await
             .map_err(|e| classify_write(&e))
+    }
+
+    /// Tell YouTube Music the account is not interested in a track (`like/dislike`, the
+    /// thumbs-down). Sent once, never retried: when the outcome is unknown the caller reads the
+    /// rating back with [`Self::disliked`]. A liked track stops being liked by the same call.
+    pub async fn set_disliked(&self, video_id: &str) -> Result<(), WriteFailure> {
+        self.tube
+            .rate_once(&self.client, video_id, Rating::Dislike)
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// Whether the account has thumbs-downed a track (a `next` for the video, whose overlay
+    /// carries the rating). `None` when the answer did not say.
+    pub async fn disliked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
+        let next = self
+            .tube
+            .next(&self.client, Some(video_id), None)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(next.rating.map(|r| r == Rating::Dislike))
     }
 
     /// Whether the account has liked a track: what YouTube Music's own player bar asks (a `next`

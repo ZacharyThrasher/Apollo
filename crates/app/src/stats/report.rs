@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use apollo_domain::blocklist::Blocklist;
 use apollo_domain::model::{ArtistRef, BrowseId, Track};
 use apollo_provider::{HomeItem, HomeShelf, ListedTrack};
 use apollo_store::PlayTotal;
@@ -181,11 +182,19 @@ fn song(total: &PlayTotal) -> HomeItem {
 
 /// Home's personal shelves at `now`: "On repeat" from what was played in the last
 /// [`ON_REPEAT_DAYS`] (`recent`), "Forgotten favourites" from all time (`all`). A shelf with
-/// fewer than [`SHELF_MIN`] tracks is left out. Both lists are most played first.
-pub fn personal_shelves(recent: &[PlayTotal], all: &[PlayTotal], now: i64) -> Vec<HomeShelf> {
+/// fewer than [`SHELF_MIN`] tracks is left out. Both lists are most played first. A song by a
+/// blocked artist is not on either shelf (and is not counted toward the minimum).
+pub fn personal_shelves(
+    recent: &[PlayTotal],
+    all: &[PlayTotal],
+    now: i64,
+    blocked: &Blocklist,
+) -> Vec<HomeShelf> {
+    let allowed = |t: &&PlayTotal| blocked.is_empty() || !blocked.blocks(&track_of(t));
     let mut shelves = Vec::new();
     let on_repeat: Vec<HomeItem> = recent
         .iter()
+        .filter(allowed)
         .filter(|t| t.plays >= ON_REPEAT_MIN_PLAYS)
         .take(SHELF_MAX)
         .map(song)
@@ -198,6 +207,7 @@ pub fn personal_shelves(recent: &[PlayTotal], all: &[PlayTotal], now: i64) -> Ve
     }
     let forgotten: Vec<HomeItem> = all
         .iter()
+        .filter(allowed)
         .filter(|t| t.plays >= FAVOURITE_MIN_PLAYS && t.last_played <= now - FORGOTTEN_DAYS * DAY_SECS)
         .take(SHELF_MAX)
         .map(song)
@@ -329,8 +339,8 @@ mod tests {
     #[test]
     fn a_shelf_is_hidden_until_it_has_six_tracks() {
         let now = 100 * DAY_SECS;
-        assert!(personal_shelves(&many(5, 3, now), &[], now).is_empty());
-        let shelves = personal_shelves(&many(6, 3, now), &[], now);
+        assert!(personal_shelves(&many(5, 3, now), &[], now, &Blocklist::default()).is_empty());
+        let shelves = personal_shelves(&many(6, 3, now), &[], now, &Blocklist::default());
         assert_eq!(shelves.len(), 1);
         assert_eq!(shelves[0].title, "On repeat");
         assert_eq!(shelves[0].items.len(), 6);
@@ -338,10 +348,46 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_artists_songs_are_on_neither_shelf() {
+        use apollo_domain::blocklist::BlockedArtist;
+        let now = 200 * DAY_SECS;
+        let long_ago = now - 61 * DAY_SECS;
+        let blocked_credit = format!("[{}]", artist("Nope", Some("UC_nope")));
+        let fine_credit = format!("[{}]", artist("Fine", Some("UC_fine")));
+        let mut recent: Vec<PlayTotal> = (0..6)
+            .map(|i| total(&format!("ok{i}"), 3, now, &fine_credit, None))
+            .collect();
+        recent.push(total("bad", 9, now, &blocked_credit, None));
+        let mut all: Vec<PlayTotal> = (0..6)
+            .map(|i| total(&format!("old{i}"), 8, long_ago, &fine_credit, None))
+            .collect();
+        all.push(total("bad-old", 20, long_ago, &blocked_credit, None));
+        let list = Blocklist::new(vec![BlockedArtist {
+            id: Some("UC_nope".into()),
+            name: "Nope".into(),
+        }]);
+        let shelves = personal_shelves(&recent, &all, now, &list);
+        assert_eq!(shelves.len(), 2);
+        for shelf in &shelves {
+            assert_eq!(shelf.items.len(), 6);
+            assert!(shelf.songs().iter().all(|s| !s.track.video_id.as_str().starts_with("bad")));
+        }
+        // The same plays, unblocked, include the artist's songs.
+        let open = personal_shelves(&recent, &all, now, &Blocklist::default());
+        assert!(open[0].songs().iter().any(|s| s.track.video_id.as_str() == "bad"));
+        // Blocking leaves too few for a shelf: the shelf is gone, not short.
+        let few = personal_shelves(&recent[..6], &all, now, &Blocklist::new(vec![BlockedArtist {
+            id: Some("UC_fine".into()),
+            name: "Fine".into(),
+        }]));
+        assert!(few.is_empty());
+    }
+
+    #[test]
     fn on_repeat_needs_a_repeat() {
         let now = 100 * DAY_SECS;
         // Eight tracks played once each in the last month: nothing is on repeat.
-        assert!(personal_shelves(&many(8, 1, now), &[], now).is_empty());
+        assert!(personal_shelves(&many(8, 1, now), &[], now, &Blocklist::default()).is_empty());
     }
 
     #[test]
@@ -358,7 +404,7 @@ mod tests {
             t.video_id = format!("rare-{}", t.video_id);
             t
         }));
-        let shelves = personal_shelves(&[], &all, now);
+        let shelves = personal_shelves(&[], &all, now, &Blocklist::default());
         assert_eq!(shelves.len(), 1);
         assert_eq!(shelves[0].title, "Forgotten favourites");
         assert_eq!(shelves[0].items.len(), 6, "only the well-played, long-unplayed ones");
@@ -367,7 +413,7 @@ mod tests {
     #[test]
     fn a_shelf_holds_at_most_twenty() {
         let now = 100 * DAY_SECS;
-        let shelves = personal_shelves(&many(40, 3, now), &[], now);
+        let shelves = personal_shelves(&many(40, 3, now), &[], now, &Blocklist::default());
         assert_eq!(shelves[0].items.len(), SHELF_MAX);
     }
 

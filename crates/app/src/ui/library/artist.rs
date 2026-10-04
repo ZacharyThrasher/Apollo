@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::library::model::MixKind;
+use crate::ui::track_menu::ArtistSubject;
 
 /// The banner's height; its width is the page's.
 const BANNER_HEIGHT: f32 = 280.0;
@@ -37,6 +38,8 @@ struct Snapshot {
     subscribing: bool,
     mix: Option<MixKind>,
     bio_open: bool,
+    /// What the More menu acts on.
+    subject: ArtistSubject,
 }
 
 impl LibraryView {
@@ -58,6 +61,10 @@ impl LibraryView {
                 subscribing: a.subscribing.is_some(),
                 mix: a.mix,
                 bio_open: a.bio_open,
+                subject: ArtistSubject {
+                    id: a.target.id.clone(),
+                    name: a.name().to_owned(),
+                },
             }
         };
         let this = cx.entity();
@@ -299,6 +306,12 @@ impl LibraryView {
                 .min_width(SUBSCRIBE_WIDTH)
                 .enabled(ready && can_subscribe && !snap.subscribing)
                 .on_click(move |_, cx| model_subscribe.update(cx, |m, cx| m.toggle_subscribe(cx))),
+            ))
+            // More: the menu of what can be done with the artist (Don't play this artist).
+            .child(more_slot(
+                "artist-more",
+                true,
+                Subject::Artist(snap.subject.clone()),
             ))
             .into_any_element()
     }

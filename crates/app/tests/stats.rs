@@ -19,6 +19,7 @@ use apollo_app::stats::{PlayLog, PlayRecord};
 use apollo_app::style::Fonts;
 use apollo_app::ui::nav::Route;
 use apollo_app::ui::shell::{self, Shell};
+use apollo_domain::blocklist::BlockedArtist;
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track};
 use apollo_domain::playback::{EngineEvent, Event, LeaseId};
 use apollo_runtime::mock::{MockEngine, MockResolver};
@@ -460,4 +461,29 @@ fn another_accounts_plays_do_not_make_shelves(cx: &mut TestAppContext) {
     rig.home.update(vcx, |h, cx| h.show(Instant::now(), cx));
     vcx.run_until_parked();
     assert!(!titles(&rig, vcx).contains(&"On repeat".to_string()));
+}
+
+#[gpui::test]
+fn a_blocked_artists_songs_leave_the_shelves_and_return_when_unblocked(cx: &mut TestAppContext) {
+    let (rig, vcx) = rig(cx);
+    six_on_repeat(&rig);
+    rig.home.update(vcx, |h, cx| h.show(Instant::now(), cx));
+    vcx.run_until_parked();
+    assert!(titles(&rig, vcx).contains(&"On repeat".to_string()));
+
+    let neon = BlockedArtist {
+        id: None,
+        name: "neon arcade".into(),
+    };
+    let block = rig.shell.read_with(vcx, |s, _| s.block_model().clone());
+    block.update(vcx, |m, cx| m.block(neon.clone(), cx));
+    vcx.run_until_parked();
+    assert!(
+        !titles(&rig, vcx).contains(&"On repeat".to_string()),
+        "the shelf is rebuilt without the blocked artist"
+    );
+
+    block.update(vcx, |m, cx| m.unblock(&neon, cx));
+    vcx.run_until_parked();
+    assert!(titles(&rig, vcx).contains(&"On repeat".to_string()));
 }
