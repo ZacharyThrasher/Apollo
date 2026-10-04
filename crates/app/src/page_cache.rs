@@ -407,6 +407,13 @@ impl PageCache {
         self.invalidate(&keys::artist(id));
     }
 
+    /// The account subscribed to or left an artist: the page (its button) and the Library's
+    /// Artists list both change.
+    pub fn invalidate_subscription(&self, id: &BrowseId) {
+        self.invalidate_artist(id);
+        self.invalidate(keys::ARTISTS);
+    }
+
     /// Wait until everything handed to the worker so far is written (tests, quitting).
     pub fn flush(&self) {
         let Some(_) = &self.inner.writer else {

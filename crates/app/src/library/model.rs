@@ -22,6 +22,9 @@ use super::browse::{
 };
 use super::source::{ArtistContent, LibrarySource, TrackRow};
 use super::writes::{LibraryWrites, WritesEvent};
+
+mod artist;
+pub use artist::MixKind;
 use crate::art::{sized_thumbnail, DecodedArt};
 use crate::page_cache::{keys, PageCache, Ticket};
 use crate::player::{PlayerModel, Status};
@@ -38,6 +41,8 @@ const LIST_ART_PX: u32 = 96;
 const HEADER_ART_PX: u32 = 320;
 /// Album and playlist cards on an artist page, drawn at 144px.
 const CARD_ART_PX: u32 = 288;
+/// An artist banner is kept at its own aspect and shrunk to this width at most.
+const BANNER_ART_PX: u32 = 1600;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
@@ -116,6 +121,13 @@ pub struct ArtistDetail {
     pub target: ArtistTarget,
     pub state: Load<Arc<ArtistContent>>,
     pub pending: Option<PlayRequest>,
+    /// The subscription write (or its read-back) in flight, with the state it asks for: what the
+    /// button shows until the service has answered.
+    pub subscribing: Option<bool>,
+    /// Radio or Shuffle is fetching its tracks.
+    pub mix: Option<MixKind>,
+    /// The bio is open in full (it is clamped to a few lines otherwise).
+    pub bio_open: bool,
 }
 
 impl ArtistDetail {
@@ -140,6 +152,12 @@ impl ArtistDetail {
             Load::Ready(c) => Some(c),
             _ => None,
         }
+    }
+
+    /// What the Subscribe button shows: the request in flight, else what the service holds.
+    pub fn subscribed(&self) -> bool {
+        self.subscribing
+            .unwrap_or_else(|| self.content().is_some_and(|c| c.subscribed))
     }
 }
 
@@ -179,6 +197,8 @@ pub enum ArtSize {
     List,
     Header,
     Card,
+    /// A wide picture kept whole (an artist's banner), not cropped to a square.
+    Banner,
 }
 
 enum Thumb {
@@ -745,6 +765,9 @@ impl LibraryModel {
             target,
             state: Load::Idle,
             pending: None,
+            subscribing: None,
+            mix: None,
+            bio_open: false,
         }));
         self.load_artist(cx);
     }
@@ -1093,7 +1116,7 @@ impl LibraryModel {
         }
         self.writes.update(cx, |w, cx| w.seed(seeds, cx));
         if let Some(request) = pending.filter(|_| ok) {
-            self.play_artist(id, request, cx);
+            self.play_artist_request(id, request, cx);
         }
         cx.notify();
     }
@@ -1119,7 +1142,7 @@ impl LibraryModel {
                 }
                 Load::Ready(_) => {
                     let id = detail.id;
-                    self.play_artist(id, request, cx);
+                    self.play_artist_request(id, request, cx);
                 }
                 Load::Failed(_) => {}
             },
@@ -1226,6 +1249,8 @@ impl LibraryModel {
                 ArtSize::List => url.clone(),
                 ArtSize::Header => sized_thumbnail(&url, HEADER_ART_PX),
                 ArtSize::Card => sized_thumbnail(&url, CARD_ART_PX),
+                // The service's own crop, as it came.
+                ArtSize::Banner => url.clone(),
             };
             cx.spawn(async move |this, cx| {
                 let image = cx
@@ -1298,12 +1323,30 @@ fn centre_square(w: u32, h: u32) -> (u32, u32, u32) {
     ((w - side) / 2, (h - side) / 2, side)
 }
 
+/// A banner keeps its whole picture (the page crops it to its frame): only shrunk when it is
+/// wider than any window needs.
+fn banner_render_image(art: &DecodedArt) -> Arc<RenderImage> {
+    let (w, h) = art.pixels.dimensions();
+    if w <= BANNER_ART_PX {
+        return art.render_image();
+    }
+    let height = (u64::from(h) * u64::from(BANNER_ART_PX) / u64::from(w)).max(1) as u32;
+    let resized = imageops::resize(
+        &art.pixels,
+        BANNER_ART_PX,
+        height,
+        imageops::FilterType::Triangle,
+    );
+    DecodedArt::from_rgba(resized).render_image()
+}
+
 /// Centre-cropped to a square, resized, BGRA, ready for GPUI.
 fn sized_render_image(art: &DecodedArt, size: ArtSize) -> Arc<RenderImage> {
     let side = match size {
         ArtSize::List => LIST_ART_PX,
         ArtSize::Header => HEADER_ART_PX,
         ArtSize::Card => CARD_ART_PX,
+        ArtSize::Banner => return banner_render_image(art),
     };
     let (w, h) = art.pixels.dimensions();
     if w == h && w <= side {

@@ -91,6 +91,8 @@ pub mod typography {
     pub const LIST_TITLE: TextStyle = TextStyle::new(15.0, 400);
     pub const SECTION: TextStyle = TextStyle::new(20.0, 600);
     pub const PAGE_TITLE: TextStyle = TextStyle::new(28.0, 600);
+    /// An artist's name over the banner of their page.
+    pub const ARTIST_NAME: TextStyle = TextStyle::new(32.0, 600);
     pub const NOW_PLAYING_TITLE: TextStyle = TextStyle::new(40.0, 600);
     /// Artist and album under the Now Playing title.
     pub const NOW_PLAYING_ARTIST: TextStyle = TextStyle::new(18.0, 400);

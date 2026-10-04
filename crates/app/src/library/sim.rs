@@ -11,7 +11,7 @@ use apollo_domain::library::{
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track};
 use apollo_provider::{
-    ArtistSection, HistoryDay, Hit, HomeItem, HomePage, HomeShelf, ListedTrack,
+    ArtistSection, HistoryDay, Hit, HomeItem, HomePage, HomeShelf, ListedTrack, RelatedArtist,
 };
 
 use super::source::{ArtistContent, LibrarySource, TrackRow};
@@ -120,6 +120,12 @@ struct SimState {
     radio: Option<LoadFailure>,
     /// The seeds `radio` was asked about, in order.
     radio_seeds: Vec<String>,
+    /// Channel ids the account is subscribed to.
+    subscribed: Vec<String>,
+    /// Mix playlist ids `mix` was asked for, in order.
+    mixes: Vec<String>,
+    /// Makes `artist` fail once the page has been seen (the read-back after an unknown write).
+    artist_fails: Option<LoadFailure>,
 }
 
 impl SimState {
@@ -135,6 +141,9 @@ impl SimState {
             tabs: None,
             radio: None,
             radio_seeds: Vec::new(),
+            subscribed: Vec::new(),
+            mixes: Vec::new(),
+            artist_fails: None,
         }
     }
 }
@@ -198,6 +207,31 @@ impl SimLibrary {
     /// The seeds the radio was asked for, in order.
     pub fn radio_seeds(&self) -> Vec<String> {
         self.state().radio_seeds.clone()
+    }
+
+    /// The channels the account is subscribed to, in the order they were subscribed.
+    pub fn subscribed_channels(&self) -> Vec<String> {
+        self.state().subscribed.clone()
+    }
+
+    /// Subscribes (or unsubscribes) the account without going through a write, so a page can be
+    /// opened for an account that already holds the subscription (tests).
+    pub fn preset_subscription(&self, channel_id: &str, subscribed: bool) {
+        let mut state = self.state();
+        state.subscribed.retain(|c| c != channel_id);
+        if subscribed {
+            state.subscribed.push(channel_id.to_owned());
+        }
+    }
+
+    /// The mix playlists the simulation was asked for, in order.
+    pub fn mix_log(&self) -> Vec<String> {
+        self.state().mixes.clone()
+    }
+
+    /// Makes every artist page request fail from now on (tests: a read-back that cannot be read).
+    pub fn set_artist_failure(&self, failure: Option<LoadFailure>) {
+        self.state().artist_fails = failure;
     }
 
     /// Makes the playlist list fail (tests).
@@ -394,12 +428,10 @@ fn art_url(f: &Fixture) -> Option<String> {
 /// The page the simulation answers for an artist id (`UCsim_<name>` from search).
 fn artist_content(id: &str) -> Option<ArtistContent> {
     if id == ARTIST_EMPTY_ID {
+        // No channel either: a page like this has nothing to subscribe to.
         return Some(ArtistContent {
             name: "Quiet Artist".into(),
-            thumbnail: None,
-            top_songs: Vec::new(),
-            sections: Vec::new(),
-            skipped: 0,
+            ..ArtistContent::default()
         });
     }
     let name = if id == ARTIST_SLOW_ID {
@@ -437,10 +469,33 @@ fn artist_content(id: &str) -> Option<ArtistContent> {
             }
         })
         .collect();
+    let mut related: Vec<RelatedArtist> = Vec::new();
+    for f in FIXTURES.iter().filter(|f| f.artist != name) {
+        if related.iter().all(|r| r.name != f.artist) {
+            related.push(RelatedArtist {
+                id: BrowseId::new(format!("{SEARCH_ARTIST_PREFIX}{}", f.artist)),
+                name: f.artist.into(),
+                thumbnail: art_url(f),
+            });
+        }
+    }
     Some(ArtistContent {
         name: name.into(),
         thumbnail: art_url(&FIXTURES[own[0]]),
         top_songs: fixture_rows(&own),
+        top_songs_id: Some(BrowseId::new("VLPLsimtop")),
+        related,
+        description: Some(format!(
+            "{name} make the music Apollo's simulation plays. This bio runs long on purpose, so \
+             the page has to clamp it to a few lines and let a click open the rest. It says \
+             nothing true about anyone."
+        )),
+        subscribers: Some("1.2M subscribers".into()),
+        monthly_listeners: Some("3.4M monthly audience".into()),
+        channel_id: id.into(),
+        subscribed: false,
+        radio_playlist_id: Some(format!("RDEMsim_{name}")),
+        shuffle_playlist_id: Some(format!("RDAOsim_{name}")),
         sections: vec![
             ArtistSection {
                 title: "Albums".into(),
@@ -715,7 +770,40 @@ impl LibrarySource for SimLibrary {
         if id.as_str() == ARTIST_BROKEN_ID {
             return Err(LoadFailure::Network);
         }
-        artist_content(id.as_str()).ok_or(LoadFailure::Other)
+        if let Some(f) = self.state().artist_fails {
+            return Err(f);
+        }
+        let mut content = artist_content(id.as_str()).ok_or(LoadFailure::Other)?;
+        content.subscribed = self.state().subscribed.iter().any(|c| *c == content.channel_id);
+        Ok(content)
+    }
+
+    fn mix(&self, playlist_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        let mut state = self.state();
+        state.mixes.push(playlist_id.to_owned());
+        if let Some(f) = state.radio {
+            return Err(f);
+        }
+        let first = RADIO_BASE + 1_000 + (state.mixes.len() - 1) * RADIO_BATCH;
+        Ok((first..first + RADIO_BATCH).map(generated_row).collect())
+    }
+
+    fn set_subscribed(&self, channel_id: &str, subscribed: bool) -> Result<(), WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        let lands = self.write_answer(
+            if subscribed { "subscribe" } else { "unsubscribe" }.to_owned(),
+            channel_id,
+        );
+        let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        if applies {
+            let mut state = self.state();
+            state.subscribed.retain(|c| c != channel_id);
+            if subscribed {
+                state.subscribed.push(channel_id.to_owned());
+            }
+        }
+        lands.map(|_| ())
     }
 
     fn library_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
@@ -934,6 +1022,50 @@ mod tests {
         assert!(ask(ARTIST_EMPTY_ID).unwrap().is_empty());
         assert_eq!(ask("UCsim_Nobody").unwrap_err(), LoadFailure::Other);
         assert!(ask(ARTIST_SLOW_ID).is_ok());
+    }
+
+    #[test]
+    fn an_artist_page_carries_everything_the_page_draws() {
+        let lib = SimLibrary::instant();
+        let artist = lib
+            .artist(&BrowseId::new(format!("{SEARCH_ARTIST_PREFIX}Neon Arcade")))
+            .unwrap();
+        assert!(artist.description.is_some() && artist.subscribers.is_some());
+        assert!(!artist.related.is_empty());
+        assert!(artist.related.iter().all(|r| r.name != "Neon Arcade"));
+        assert!(!artist.subscribed);
+        assert_eq!(artist.channel_id, format!("{SEARCH_ARTIST_PREFIX}Neon Arcade"));
+        let show_all = Collection {
+            kind: CollectionKind::Playlist,
+            id: artist.top_songs_id.clone().unwrap(),
+            title: "Neon Arcade".into(),
+            subtitle: None,
+            thumbnail: None,
+        };
+        assert!(!lib.tracks(&show_all).unwrap().items.is_empty());
+        assert_eq!(lib.mix(artist.radio_playlist_id.as_deref().unwrap()).unwrap().len(), RADIO_BATCH);
+        assert_eq!(lib.mix_log(), [format!("RDEMsim_Neon Arcade")]);
+    }
+
+    #[test]
+    fn subscribing_changes_what_the_page_reads_back_and_a_lost_reply_still_lands() {
+        let lib = SimLibrary::instant();
+        let id = BrowseId::new(format!("{SEARCH_ARTIST_PREFIX}Soft Lantern"));
+        let channel = id.as_str().to_owned();
+        lib.set_subscribed(&channel, true).unwrap();
+        assert!(lib.artist(&id).unwrap().subscribed);
+        lib.set_subscribed(&channel, false).unwrap();
+        assert!(!lib.artist(&id).unwrap().subscribed);
+        lib.set_write_behaviour(WriteBehaviour::LandsReplyLost);
+        assert_eq!(lib.set_subscribed(&channel, true), Err(WriteFailure::Unknown));
+        assert!(lib.artist(&id).unwrap().subscribed, "the write landed anyway");
+        lib.set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Rejected));
+        assert_eq!(lib.set_subscribed(&channel, false), Err(WriteFailure::Rejected));
+        assert!(lib.artist(&id).unwrap().subscribed, "a refusal changes nothing");
+        assert_eq!(
+            lib.write_log().iter().map(|(w, _)| w.as_str()).collect::<Vec<_>>(),
+            ["subscribe", "unsubscribe", "subscribe", "unsubscribe"]
+        );
     }
 
     #[test]

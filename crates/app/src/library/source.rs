@@ -4,7 +4,7 @@
 use apollo_domain::library::{Collection, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{BrowseId, Track};
-use apollo_provider::{ArtistSection, HistoryDay, HomePage, Hit, ListedTrack};
+use apollo_provider::{ArtistSection, HistoryDay, HomePage, Hit, ListedTrack, RelatedArtist};
 
 use crate::art::DecodedArt;
 
@@ -38,15 +38,31 @@ impl ListItem for TrackRow {
     }
 }
 
-/// What an artist page shows: the top songs and the rows of albums, singles and playlists.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// What an artist page shows: the top songs, the rows of albums, singles and playlists, similar
+/// artists, the bio and where the account's subscription stands.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArtistContent {
     pub name: String,
-    /// The service's header picture (often wide); the card the page was opened from usually
-    /// carries a squarer one, which the page prefers.
+    /// The service's header picture: wide, which is what the banner wants.
     pub thumbnail: Option<String>,
     pub top_songs: Vec<TrackRow>,
+    /// The Top songs shelf's "Show all": a playlist page of every top song.
+    pub top_songs_id: Option<BrowseId>,
     pub sections: Vec<ArtistSection>,
+    /// "Fans might also like", in the service's order.
+    pub related: Vec<RelatedArtist>,
+    pub description: Option<String>,
+    /// "32.7M subscribers", as the service words it.
+    pub subscribers: Option<String>,
+    /// "137M monthly audience", as the service words it.
+    pub monthly_listeners: Option<String>,
+    /// What Subscribe acts on (`UC…`). Empty on a page that cannot be subscribed to.
+    pub channel_id: String,
+    /// Whether the account is subscribed, as the service last said (or as a write confirmed).
+    pub subscribed: bool,
+    /// The header's radio and shuffle mixes: playlists to queue.
+    pub radio_playlist_id: Option<String>,
+    pub shuffle_playlist_id: Option<String>,
     /// Songs or cards the page carried that could not be shown.
     pub skipped: u32,
 }
@@ -97,6 +113,11 @@ pub trait LibrarySource: Send + Sync {
         Err(LoadFailure::Other)
     }
 
+    /// The tracks of a mix that has no seed song (an artist's radio or shuffle), in play order.
+    fn mix(&self, _playlist_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
     /// Cover art for a thumbnail URL a collection or row carried.
     fn artwork(&self, url: &str) -> Option<DecodedArt>;
 
@@ -112,6 +133,12 @@ pub trait LibrarySource: Send + Sync {
     /// Whether the account has liked a track; `None` when the service did not say.
     fn liked(&self, _video_id: &str) -> Result<Option<bool>, LoadFailure> {
         Ok(None)
+    }
+
+    /// Subscribe to or unsubscribe from an artist (`UC…` channel id). Sent once, never retried:
+    /// when the outcome is unknown the caller reads the artist page back.
+    fn set_subscribed(&self, _channel_id: &str, _subscribed: bool) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
     }
 
     /// The playlists the account can add a track to, each flagged when it already holds it.

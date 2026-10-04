@@ -103,6 +103,9 @@ impl LibrarySource for Switch {
     fn artwork(&self, url: &str) -> Option<DecodedArt> {
         self.inner.artwork(url)
     }
+    fn set_subscribed(&self, channel_id: &str, subscribed: bool) -> Result<(), WriteFailure> {
+        self.inner.set_subscribed(channel_id, subscribed)
+    }
     fn set_liked(&self, video_id: &str, liked: bool) -> Result<(), WriteFailure> {
         self.inner.set_liked(video_id, liked)
     }
@@ -676,6 +679,31 @@ fn adding_to_a_playlist_drops_that_playlists_page_and_the_library_list(cx: &mut 
     );
     vcx.run_until_parked();
     assert!(rig.cache.get::<Vec<TrackRow>>(&keys::collection(&road.id)).is_none());
+}
+
+#[gpui::test]
+fn subscribing_drops_the_artist_page_and_the_artists_list(cx: &mut TestAppContext) {
+    let fresh = SimLibrary::instant().artist(&artist_id()).unwrap();
+    let artists = SimLibrary::instant().library_artists().unwrap();
+    let (rig, vcx) = rig(cx, |cache| {
+        put(cache, &keys::artist(&artist_id()), fresh.clone());
+        put(cache, keys::ARTISTS, artists.clone());
+    });
+    rig.install(vcx);
+    vcx.run_until_parked();
+    rig.model
+        .update(vcx, |m, cx| m.open_artist(artist_target(), cx));
+    vcx.run_until_parked();
+    assert!(rig.cache.get::<ArtistContent>(&keys::artist(&artist_id())).is_some());
+
+    rig.model.update(vcx, |m, cx| m.toggle_subscribe(cx));
+    assert!(
+        rig.cache.get::<ArtistContent>(&keys::artist(&artist_id())).is_none(),
+        "dropped the moment the button is pressed"
+    );
+    assert!(rig.cache.get::<Vec<Hit>>(keys::ARTISTS).is_none(), "and the Artists tab with it");
+    vcx.run_until_parked();
+    assert!(rig.model.read_with(vcx, |m, _| m.artist().unwrap().subscribed()));
 }
 
 #[gpui::test]
