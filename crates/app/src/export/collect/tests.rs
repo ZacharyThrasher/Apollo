@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use apollo_domain::library::{Collection, CollectionKind, WriteFailure};
+use apollo_domain::library::{Collection, CollectionKind, PlaylistEdit, Privacy, WriteFailure};
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::{ArtistRef, BrowseId, Track};
 use apollo_provider::Hit;
@@ -159,8 +159,22 @@ impl LibrarySource for Scripted {
         self.log(format!("WRITE delete_playlist {p}"));
         Err(WriteFailure::Unsupported)
     }
-    fn rename_playlist(&self, p: &str, _: &str) -> Result<(), WriteFailure> {
-        self.log(format!("WRITE rename_playlist {p}"));
+    fn edit_playlist(&self, p: &str, _: &PlaylistEdit) -> Result<(), WriteFailure> {
+        self.log(format!("WRITE edit_playlist {p}"));
+        Err(WriteFailure::Unsupported)
+    }
+    fn create_playlist_with(
+        &self,
+        t: &str,
+        _: &str,
+        _: Privacy,
+        _: &[String],
+    ) -> Result<String, WriteFailure> {
+        self.log(format!("WRITE create_playlist_with {t}"));
+        Err(WriteFailure::Unsupported)
+    }
+    fn set_song_saved(&self, v: &str, _: bool) -> Result<(), WriteFailure> {
+        self.log(format!("WRITE set_song_saved {v}"));
         Err(WriteFailure::Unsupported)
     }
     fn remove_from_playlist(&self, p: &str, _: &str, _: &str) -> Result<(), WriteFailure> {
