@@ -74,6 +74,8 @@ icons! {
     Radio => "live-regular",
     QueueAdd => "queue-add-regular",
     PlayNext => "play-next-regular",
+    PictureInPicture => "picture-in-picture-regular",
+    ArrowMaximize => "arrow-maximize-regular",
 }
 
 pub struct Assets;

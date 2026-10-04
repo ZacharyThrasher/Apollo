@@ -9,7 +9,9 @@ use gpui::{
 
 use crate::autostart;
 use crate::player::PlayerModel;
-use crate::settings::{BoolSetting, SettingsModel, CLOSE_TO_TRAY, START_MINIMIZED_TO_TRAY};
+use crate::settings::{
+    BoolSetting, SettingsModel, CLOSE_TO_TRAY, MINI_PLAYER_ON_TOP, START_MINIMIZED_TO_TRAY,
+};
 use crate::ui::account_page::{self, AccountPage};
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::settings_row::{SettingsRow, SettingsSection};
@@ -80,7 +82,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(3, cx);
+        let h = self.handles(4, cx);
 
         let mut window_section = SettingsSection::new("Window")
             .row(self.bool_row(
@@ -119,6 +121,15 @@ impl Render for SettingsPage {
                 }),
             );
         }
+
+        window_section = window_section.row(self.bool_row(
+            "setting-mini-player-on-top",
+            "Keep mini player on top",
+            &MINI_PLAYER_ON_TOP,
+            &h[3],
+            accent,
+            cx,
+        ));
 
         div()
             .id("settings-page")

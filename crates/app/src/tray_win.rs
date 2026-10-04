@@ -28,6 +28,7 @@ const ICON_SIZE: u32 = 32;
 const ID_PLAY_PAUSE: &str = "tray-play-pause";
 const ID_NEXT: &str = "tray-next";
 const ID_PREVIOUS: &str = "tray-previous";
+const ID_MINI: &str = "tray-mini-player";
 const ID_SHOW: &str = "tray-show";
 const ID_QUIT: &str = "tray-quit";
 
@@ -78,6 +79,7 @@ impl Tray {
         let play_pause = MenuItem::with_id(ID_PLAY_PAUSE, "Play", true, None);
         let next = MenuItem::with_id(ID_NEXT, "Next", true, None);
         let previous = MenuItem::with_id(ID_PREVIOUS, "Previous", true, None);
+        let mini = MenuItem::with_id(ID_MINI, "Mini player", true, None);
         let show = MenuItem::with_id(ID_SHOW, "Show Apollo", true, None);
         let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
         let menu = Menu::new();
@@ -86,6 +88,7 @@ impl Tray {
             &next,
             &previous,
             &PredefinedMenuItem::separator(),
+            &mini,
             &show,
             &quit,
         ])
@@ -135,6 +138,7 @@ fn menu_command(id: &str) -> Option<TrayCommand> {
         ID_PLAY_PAUSE => TrayCommand::PlayPause,
         ID_NEXT => TrayCommand::Next,
         ID_PREVIOUS => TrayCommand::Previous,
+        ID_MINI => TrayCommand::MiniPlayer,
         ID_SHOW => TrayCommand::ShowWindow,
         ID_QUIT => TrayCommand::Quit,
         _ => return None,
@@ -198,12 +202,16 @@ pub fn install(
                 continue;
             }
             cx.update(|cx| match command {
+                // With the mini player up, the main window is the one that is away: a click on
+                // the icon or "Show Apollo" brings it back and the mini player gives way.
+                TrayCommand::ToggleWindow if crate::mini::is_open(cx) => {
+                    crate::mini::show_main(cx, window);
+                }
                 TrayCommand::ToggleWindow => {
                     let _ = window.update(cx, |_, window, _| toggle(window));
                 }
-                TrayCommand::ShowWindow => {
-                    let _ = window.update(cx, |_, window, _| show(window));
-                }
+                TrayCommand::ShowWindow => crate::mini::show_main(cx, window),
+                TrayCommand::MiniPlayer => crate::mini::open(cx),
                 TrayCommand::Quit => cx.quit(),
                 transport => {
                     if let Some(os) = transport.player_command() {
@@ -281,6 +289,7 @@ mod tests {
         assert_eq!(menu_command(ID_PLAY_PAUSE), Some(TrayCommand::PlayPause));
         assert_eq!(menu_command(ID_NEXT), Some(TrayCommand::Next));
         assert_eq!(menu_command(ID_PREVIOUS), Some(TrayCommand::Previous));
+        assert_eq!(menu_command(ID_MINI), Some(TrayCommand::MiniPlayer));
         assert_eq!(menu_command(ID_SHOW), Some(TrayCommand::ShowWindow));
         assert_eq!(menu_command(ID_QUIT), Some(TrayCommand::Quit));
         assert_eq!(menu_command("other"), None);
