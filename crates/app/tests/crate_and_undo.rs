@@ -18,6 +18,7 @@ use apollo_app::url_thumbs::NoThumbs;
 use apollo_domain::listing::LoadFailure;
 use apollo_domain::model::Track;
 use apollo_domain::playback::{EngineEvent, Event, Intent, LeaseId, Phase};
+use apollo_domain::queue::{QueueSource, SourceKind};
 use apollo_provider::SearchResults;
 use apollo_runtime::mock::{MockEngine, MockResolver};
 use apollo_store::CrateRow;
@@ -290,7 +291,7 @@ fn start_radio_is_one_step_and_so_is_everything_else_that_changes_the_queue(
     page.player
         .update(vcx, |m, cx| m.start_radio(t("seedSEED001"), cx));
     page.player.update(vcx, |m, cx| {
-        m.finish_radio(vec![t("radioRADIO1"), t("radioRADIO2")], cx)
+        m.finish_radio(vec![t("radioRADIO1"), t("radioRADIO2")], QueueSource::new(SourceKind::Radio, "seed"), cx)
     });
     assert_eq!(queue(&page, vcx).0, "seedSEED001");
     vcx.simulate_keystrokes("ctrl-z");

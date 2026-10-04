@@ -29,6 +29,7 @@ use gpui::{
 use crate::assets::Icon;
 use crate::explore::{ExploreModel, MoodOpen, MoodPhase, Phase};
 use crate::library::model::{ArtistTarget, Target};
+use crate::queue_source;
 use crate::motion::HoverFade;
 use crate::player::PlayerModel;
 use crate::style::{self, color};
@@ -585,7 +586,18 @@ impl ExploreView {
             stop += count;
             let body = match &section.block {
                 Block::Cards(items) => {
-                    self.card_row(i, first, items, &handles, accent, animate, &view, window, cx)
+                    self.card_row(
+                        i,
+                        first,
+                        items,
+                        &handles,
+                        accent,
+                        animate,
+                        &view,
+                        section.title.clone(),
+                        window,
+                        cx,
+                    )
                 }
                 Block::Chart => self.chart(
                     page,
@@ -622,6 +634,7 @@ impl ExploreView {
         accent: Accent,
         animate: bool,
         view: &Entity<Self>,
+        name: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -659,6 +672,7 @@ impl ExploreView {
                         let start = song_ix;
                         song_ix += 1;
                         let (player, queue) = (self.player.clone(), songs.clone());
+                        let name = name.clone();
                         let (hint_player, track) = (self.player.clone(), song.track.clone());
                         Card::new(
                             id,
@@ -667,7 +681,7 @@ impl ExploreView {
                             thumb,
                             focus,
                             accent,
-                            move |_, cx| play_from(&player, &queue, start, cx),
+                            move |_, cx| play_from(&player, &queue, start, &name, cx),
                         )
                         .on_intent(move |cx| {
                             hint_player.update(cx, |p, cx| p.hint_play(&track, cx));
@@ -832,7 +846,7 @@ impl ExploreView {
                         focus: focus.clone(),
                         accent,
                         width: CHART_WIDTH,
-                        on_play: Rc::new(move |_, cx| play_from(&player, &queue, j, cx)),
+                        on_play: Rc::new(move |_, cx| play_from(&player, &queue, j, "Top songs", cx)),
                         on_intent: Some(Rc::new(move |cx: &mut App| {
                             hint_player.update(cx, |p, cx| p.hint_play(&track, cx));
                         })),
@@ -1043,14 +1057,20 @@ impl ExploreView {
     }
 }
 
-/// Plays song `start` of `songs` with all of them as the queue.
-fn play_from(player: &Entity<PlayerModel>, songs: &[ListedTrack], start: usize, cx: &mut App) {
+/// Plays song `start` of `songs` with all of them as the queue, from the section called `name`.
+fn play_from(
+    player: &Entity<PlayerModel>,
+    songs: &[ListedTrack],
+    start: usize,
+    name: &str,
+    cx: &mut App,
+) {
     let tracks: Vec<Track> = songs.iter().map(|s| s.track.clone()).collect();
     player.update(cx, |p, cx| {
         for song in songs {
             p.hint_art(song.track.video_id.as_str(), song.thumbnail.as_deref());
         }
-        p.play_tracks(tracks, Some(start), None, cx);
+        p.play_tracks_from(tracks, Some(start), None, Some(queue_source::named(name)), cx);
     });
 }
 

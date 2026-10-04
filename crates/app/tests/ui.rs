@@ -5,15 +5,17 @@ use std::sync::Arc;
 
 use apollo_app::art::{ArtSource, DecodedArt, SyntheticArt};
 use apollo_app::backend::{LibraryTrack, Ports, Prepared};
-use apollo_app::player::{PlayerModel, Status};
+use apollo_app::player::{PlayerModel, QueueHeading, Status};
+use apollo_app::queue_source;
 use apollo_app::search::{SearchSource, SearchState, DEBOUNCE};
 use apollo_app::settings::VolumeStore;
 use apollo_app::style::Fonts;
 use apollo_app::ui::nav::Route;
 use apollo_app::ui::shell::{self, Shell};
 use apollo_app::url_thumbs::ThumbSource;
+use apollo_domain::library::{Collection, CollectionKind};
 use apollo_domain::listing::LoadFailure;
-use apollo_domain::model::Track;
+use apollo_domain::model::{BrowseId, Track};
 use apollo_domain::playback::{EngineEvent, Event, Intent, LeaseId, Phase};
 use apollo_provider::{ListedTrack, SearchResults};
 use apollo_runtime::mock::{MockEngine, MockResolver};
@@ -781,13 +783,20 @@ fn queue_rows_fit_inside_the_panel(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_autoplay_switch_sits_right_of_the_list_controls_and_flips_the_setting(cx: &mut TestAppContext) {
+fn the_autoplay_switch_sits_right_on_the_playing_from_row_and_flips_the_setting(cx: &mut TestAppContext) {
     let (player, _shell, vcx) = setup_with_queue(cx);
     let panel = bounds(vcx, "queue-panel");
     let clear = bounds(vcx, "queue-clear");
+    let source = bounds(vcx, "queue-source");
     let switch = bounds(vcx, "queue-autoplay");
-    assert!(switch.left() >= clear.right(), "after shuffle, repeat and clear");
+    assert!(switch.top() >= clear.bottom(), "on the row under the list controls");
+    assert!(source.right() <= switch.left(), "the place is on the left, the switch on the right");
+    assert!(
+        (source.center().y - switch.center().y).abs() < gpui::px(2.0),
+        "one row: {source:?} {switch:?}"
+    );
     assert!(switch.right() <= panel.right(), "inside the panel");
+    assert!(source.left() >= panel.left());
     assert_eq!(switch.size.height, gpui::px(32.0));
     assert!(player.read_with(vcx, |m, _| m.view().autoplay), "on by default");
 
@@ -795,6 +804,77 @@ fn the_autoplay_switch_sits_right_of_the_list_controls_and_flips_the_setting(cx:
     assert!(!player.read_with(vcx, |m, _| m.view().autoplay));
     click(vcx, "queue-autoplay");
     assert!(player.read_with(vcx, |m, _| m.view().autoplay));
+}
+
+fn heading(player: &Entity<PlayerModel>, cx: &mut VisualTestContext) -> Option<QueueHeading> {
+    player.read_with(cx, |m, _| m.queue_view().heading)
+}
+
+#[gpui::test]
+fn the_playing_from_row_names_where_the_queue_came_from(cx: &mut TestAppContext) {
+    let (player, _shell, vcx) = setup_with_queue(cx);
+    // The start-up queue was put together by hand.
+    assert_eq!(heading(&player, vcx), Some(QueueHeading::Yours));
+
+    let album = Collection {
+        kind: CollectionKind::Album,
+        id: BrowseId::new("MPREb_blue"),
+        title: "Blue".into(),
+        subtitle: None,
+        thumbnail: Some("https://t/blue".into()),
+    };
+    let tracks = || vec![Track::new("p1", "P1"), Track::new("p2", "P2")];
+    player.update(vcx, |m, cx| {
+        m.play_tracks_from(tracks(), Some(0), None, Some(queue_source::of_collection(&album)), cx)
+    });
+    vcx.run_until_parked();
+    let Some(QueueHeading::Source(source)) = heading(&player, vcx) else {
+        panic!("the album is the source");
+    };
+    assert_eq!(source.label(), "Blue");
+
+    // A search starts another queue; a place with no page still shows.
+    player.update(vcx, |m, cx| {
+        m.play_tracks_from(tracks(), Some(0), None, Some(queue_source::search("daft")), cx)
+    });
+    vcx.run_until_parked();
+    let Some(QueueHeading::Source(source)) = heading(&player, vcx) else {
+        panic!("the search is the source");
+    };
+    assert_eq!(source.label(), "Search: daft");
+    assert!(vcx.debug_bounds("queue-source").is_some());
+
+    // Plain play_tracks has no place of its own.
+    player.update(vcx, |m, cx| m.play_tracks(tracks(), Some(0), None, cx));
+    assert_eq!(heading(&player, vcx), Some(QueueHeading::Yours));
+}
+
+#[gpui::test]
+fn clicking_the_source_opens_its_page_and_a_place_without_one_does_nothing(cx: &mut TestAppContext) {
+    let (player, shell, vcx) = setup_with_queue(cx);
+    let tracks = || vec![Track::new("p1", "P1"), Track::new("p2", "P2")];
+
+    player.update(vcx, |m, cx| {
+        m.play_tracks_from(tracks(), Some(0), None, Some(queue_source::radio("Song")), cx)
+    });
+    vcx.run_until_parked();
+    click(vcx, "queue-source");
+    assert_ne!(shell.read_with(vcx, |s, _| s.route()), Route::Library, "a radio has no page");
+
+    let playlist = Collection {
+        kind: CollectionKind::Playlist,
+        id: BrowseId::new("VLPLgym"),
+        title: "Gym".into(),
+        subtitle: None,
+        thumbnail: None,
+    };
+    player.update(vcx, |m, cx| {
+        m.play_tracks_from(tracks(), Some(0), None, Some(queue_source::of_collection(&playlist)), cx)
+    });
+    vcx.run_until_parked();
+    click(vcx, "queue-source");
+    vcx.run_until_parked();
+    assert_eq!(shell.read_with(vcx, |s, _| s.route()), Route::Library);
 }
 
 #[gpui::test]

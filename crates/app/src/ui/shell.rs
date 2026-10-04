@@ -14,15 +14,16 @@ use crate::account::AccountModel;
 use crate::crate_list::{CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
-use crate::library::{LibraryEdits, LibraryWrites, Notice, Target};
-use crate::page_cache::PageCache;
-use crate::lyrics::LyricsModel;
 use crate::keymap::{
-    CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward, ToggleLyrics, ToggleMute, UndoQueue, VolumeDown,
+    CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward, ToggleFullscreen, ToggleLyrics,
+    ToggleMute, UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
 };
+use crate::library::{LibraryEdits, LibraryWrites, Notice, Target};
+use crate::lyrics::LyricsModel;
 use crate::motion::PanelSlide;
 use crate::os_media::OsCommand;
+use crate::page_cache::PageCache;
 use crate::player::PlayerModel;
 use crate::related::RelatedModel;
 use crate::search::{SearchModel, SearchSource};
@@ -48,10 +49,10 @@ use crate::ui::queue_panel::QueuePanel;
 use crate::ui::related_pane::RelatedPane;
 use crate::ui::search_page::{self, SearchPage};
 use crate::ui::settings_page::{self, SettingsPage};
+use crate::ui::sleep_menu::{SleepMenu, SleepMenuHandle};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
 use crate::ui::titlebar::TitleBar;
 use crate::ui::toast::{self, toast, Fade};
-use crate::ui::sleep_menu::{SleepMenu, SleepMenuHandle};
 use crate::ui::track_menu::{self, MenuHandle, TrackMenu};
 use crate::url_thumbs::{ThumbSource, ThumbStore};
 
@@ -315,23 +316,30 @@ impl Shell {
         let sleep_menu = cx.new(|cx| SleepMenu::new(player.clone(), cx));
         cx.observe(&sleep_menu, |_, _, cx| cx.notify()).detach();
         cx.set_global(SleepMenuHandle(sleep_menu.clone()));
+        let thumbs = cx.new(|_| ThumbStore::new());
         let queue_panel = cx.new(|cx| {
             QueuePanel::new(
                 player.clone(),
                 writes.clone(),
+                thumbs.clone(),
                 {
                     let weak = weak.clone();
                     move |window, cx| {
                         let _ = weak.update(cx, |s, cx| s.open_search(window, cx));
                     }
                 },
+                Rc::new({
+                    let weak = weak.clone();
+                    move |target, window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.open_target(target, window, cx));
+                    }
+                }),
                 cx,
             )
         });
         let lyrics = cx.new(|cx| LyricsModel::new(player.clone(), cx));
         let lyrics_pane = cx.new(|cx| LyricsPane::new(player.clone(), lyrics.clone(), cx));
         cx.observe(&lyrics_pane, |_, _, cx| cx.notify()).detach();
-        let thumbs = cx.new(|_| ThumbStore::new());
         let related = cx.new(|cx| RelatedModel::new(player.clone(), cx));
         let related_pane = cx.new(|cx| {
             RelatedPane::new(
@@ -631,8 +639,8 @@ impl Shell {
             "nav-crate",
             "nav-settings",
         ]
-            .into_iter()
-            .zip(&self.nav_items)
+        .into_iter()
+        .zip(&self.nav_items)
         {
             stops.push((name, handle.clone()));
         }
@@ -1250,6 +1258,11 @@ impl Focusable for Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Full screen belongs to Now Playing: leaving it (Esc, the chevron, another page) leaves
+        // full screen too.
+        if window.is_fullscreen() && !self.now_playing_open {
+            window.toggle_fullscreen();
+        }
         let view = self.player.read(cx).view();
         if view.accent_moving {
             window.request_animation_frame();
@@ -1450,6 +1463,12 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &PreviousTrack, _, cx| {
                 this.player.update(cx, |m, cx| m.previous(cx));
             }))
+            // F11 takes Now Playing full screen and back; elsewhere it does nothing.
+            .on_action(cx.listener(|this, _: &ToggleFullscreen, window, _| {
+                if this.now_playing_open || window.is_fullscreen() {
+                    window.toggle_fullscreen();
+                }
+            }))
             .on_action(cx.listener(|this, _: &CloseNowPlaying, window, cx| {
                 if this.now_playing_open {
                     this.set_now_playing(false, cx);
@@ -1460,18 +1479,22 @@ impl Render for Shell {
                 this.player.update(cx, |m, cx| m.toggle_mute(cx));
             }))
             .on_action(cx.listener(|this, _: &VolumeUp, _, cx| {
-                this.player.update(cx, |m, cx| m.nudge_volume(VOLUME_STEP, cx));
+                this.player
+                    .update(cx, |m, cx| m.nudge_volume(VOLUME_STEP, cx));
             }))
             .on_action(cx.listener(|this, _: &VolumeDown, _, cx| {
-                this.player.update(cx, |m, cx| m.nudge_volume(-VOLUME_STEP, cx));
+                this.player
+                    .update(cx, |m, cx| m.nudge_volume(-VOLUME_STEP, cx));
             }))
             .on_action(cx.listener(|this, _: &SeekBack, _, cx| {
-                this.player
-                    .update(cx, |m, cx| m.os_command(OsCommand::SeekBy(-SEEK_STEP_MS), cx));
+                this.player.update(cx, |m, cx| {
+                    m.os_command(OsCommand::SeekBy(-SEEK_STEP_MS), cx)
+                });
             }))
             .on_action(cx.listener(|this, _: &SeekForward, _, cx| {
-                this.player
-                    .update(cx, |m, cx| m.os_command(OsCommand::SeekBy(SEEK_STEP_MS), cx));
+                this.player.update(cx, |m, cx| {
+                    m.os_command(OsCommand::SeekBy(SEEK_STEP_MS), cx)
+                });
             }))
             .on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_lyrics(cx)))
             .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| this.like_current(cx)))

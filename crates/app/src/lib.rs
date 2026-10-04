@@ -12,6 +12,7 @@ pub mod backend;
 pub mod explore;
 pub mod discord;
 pub mod home;
+pub mod hud;
 #[cfg(windows)]
 pub mod hotkeys_win;
 pub mod keymap;
@@ -31,6 +32,7 @@ pub mod persist;
 pub mod platform;
 pub mod player;
 pub mod reporting;
+pub mod queue_source;
 pub mod search;
 pub mod settings;
 pub mod sleep_timer;

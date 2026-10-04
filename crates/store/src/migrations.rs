@@ -96,6 +96,18 @@ Migration {
 }, Migration {
     version: 5,
     sql: "
+        -- Where the saved queue came from (shown as \"Playing from ...\"), and where autoplay
+        -- took over from it. All NULL when the queue was put together by hand.
+        ALTER TABLE queue_state ADD COLUMN source_kind   TEXT;
+        ALTER TABLE queue_state ADD COLUMN source_name   TEXT;
+        ALTER TABLE queue_state ADD COLUMN source_target TEXT;
+        ALTER TABLE queue_state ADD COLUMN source_thumb  TEXT;
+        ALTER TABLE queue_state ADD COLUMN autoplay_first INTEGER;
+        ALTER TABLE queue_state ADD COLUMN autoplay_seed  TEXT;
+    ",
+}, Migration {
+    version: 6,
+    sql: "
         -- The Crate: songs set aside to remember, per account. Track fields only.
         CREATE TABLE crate_items (
             account_key TEXT    NOT NULL,

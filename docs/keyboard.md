@@ -24,6 +24,7 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Ctrl+Z | Undo the last queue change |
 | Ctrl+Shift+Z or Ctrl+Y | Redo it |
 | Esc | Close Now Playing |
+| F11 | Fullscreen while Now Playing is open (leaves fullscreen when Now Playing closes) |
 
 Undo covers what changes the queue: playing a new list (replacing it), Clear, Remove, reorder,
 Play next / Add to queue, Start radio (with the radio that follows it, as one step), and the
@@ -43,6 +44,7 @@ hidden in the tray or something else has focus:
 | Ctrl+Alt+Space | Play / pause |
 | Ctrl+Alt+Right / Left | Next / previous |
 | Ctrl+Alt+Up / Down | Volume +5 / -5 |
+| Ctrl+Alt+H | Show / hide the mini player HUD (only does anything while the mini player is open) |
 
 A combination another program already owns is skipped quietly (one line on stderr, e.g.
 `hotkeys: could not register VolumeUp: ...`); the others still work. Windows does not repeat a

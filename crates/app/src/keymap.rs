@@ -27,7 +27,8 @@ actions!(
         LikeCurrent,
         CrateCurrent,
         UndoQueue,
-        RedoQueue
+        RedoQueue,
+        ToggleFullscreen
     ]
 );
 
@@ -57,6 +58,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-z", UndoQueue, plain),
         KeyBinding::new("ctrl-shift-z", RedoQueue, plain),
         KeyBinding::new("ctrl-y", RedoQueue, plain),
+        KeyBinding::new("f11", ToggleFullscreen, plain),
     ]);
     // The shell context is what the plain keys hang off; keep the constant honest.
     debug_assert!(PLAIN.starts_with(KEY_CONTEXT));
@@ -70,6 +72,8 @@ pub enum GlobalCommand {
     Previous,
     VolumeUp,
     VolumeDown,
+    /// Shows or hides the mini player (the HUD).
+    ToggleHud,
 }
 
 /// A key a global hotkey can sit on (always with Ctrl+Alt held).
@@ -80,15 +84,17 @@ pub enum GlobalKey {
     Right,
     Up,
     Down,
+    H,
 }
 
 /// The global hotkeys: every one is Ctrl+Alt plus the key.
-pub const GLOBAL_BINDINGS: [(GlobalCommand, GlobalKey); 5] = [
+pub const GLOBAL_BINDINGS: [(GlobalCommand, GlobalKey); 6] = [
     (GlobalCommand::PlayPause, GlobalKey::Space),
     (GlobalCommand::Next, GlobalKey::Right),
     (GlobalCommand::Previous, GlobalKey::Left),
     (GlobalCommand::VolumeUp, GlobalKey::Up),
     (GlobalCommand::VolumeDown, GlobalKey::Down),
+    (GlobalCommand::ToggleHud, GlobalKey::H),
 ];
 
 impl GlobalCommand {
@@ -99,6 +105,8 @@ impl GlobalCommand {
             GlobalCommand::Previous => player.os_command(OsCommand::Previous, cx),
             GlobalCommand::VolumeUp => player.nudge_volume(VOLUME_STEP, cx),
             GlobalCommand::VolumeDown => player.nudge_volume(-VOLUME_STEP, cx),
+            // The window's, not the player's: the hotkey listener handles it.
+            GlobalCommand::ToggleHud => {}
         }
     }
 }
@@ -124,6 +132,7 @@ mod tests {
             GlobalCommand::Previous,
             GlobalCommand::VolumeUp,
             GlobalCommand::VolumeDown,
+            GlobalCommand::ToggleHud,
         ] {
             let n = GLOBAL_BINDINGS
                 .iter()
