@@ -124,6 +124,8 @@ pub enum Command {
     GoToAlbum,
     CopyLink,
     RemoveFromQueue,
+    AddToCrate,
+    RemoveFromCrate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +155,11 @@ pub fn album_of(track: &Track) -> Option<&AlbumRef> {
 
 /// The menu's items in groups (a separator sits between groups). `liked` is the song's heart.
 pub fn groups(subject: &Subject, liked: bool) -> Vec<Vec<Item>> {
+    groups_with(subject, liked, false)
+}
+
+/// [`groups`], knowing whether the song is in the Crate (the item then takes it out).
+pub fn groups_with(subject: &Subject, liked: bool, in_crate: bool) -> Vec<Vec<Item>> {
     match subject {
         Subject::Collection(_) => vec![
             vec![
@@ -174,6 +181,11 @@ pub fn groups(subject: &Subject, liked: bool) -> Vec<Vec<Item>> {
                 vec![
                     item(Command::StartRadio, Icon::Radio, "Start radio"),
                     item(Command::AddToPlaylist, Icon::PlaylistAdd, "Add to playlist\u{2026}"),
+                    if in_crate {
+                        item(Command::RemoveFromCrate, Icon::BoxFilled, "Remove from Crate")
+                    } else {
+                        item(Command::AddToCrate, Icon::BoxRegular, "Add to Crate")
+                    },
                 ],
                 vec![if liked {
                     item(Command::ToggleLike, Icon::HeartFilled, "Remove from Liked")
@@ -406,11 +418,15 @@ impl TrackMenu {
         let Some(open) = self.open.as_ref() else {
             return Vec::new();
         };
-        let liked = match &open.subject {
-            Subject::Track(t) => self.writes.read(cx).is_liked(t.track.video_id.as_str()),
-            Subject::Collection(_) => false,
+        let (liked, in_crate) = match &open.subject {
+            Subject::Track(t) => (
+                self.writes.read(cx).is_liked(t.track.video_id.as_str()),
+                crate::crate_list::handle(cx)
+                    .is_some_and(|c| c.read(cx).contains(t.track.video_id.as_str())),
+            ),
+            Subject::Collection(_) => (false, false),
         };
-        groups(&open.subject, liked)
+        groups_with(&open.subject, liked, in_crate)
     }
 
     fn items(&self, cx: &App) -> Vec<Item> {
@@ -611,6 +627,16 @@ impl TrackMenu {
             }
             (Command::CopyLink, subject) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(link_of(&subject)));
+            }
+            (Command::AddToCrate, Subject::Track(t)) => {
+                crate::crate_list::add_track(&self.player, t.track, t.thumbnail, cx);
+            }
+            (Command::RemoveFromCrate, Subject::Track(t)) => {
+                if let Some(model) = crate::crate_list::handle(cx) {
+                    model.update(cx, |m, cx| {
+                        m.remove(t.track.video_id.as_str(), cx);
+                    });
+                }
             }
             (Command::RemoveFromQueue, Subject::Track(t)) => {
                 if let Some(entry) = t.entry {

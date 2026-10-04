@@ -78,6 +78,8 @@ icons! {
     PlayNext => "play-next-regular",
     MoonRegular => "weather-moon-regular",
     MoonFilled => "weather-moon-filled",
+    BoxRegular => "box-regular",
+    BoxFilled => "box-filled",
 }
 
 pub struct Assets;

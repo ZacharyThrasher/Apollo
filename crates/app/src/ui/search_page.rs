@@ -50,6 +50,7 @@ actions!(
         PlaySelected,
         QueueSelected,
         LikeSelected,
+        CrateSelected,
         PlaylistSelected,
         BackToField,
         PreviousSuggestion,
@@ -69,6 +70,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", PlaySelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("ctrl-enter", QueueSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("l", LikeSelected, Some(RESULTS_CONTEXT)),
+        KeyBinding::new("c", CrateSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("p", PlaylistSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("escape", BackToField, Some(RESULTS_CONTEXT)),
     ]);
@@ -418,6 +420,12 @@ impl SearchPage {
         }
     }
 
+    fn crate_selected(&mut self, _: &CrateSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
+            crate::crate_list::add_track(&self.player, song.track, song.thumbnail, cx);
+        }
+    }
+
     fn playlist_selected(
         &mut self,
         _: &PlaylistSelected,
@@ -628,6 +636,7 @@ impl Render for SearchPage {
                     .on_action(cx.listener(Self::play_selected))
                     .on_action(cx.listener(Self::queue_selected))
                     .on_action(cx.listener(Self::like_selected))
+                    .on_action(cx.listener(Self::crate_selected))
                     .on_action(cx.listener(Self::playlist_selected))
                     .on_action(cx.listener(Self::back_to_field))
                     .role(gpui::Role::ListBox)

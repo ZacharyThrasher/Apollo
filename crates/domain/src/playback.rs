@@ -972,7 +972,8 @@ mod tests {
     fn replacing_the_queue_with_another_current_track_leaves_it_paused_at_its_position() {
         let mut c = Coordinator::default();
         let (load, _) = start_playing(&mut c, &["a", "b"]);
-        let mut other = Queue::new();
+        // Entry ids are per queue lineage, as in undo: a new list gets fresh ones.
+        let mut other = Queue::restore(c.queue().snapshot()).unwrap();
         other.play_context(tracks(&["x", "y"]), 0);
         let fx = c.replace_queue(other, 42_000);
         assert!(fx.contains(&Effect::Cancel { load }));

@@ -20,7 +20,16 @@ Search results use Up/Down and L on their own cursor row.
 | Ctrl+F or Ctrl+K | Open Search with the caret in the field (these work in text fields too) |
 | Ctrl+L | Show / hide lyrics (opens Now Playing) |
 | L | Like / unlike the playing song |
+| C | Set the playing song aside in the Crate (in the queue, Library and Search lists: the song under the cursor) |
+| Ctrl+Z | Undo the last queue change |
+| Ctrl+Shift+Z or Ctrl+Y | Redo it |
 | Esc | Close Now Playing |
+
+Undo covers what changes the queue: playing a new list (replacing it), Clear, Remove, reorder,
+Play next / Add to queue, Start radio (with the radio that follows it, as one step), and the
+Shuffle switch. Fifty steps are kept for the session. It never interrupts the song that is
+playing; only when the undone action had changed that song (a new list replaced the queue) does
+the old song come back, paused where it was. A small "Queue restored" pill shows for 2 seconds.
 
 Media keys are the OS's (SMTC) and are untouched.
 

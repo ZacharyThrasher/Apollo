@@ -40,6 +40,7 @@ actions!(
         PlayCursor,
         RemoveCursor,
         LikeCursor,
+        CrateCursor,
         MoveCursorUp,
         MoveCursorDown
     ]
@@ -72,6 +73,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("backspace", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("c", CrateCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", MoveCursorDown, Some(KEY_CONTEXT)),
     ]);
@@ -371,6 +373,16 @@ impl QueuePanel {
         if let Some(video) = video {
             self.writes.update(cx, |w, cx| w.toggle_like(&video, cx));
         }
+    }
+
+    /// Set the track under the cursor aside in the Crate.
+    fn crate_cursor(&mut self, cx: &mut Context<Self>) {
+        let view = self.fresh_view(cx);
+        let Some(row) = self.cursor.and_then(|id| view.row_by_id(id)) else {
+            return;
+        };
+        let track = row.track.clone();
+        crate::crate_list::add_track(&self.player, track, None, cx);
     }
 
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -869,6 +881,7 @@ impl Render for QueuePanel {
             .on_action(cx.listener(|this, _: &PlayCursor, _, cx| this.play_cursor(cx)))
             .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
             .on_action(cx.listener(|this, _: &LikeCursor, _, cx| this.like_cursor(cx)))
+            .on_action(cx.listener(|this, _: &CrateCursor, _, cx| this.crate_cursor(cx)))
             .on_action(cx.listener(|this, _: &MoveCursorUp, _, cx| this.move_cursor(-1, cx)))
             .on_action(cx.listener(|this, _: &MoveCursorDown, _, cx| this.move_cursor(1, cx)))
             .flex_1()
