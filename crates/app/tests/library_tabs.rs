@@ -739,6 +739,8 @@ fn play_and_shuffle_on_the_songs_tab_use_only_the_rows_the_filter_keeps(cx: &mut
     let kept = page.view.read_with(vcx, |v, cx| v.visible_count(cx));
     assert!(kept >= 1 && kept < titles.len());
 
+    // Autoplay would top a short queue up with a radio; this is about what the buttons queue.
+    page.player.update(vcx, |m, cx| m.set_autoplay(false, cx));
     click(vcx, "songs-play");
     assert_eq!(current_title(&page, vcx), titles[2]);
     let (label, queued, _) = queue_of(&page, vcx);
