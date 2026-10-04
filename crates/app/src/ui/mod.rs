@@ -17,6 +17,7 @@ pub mod queue_panel;
 pub mod related_pane;
 pub mod row_actions;
 pub mod search_page;
+pub mod search_popover;
 pub mod settings_page;
 pub mod settings_row;
 pub mod shell;

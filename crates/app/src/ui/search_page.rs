@@ -9,12 +9,12 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use apollo_domain::library::{Collection, CollectionKind};
-use apollo_provider::{Hit, ListedTrack, SearchResults};
+use apollo_provider::{Hit, LinkTarget, ListedTrack, SearchResults};
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
-    actions, div, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle, Focusable,
-    IntoElement, ParentElement, Render, ScrollHandle, SharedString, Styled, Window,
+    actions, deferred, div, prelude::*, px, AnyElement, App, Context, Entity, FocusHandle,
+    Focusable, IntoElement, ParentElement, Render, ScrollHandle, SharedString, Styled, Window,
 };
 
 use crate::assets::Icon;
@@ -22,13 +22,18 @@ use crate::library::model::{ArtistTarget, Target};
 use crate::library::writes::LibraryWrites;
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
-use crate::search::{failure_text, SearchModel, SearchState};
+use crate::search::{
+    as_link, failure_text, normalise, SearchEvent, SearchModel, SearchState, BAD_LINK_TEXT,
+    HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES,
+};
+use crate::settings::SettingsModel;
 use crate::style::{self, color};
 use crate::ui::anchor;
 use crate::ui::button::{focus_ring, keyboard_focused, IconButton};
 use crate::ui::card::{grid, heading, tile, Card};
 use crate::ui::playlist_picker::PlaylistPicker;
 use crate::ui::row_actions::{heart_action, more_slot, playlist_action, ACTION_SIZE};
+use crate::ui::search_popover::{self, SearchPopover};
 use crate::ui::track_menu::{self, Subject};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
@@ -47,6 +52,7 @@ actions!(
         LikeSelected,
         PlaylistSelected,
         BackToField,
+        PreviousSuggestion,
     ]
 );
 
@@ -57,6 +63,7 @@ pub fn bind_keys(cx: &mut App) {
     use gpui::KeyBinding;
     cx.bind_keys([
         KeyBinding::new("down", FocusResults, Some(text_field::KEY_CONTEXT)),
+        KeyBinding::new("up", PreviousSuggestion, Some(text_field::KEY_CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(RESULTS_CONTEXT)),
         KeyBinding::new("up", SelectPrevious, Some(RESULTS_CONTEXT)),
         KeyBinding::new("enter", PlaySelected, Some(RESULTS_CONTEXT)),
@@ -95,6 +102,15 @@ pub struct SearchPage {
     scroll: ScrollHandle,
     /// The keyboard-selected song, shown only while the list holds focus.
     selected: Option<usize>,
+    /// The popover under the field (recents or suggestions): the row under the keyboard or
+    /// pointer, whether it was closed since the text last changed, and whether the field had
+    /// focus when last drawn (gaining it brings the popover back).
+    active: Option<usize>,
+    dismissed: bool,
+    field_was_focused: bool,
+    /// The text a picked row just put in the field, so its change event does not reopen the
+    /// popover.
+    picked: Option<String>,
 }
 
 impl SearchPage {
@@ -107,10 +123,12 @@ impl SearchPage {
         picker: Entity<PlaylistPicker>,
         model: Entity<SearchModel>,
         thumbs: Entity<ThumbStore>,
+        settings: Entity<SettingsModel>,
         root_focus: FocusHandle,
         on_open: impl Fn(Target, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
+        let on_open: OpenTarget = Rc::new(on_open);
         // Tab order: nav (1-4), the field and its clear button (5), the list (6), the player bar.
         let field_focus = cx.focus_handle().tab_index(5).tab_stop(true);
         let clear_focus = cx.focus_handle().tab_index(5).tab_stop(true);
@@ -123,12 +141,31 @@ impl SearchPage {
                 TextFieldEvent::Changed => {
                     let text = field.read(cx).text().to_owned();
                     this.selected = None;
+                    this.active = None;
+                    // Typing brings the popover back; a row picked a moment ago does not.
+                    if this.picked.take().as_deref() != Some(text.as_str()) {
+                        this.dismissed = false;
+                    }
                     this.model.update(cx, |m, cx| m.set_query(&text, cx));
                 }
-                TextFieldEvent::Submit => this.model.update(cx, |m, cx| m.submit(cx)),
+                TextFieldEvent::Submit => this.submit(cx),
             },
         )
         .detach();
+        {
+            let on_open = on_open.clone();
+            let player = player.clone();
+            cx.subscribe(&model, move |_, _, event: &SearchEvent, cx| {
+                let SearchEvent::OpenLink(target) = event;
+                open_link(target.clone(), &player, &on_open, cx);
+            })
+            .detach();
+        }
+        cx.observe(&settings, |this, settings, cx| {
+            this.sync_options(&settings, cx)
+        })
+        .detach();
+        let initial = settings.clone();
         cx.observe(&model, |this, _, cx| {
             this.selected = None;
             this.request_thumbs(cx);
@@ -138,7 +175,7 @@ impl SearchPage {
         cx.observe(&thumbs, |_, _, cx| cx.notify()).detach();
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
-        Self {
+        let mut page = Self {
             player,
             writes,
             picker,
@@ -149,10 +186,25 @@ impl SearchPage {
             action_focus,
             root_focus,
             card_focus: Vec::new(),
-            on_open: Rc::new(on_open),
+            on_open,
             scroll: ScrollHandle::new(),
             selected: None,
-        }
+            active: None,
+            dismissed: false,
+            field_was_focused: false,
+            picked: None,
+        };
+        page.sync_options(&initial, cx);
+        page
+    }
+
+    /// Hand the Settings > Search switches to the model.
+    fn sync_options(&mut self, settings: &Entity<SettingsModel>, cx: &mut Context<Self>) {
+        let (save, hide) = {
+            let s = settings.read(cx);
+            (s.get(&SAVE_RECENT_SEARCHES), s.get(&HIDE_MUSIC_VIDEOS))
+        };
+        self.model.update(cx, |m, cx| m.set_options(save, hide, cx));
     }
 
     /// Back from a page opened from here: focus returns to the results (or the field when
@@ -194,7 +246,105 @@ impl SearchPage {
         });
     }
 
+    /// Enter in the field: a highlighted popover row is picked, anything else is searched for.
+    fn submit(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = self
+            .active
+            .and_then(|i| self.popover_rows(cx).get(i).cloned())
+        {
+            if self.popover_visible(cx) {
+                self.pick_text(row.to_string(), cx);
+                return;
+            }
+        }
+        self.dismissed = true;
+        self.active = None;
+        self.model.update(cx, |m, cx| m.submit(cx));
+        cx.notify();
+    }
+
+    /// A popover row was chosen (Enter or a click): the field takes its text and it is
+    /// searched for at once.
+    fn pick_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.dismissed = true;
+        self.active = None;
+        self.picked = Some(normalise(&text));
+        self.field.update(cx, |f, cx| f.set_text(&text, cx));
+        self.model.update(cx, |m, cx| m.search_for(&text, cx));
+        cx.notify();
+    }
+
+    /// What the popover would list: the recents while the field is empty, the completions while
+    /// it holds text (none for a pasted link).
+    fn popover_rows(&self, cx: &App) -> Vec<SharedString> {
+        let typed = normalise(self.field.read(cx).text());
+        let model = self.model.read(cx);
+        let rows: Vec<String> = if typed.is_empty() {
+            model.recents().to_vec()
+        } else if as_link(&typed).is_some() {
+            Vec::new()
+        } else {
+            model.suggestions().to_vec()
+        };
+        rows.into_iter().map(Into::into).collect()
+    }
+
+    fn popover_kind(&self, cx: &App) -> search_popover::Kind {
+        if self.field.read(cx).text().trim().is_empty() {
+            search_popover::Kind::Recents
+        } else {
+            search_popover::Kind::Suggestions
+        }
+    }
+
+    /// The popover shows while the field has focus, was not closed since the text last
+    /// changed, and there is something to list.
+    fn popover_visible(&self, cx: &App) -> bool {
+        self.field_was_focused && !self.dismissed && !self.popover_rows(cx).is_empty()
+    }
+
+    fn step_popover(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.popover_rows(cx).len() as isize;
+        let next = match (self.active, delta) {
+            (None, d) if d > 0 => Some(0),
+            (None, _) => None,
+            (Some(i), d) => {
+                let i = i as isize + d;
+                (i >= 0).then(|| i.min(count - 1) as usize)
+            }
+        };
+        self.active = next;
+        cx.notify();
+    }
+
+    fn previous_suggestion(
+        &mut self,
+        _: &PreviousSuggestion,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.popover_visible(cx) {
+            self.step_popover(-1, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
+    /// Escape closes the popover before it does anything else.
+    fn close_popover(&mut self, _: &text_field::Escape, _: &mut Window, cx: &mut Context<Self>) {
+        if self.popover_visible(cx) {
+            self.dismissed = true;
+            self.active = None;
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
     fn focus_results(&mut self, _: &FocusResults, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popover_visible(cx) {
+            self.step_popover(1, cx);
+            return;
+        }
         if self.songs(cx).is_empty() {
             return;
         }
@@ -244,6 +394,7 @@ impl SearchPage {
 
     fn play_selected(&mut self, _: &PlaySelected, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
+            self.model.update(cx, |m, cx| m.remember(cx));
             self.player.update(cx, |m, cx| {
                 m.hint_art(song.track.video_id.as_str(), song.thumbnail.as_deref());
                 m.play_now(song.track, cx)
@@ -315,6 +466,41 @@ fn thumbnails(results: &SearchResults) -> impl Iterator<Item = String> + '_ {
         )
 }
 
+/// A pasted link was looked up: a track plays, a page opens.
+fn open_link(target: LinkTarget, player: &Entity<PlayerModel>, on_open: &OpenTarget, cx: &mut App) {
+    match target {
+        LinkTarget::Track(song) => player.update(cx, |m, cx| {
+            m.hint_art(song.track.video_id.as_str(), song.thumbnail.as_deref());
+            m.play_now(song.track, cx)
+        }),
+        LinkTarget::Collection(collection) => {
+            open_page(Target::Collection(collection), on_open, cx)
+        }
+        LinkTarget::Artist {
+            id,
+            name,
+            thumbnail,
+        } => open_page(
+            Target::Artist(ArtistTarget {
+                id,
+                name,
+                thumbnail,
+            }),
+            on_open,
+            cx,
+        ),
+    }
+}
+
+/// Open a page from outside a window callback: through the app's window.
+fn open_page(target: Target, on_open: &OpenTarget, cx: &mut App) {
+    let Some(window) = cx.windows().into_iter().next() else {
+        return;
+    };
+    let on_open = on_open.clone();
+    let _ = window.update(cx, move |_, window, cx| on_open(target, window, cx));
+}
+
 impl Render for SearchPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
@@ -332,11 +518,33 @@ impl Render for SearchPage {
                 .push(cx.focus_handle().tab_index(7).tab_stop(true));
         }
 
-        let field_ring = keyboard_focused(&self.field.read(cx).focus_handle(cx), window);
+        let field_focus = self.field.read(cx).focus_handle(cx);
+        let field_ring = keyboard_focused(&field_focus, window);
+        let field_focused = field_focus.is_focused(window);
+        if field_focused && !self.field_was_focused {
+            // Back in the field: the recents show again, suggestions wait for typing.
+            self.dismissed = !self.field.read(cx).text().is_empty();
+            self.active = None;
+        }
+        self.field_was_focused = field_focused;
         let list_focused = self.results_focus.is_focused(window);
+        let popover = self.popover(cx);
 
         let body: AnyElement = match (state, results) {
             (SearchState::Idle, _) => div().into_any_element(),
+            (SearchState::BadLink, _) => {
+                let field = self.field.clone();
+                self.message(
+                    BAD_LINK_TEXT.into(),
+                    "Clear",
+                    accent,
+                    move |window, cx| {
+                        field.update(cx, |f, cx| f.set_text("", cx));
+                        text_field::focus(&field, window, cx);
+                    },
+                    cx,
+                )
+            }
             (SearchState::Failed(failure), _) => {
                 let model = self.model.clone();
                 self.message(
@@ -371,6 +579,8 @@ impl Render for SearchPage {
         div()
             .id("search-page")
             .on_action(cx.listener(Self::focus_results))
+            .on_action(cx.listener(Self::previous_suggestion))
+            .capture_action(cx.listener(Self::close_popover))
             .on_action(cx.listener(Self::leave_field))
             .flex_1()
             .min_w_0()
@@ -389,10 +599,24 @@ impl Render for SearchPage {
                     .relative()
                     .flex_none()
                     .mt(px(spacing::S4))
+                    .debug_selector(|| "search-field".into())
                     .child(self.field.clone())
                     .when(field_ring, |d| {
                         d.child(focus_ring(color::accent(accent), radius::SMALL))
-                    }),
+                    })
+                    .children(popover.map(|popover| {
+                        // Deferred so it paints over the results below the field.
+                        deferred(
+                            div()
+                                .absolute()
+                                .top_full()
+                                .mt(px(spacing::S1))
+                                .left_0()
+                                .right_0()
+                                .child(popover),
+                        )
+                        .with_priority(1)
+                    })),
             )
             .child(
                 div()
@@ -420,6 +644,63 @@ impl Render for SearchPage {
 }
 
 impl SearchPage {
+    /// The popover under the field, when it should show.
+    fn popover(&self, cx: &mut Context<Self>) -> Option<SearchPopover> {
+        if !self.popover_visible(cx) {
+            return None;
+        }
+        let rows = self.popover_rows(cx);
+        let kind = self.popover_kind(cx);
+        let page = cx.entity();
+        let pick = {
+            let (page, rows) = (page.clone(), rows.clone());
+            Rc::new(move |ix: usize, _: &mut Window, cx: &mut App| {
+                if let Some(row) = rows.get(ix) {
+                    let text = row.to_string();
+                    page.update(cx, |p, cx| p.pick_text(text, cx));
+                }
+            })
+        };
+        let hover = {
+            let page = page.clone();
+            Rc::new(move |ix: usize, _: &mut Window, cx: &mut App| {
+                page.update(cx, |p, cx| {
+                    if p.active != Some(ix) {
+                        p.active = Some(ix);
+                        cx.notify();
+                    }
+                });
+            })
+        };
+        let remove = {
+            let (page, rows) = (page.clone(), rows.clone());
+            Rc::new(move |ix: usize, _: &mut Window, cx: &mut App| {
+                if let Some(row) = rows.get(ix) {
+                    let text = row.to_string();
+                    page.update(cx, |p, cx| {
+                        p.active = None;
+                        p.model.update(cx, |m, cx| m.remove_recent(&text, cx));
+                    });
+                }
+            })
+        };
+        let clear = Rc::new(move |_: &mut Window, cx: &mut App| {
+            page.update(cx, |p, cx| {
+                p.active = None;
+                p.model.update(cx, |m, cx| m.clear_recents(cx));
+            });
+        });
+        Some(SearchPopover {
+            kind,
+            rows,
+            active: self.active,
+            on_pick: pick,
+            on_hover: hover,
+            on_remove: remove,
+            on_clear: clear,
+        })
+    }
+
     /// One short line and one action: the empty and error states.
     fn message(
         &self,

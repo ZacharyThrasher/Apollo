@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use apollo_lyrics::{Lrclib, LyricsCache, LyricsService, SqliteCache};
+use apollo_lyrics::{Lrclib, LyricsCache, LyricsService, LyricsSource, SqliteCache};
 use gpui::{
     px, size, App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
     WindowHandle, WindowOptions,
@@ -15,8 +15,8 @@ use crate::lyrics::SimLyrics;
 use crate::player::PlayerModel;
 use crate::search::Unavailable;
 use crate::settings::{
-    AutoplayStore, GaplessStore, LyricsOpenStore, NormalizeStore, QueueStore, RelatedOpenStore,
-    SettingsBackend,
+    AutoplayStore, GaplessStore, LibrarySortStore, LyricsOpenStore, NormalizeStore, QueueStore,
+    RelatedOpenStore, SettingsBackend,
     SettingsModel, SqliteSettings, VolumeStore,
 };
 use crate::ui::shell::{self, Quit, Shell};
@@ -54,6 +54,7 @@ struct Stores {
     queue: Option<Arc<dyn QueueStore>>,
     lyrics_open: Option<Arc<dyn LyricsOpenStore>>,
     related_open: Option<Arc<dyn RelatedOpenStore>>,
+    library_sort: Option<Arc<dyn LibrarySortStore>>,
     /// The store's file, where the lyrics cache keeps its rows too.
     db_path: Option<std::path::PathBuf>,
 }
@@ -68,6 +69,7 @@ impl Stores {
                 gapless: Some(db.clone()),
                 lyrics_open: Some(db.clone()),
                 related_open: Some(db.clone()),
+                library_sort: Some(db.clone()),
                 db_path: Some(db.path().to_path_buf()),
                 queue: Some(db),
             },
@@ -126,10 +128,11 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
         settings.clone(),
         !start_hidden,
     );
-    let lyrics = lyrics_service(&mode, stores.db_path.clone());
+    let lyrics = lyrics_service(&mode, stores.db_path.clone(), &ports);
     let _ = window.update(cx, |shell, _, cx| {
         shell.install_lyrics(lyrics, stores.lyrics_open.clone(), cx);
         shell.install_related(stores.related_open.clone(), cx);
+        shell.install_library_sort(stores.library_sort.clone(), cx);
     });
     // Media keys and the SMTC overlay, on the window just opened.
     #[cfg(windows)]
@@ -139,6 +142,11 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     if let Some(tray) = tray {
         crate::tray_win::install(cx, window, tray, player.clone(), settings.clone());
     }
+    // Optional system-wide hotkeys (Settings > Keyboard).
+    #[cfg(windows)]
+    crate::hotkeys_win::install(cx, settings.clone(), player.clone());
+    // Discord Rich Presence (Settings > Discord); inert until the Discord application id is set.
+    crate::discord::install(cx, player.clone(), settings.clone());
     // A second launch asks this window to come forward, whether it is hidden in the tray,
     // minimized or behind others.
     #[cfg(windows)]
@@ -175,13 +183,26 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     window
 }
 
-/// Where lyrics come from: LRCLIB with the SQLite cache, or the fixtures under the simulation.
-fn lyrics_service(mode: &Mode, db_path: Option<std::path::PathBuf>) -> Arc<LyricsService> {
+/// Where lyrics come from: LRCLIB, then YouTube Music's own plain lyrics, with the SQLite cache;
+/// or the fixtures under the simulation.
+fn lyrics_service(
+    mode: &Mode,
+    db_path: Option<std::path::PathBuf>,
+    ports: &AccountPorts,
+) -> Arc<LyricsService> {
     if matches!(mode, Mode::Sim | Mode::SimSignedOut) {
         return Arc::new(LyricsService::new(vec![Arc::new(SimLyrics)], None));
     }
     let cache = db_path.map(|path| Arc::new(SqliteCache::at(path)) as Arc<dyn LyricsCache>);
-    Arc::new(LyricsService::new(vec![Arc::new(Lrclib::new())], cache))
+    let mut sources: Vec<Arc<dyn LyricsSource>> = vec![Arc::new(Lrclib::new())];
+    #[cfg(feature = "real-services")]
+    match crate::backend::real_lyrics::AccountLyrics::new(ports.service.clone()) {
+        Ok(source) => sources.push(Arc::new(source)),
+        Err(err) => eprintln!("YouTube Music lyrics unavailable: {err}"),
+    }
+    #[cfg(not(feature = "real-services"))]
+    let _ = ports;
+    Arc::new(LyricsService::new(sources, cache))
 }
 
 fn open_window(
