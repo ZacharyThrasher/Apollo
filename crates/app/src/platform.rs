@@ -100,14 +100,14 @@ pub fn set_click_through(window: &Window, on: bool) {
     let _ = (window, on);
 }
 
-/// Whether the mouse pointer is over the window's rectangle, wherever the clicks go. Always
-/// false off Windows.
-pub fn pointer_over(window: &Window) -> bool {
+/// Whether the mouse pointer is over the window's rectangle less `inset` logical pixels on
+/// every side, wherever the clicks go. Always false off Windows.
+pub fn pointer_over(window: &Window, inset: f32) -> bool {
     #[cfg(windows)]
-    return win::pointer_over(window);
+    return win::pointer_over(window, inset);
     #[cfg(not(windows))]
     {
-        let _ = window;
+        let _ = (window, inset);
         false
     }
 }
@@ -275,17 +275,18 @@ mod win {
         }
     }
 
-    pub fn pointer_over(window: &Window) -> bool {
+    pub fn pointer_over(window: &Window, inset: f32) -> bool {
         let Some(hwnd) = hwnd_of(window) else {
             return false;
         };
         let (mut point, mut rect) = (Point::default(), Rect::default());
         // SAFETY: both calls fill the structs they are given.
         let ok = unsafe { GetCursorPos(&mut point) != 0 && GetWindowRect(hwnd, &mut rect) != 0 };
-        ok && point.x >= rect.left
-            && point.x < rect.right
-            && point.y >= rect.top
-            && point.y < rect.bottom
+        let inset = (inset * window.scale_factor()).round() as i32;
+        ok && point.x >= rect.left + inset
+            && point.x < rect.right - inset
+            && point.y >= rect.top + inset
+            && point.y < rect.bottom - inset
     }
 
     pub fn move_window(window: &Window, x: f32, y: f32) {

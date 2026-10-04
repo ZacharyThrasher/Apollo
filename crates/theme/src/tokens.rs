@@ -88,6 +88,9 @@ pub mod typography {
     pub const CAPTION: TextStyle = TextStyle::new(11.0, 400);
     pub const BODY: TextStyle = TextStyle::new(13.0, 400);
     pub const BODY_STRONG: TextStyle = TextStyle::new(13.0, 600);
+    /// The game HUD's title and artist lines (DIRECTION.md, HUD).
+    pub const HUD_TITLE: TextStyle = TextStyle::new(14.0, 600);
+    pub const HUD_ARTIST: TextStyle = TextStyle::new(12.0, 400);
     pub const LIST_TITLE: TextStyle = TextStyle::new(15.0, 400);
     pub const SECTION: TextStyle = TextStyle::new(20.0, 600);
     pub const PAGE_TITLE: TextStyle = TextStyle::new(28.0, 600);
