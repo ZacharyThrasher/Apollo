@@ -12,6 +12,7 @@ use std::sync::Arc;
 use apollo_domain::library::{Collection, CollectionKind, LIKED_MUSIC_BROWSE_ID};
 use apollo_domain::listing::{Applied, Listing, LoadFailure, LoadState, Page, Revision};
 use apollo_domain::model::{BrowseId, Track};
+use apollo_domain::queue::QueueSource;
 use gpui::{Context, Entity, RenderImage};
 use image::imageops;
 
@@ -28,6 +29,7 @@ pub use artist::MixKind;
 use crate::art::{sized_thumbnail, DecodedArt};
 use crate::page_cache::{keys, PageCache, Ticket};
 use crate::player::{PlayerModel, Status};
+use crate::queue_source;
 use crate::settings::LibrarySortStore;
 use crate::url_thumbs::Thumb as ThumbView;
 
@@ -1160,7 +1162,8 @@ impl LibraryModel {
             .iter()
             .map(|row| (row.track.clone(), row.thumbnail.clone()))
             .collect();
-        self.play_tracks(rows, request, cx);
+        let source = queue_source::of_collection(&detail.collection);
+        self.play_tracks(rows, request, Some(source), cx);
     }
 
     /// An artist's play commands act on the top songs shown on the page.
@@ -1177,7 +1180,8 @@ impl LibraryModel {
                     .collect()
             })
             .unwrap_or_default();
-        self.play_tracks(rows, request, cx);
+        let source = queue_source::of_artist(&detail.target);
+        self.play_tracks(rows, request, Some(source), cx);
     }
 
     /// `rows` pair each track with its listing thumbnail, which the artwork source is told about
@@ -1186,6 +1190,7 @@ impl LibraryModel {
         &mut self,
         rows: Vec<(Track, Option<String>)>,
         request: PlayRequest,
+        source: Option<QueueSource>,
         cx: &mut Context<Self>,
     ) {
         if rows.is_empty() {
@@ -1196,7 +1201,7 @@ impl LibraryModel {
             for (track, thumb) in tracks.iter().zip(&thumbs) {
                 p.hint_art(track.video_id.as_str(), thumb.as_deref());
             }
-            p.play_tracks(tracks, request.start, request.shuffle, cx)
+            p.play_tracks_from(tracks, request.start, request.shuffle, source, cx)
         });
     }
 

@@ -232,6 +232,15 @@ fn a_playlist_card_opens_the_playlist_and_a_row_plays_from_there(cx: &mut TestAp
     vcx.run_until_parked();
     assert_eq!(current_title(&page, vcx), "Midnight Drive");
     assert_eq!(queue_len(&page, vcx), 3, "the whole playlist is queued");
+    // The queue header names the playlist it was played from.
+    let heading = page.player.read_with(vcx, |m, _| m.queue_view().heading);
+    match heading {
+        Some(apollo_app::player::QueueHeading::Source(source)) => {
+            assert_eq!(source.label(), "Night Drive Mix");
+            assert!(source.target.is_some(), "the name can open the page");
+        }
+        other => panic!("expected the playlist as the source, got {other:?}"),
+    }
 }
 
 #[gpui::test]

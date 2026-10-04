@@ -20,7 +20,9 @@ use gpui::{
 
 use crate::assets::Icon;
 use crate::library::LibraryWrites;
-use crate::player::{format_time, PlayerModel, QueueRow, QueueView, Status};
+use crate::player::{format_time, PlayerModel, QueueHeading, QueueRow, QueueView, Status};
+use crate::queue_source;
+use crate::url_thumbs::{Thumb, ThumbStore};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
@@ -28,8 +30,10 @@ use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus, PaneTabs};
 use crate::ui::player_bar::text_line;
 use crate::ui::playing_row;
 use crate::ui::row_actions::{heart_action, more_slot, ACTION_SIZE};
+use crate::ui::search_page::OpenTarget;
 use crate::ui::switch::LabeledSwitch;
 use crate::ui::track_menu::{self, Subject};
+use crate::ui::tooltip::Tooltip;
 use crate::ui::transport::on_off;
 
 actions!(
@@ -55,11 +59,17 @@ const ROW_INSET: f32 = spacing::S1;
 const ART: f32 = 40.0;
 const DROP_LINE: f32 = 2.0;
 const DURATION_WIDTH: f32 = spacing::S12;
+/// The "Playing from" row under the header: a 32px cover, two lines of text, the Autoplay switch.
+const SOURCE_ROW: f32 = 48.0;
+const SOURCE_ART: f32 = 32.0;
 
 /// Tab order: after the page, before the player bar.
 const TAB_SHUFFLE: isize = 13;
 const TAB_REPEAT: isize = 14;
 const TAB_CLEAR: isize = 15;
+/// Shares Clear's index: the source link follows it in the tree, and the indices up to the
+/// player bar's are all taken.
+const TAB_SOURCE: isize = TAB_CLEAR;
 const TAB_AUTOPLAY: isize = 16;
 const TAB_LIST: isize = 17;
 const TAB_SEARCH: isize = 18;
@@ -208,6 +218,7 @@ pub struct QueuePanel {
     focus_repeat: FocusHandle,
     focus_clear: FocusHandle,
     focus_autoplay: FocusHandle,
+    focus_source: FocusHandle,
     focus_list: FocusHandle,
     focus_search: FocusHandle,
     scroll: UniformListScrollHandle,
@@ -218,6 +229,9 @@ pub struct QueuePanel {
     items: Vec<Item>,
     accent: Accent,
     on_search: Rc<Handler>,
+    thumbs: Entity<ThumbStore>,
+    /// Opens the page the "Playing from" name stands for.
+    on_open: OpenTarget,
     /// Now Playing's pane control, drawn above the header while Now Playing is open (the control
     /// is then the panel's title).
     tabs: Option<(PaneFocus, OnPick)>,
@@ -228,7 +242,9 @@ impl QueuePanel {
     pub fn new(
         player: Entity<PlayerModel>,
         writes: Entity<LibraryWrites>,
+        thumbs: Entity<ThumbStore>,
         on_search: impl Fn(&mut Window, &mut App) + 'static,
+        on_open: OpenTarget,
         cx: &mut Context<Self>,
     ) -> Self {
         let stop = |cx: &mut Context<Self>, index: isize| {
@@ -236,11 +252,13 @@ impl QueuePanel {
         };
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
+        cx.observe(&thumbs, |_, _, cx| cx.notify()).detach();
         Self {
             focus_shuffle: stop(cx, TAB_SHUFFLE),
             focus_repeat: stop(cx, TAB_REPEAT),
             focus_clear: stop(cx, TAB_CLEAR),
             focus_autoplay: stop(cx, TAB_AUTOPLAY),
+            focus_source: stop(cx, TAB_SOURCE),
             focus_list: stop(cx, TAB_LIST),
             focus_search: stop(cx, TAB_SEARCH),
             player,
@@ -251,6 +269,8 @@ impl QueuePanel {
             items: Vec::new(),
             accent: Accent::fallback(),
             on_search: Rc::new(Box::new(on_search)),
+            thumbs,
+            on_open,
             tabs: None,
             tabs_visible: false,
         }
@@ -720,6 +740,157 @@ impl QueuePanel {
     }
 }
 
+/// What the "Playing from" line says: caption, name, cover URL and the page the name opens.
+struct Playing {
+    caption: &'static str,
+    name: String,
+    cover: Option<String>,
+    page: Option<crate::library::Target>,
+}
+
+fn playing_from(heading: &QueueHeading) -> Playing {
+    match heading {
+        QueueHeading::Source(source) => Playing {
+            caption: "Playing from",
+            name: source.label(),
+            cover: source.thumbnail.clone(),
+            page: queue_source::page_of(source),
+        },
+        QueueHeading::Autoplay(seed) => Playing {
+            caption: "Autoplay",
+            name: seed.clone(),
+            cover: None,
+            page: None,
+        },
+        QueueHeading::Yours => Playing {
+            caption: "Playing from",
+            name: "Your queue".to_owned(),
+            cover: None,
+            page: None,
+        },
+    }
+}
+
+impl QueuePanel {
+    /// Under the header: the place the queue plays from (a cover, "Playing from" over its name;
+    /// the name opens the page when there is one) and the Autoplay switch at the right.
+    fn source_row(
+        &mut self,
+        player_view: &crate::player::PlayerView,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let accent = player_view.accent;
+        let ready = player_view.status == Status::Ready;
+        let playing = self.view.heading.as_ref().map(playing_from);
+
+        let place = playing.map(|playing| {
+            if let Some(url) = &playing.cover {
+                self.thumbs.update(cx, |store, cx| store.request(url, cx));
+            }
+            let cover = playing
+                .cover
+                .as_deref()
+                .and_then(|url| match self.thumbs.read(cx).get(url) {
+                    Thumb::Image(image) => Some(image),
+                    _ => None,
+                });
+            let linked = playing.page.is_some();
+            let ring = linked && keyboard_focused(&self.focus_source, window);
+            let text = div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    style::text_style(div(), typography::CAPTION, cx)
+                        .text_color(color::text_secondary())
+                        .child(playing.caption),
+                )
+                .child(
+                    {
+                        let full: SharedString = playing.name.clone().into();
+                        style::text_style(div(), typography::BODY_STRONG, cx)
+                            .id("queue-source-name")
+                            .truncate()
+                            .text_color(color::text_primary())
+                            .when(linked, |d| d.group_hover("queue-source", |s| s.underline()))
+                            .tooltip({
+                                let full = full.clone();
+                                move |_, cx| Tooltip::view(full.clone(), cx)
+                            })
+                            .child(full)
+                    },
+                );
+            let open = self.on_open.clone();
+            div()
+                .id("queue-source")
+                .debug_selector(|| "queue-source".into())
+                .group("queue-source")
+                .relative()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap(px(spacing::S2))
+                .rounded(px(radius::SMALL))
+                .child(art_tile(SOURCE_ART, cover))
+                .child(text)
+                .when_some(playing.page, |d, page| {
+                    d.track_focus(&self.focus_source.clone().tab_stop(true))
+                        .role(gpui::Role::Link)
+                        .aria_label(playing.name.clone())
+                        .cursor_pointer()
+                        .on_click(move |event: &ClickEvent, window, cx| {
+                            // Space is the global play/pause key.
+                            if let ClickEvent::Keyboard(k) = event {
+                                if k.button == KeyboardButton::Space {
+                                    return;
+                                }
+                            }
+                            open(page.clone(), window, cx);
+                        })
+                })
+                .when(ring, |d| d.child(focus_ring(color::accent(accent), radius::SMALL)))
+        });
+
+        let player = self.player.clone();
+        div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap(px(spacing::S2))
+            .h(px(SOURCE_ROW))
+            .px(px(spacing::S4))
+            .children(place)
+            // Right-aligned: a radio keeps playing when the queue would end.
+            .child(
+                div()
+                    .debug_selector(|| "queue-autoplay".into())
+                    .flex_none()
+                    .ml_auto()
+                    .child(
+                        LabeledSwitch::new(
+                            "queue-autoplay",
+                            &self.focus_autoplay,
+                            "Autoplay",
+                            player_view.autoplay,
+                            accent,
+                        )
+                        .enabled(ready)
+                        .on_toggle(move |_, cx| {
+                            player.update(cx, |m, cx| {
+                                let on = !m.autoplay();
+                                m.set_autoplay(on, cx)
+                            });
+                        }),
+                    ),
+            )
+    }
+}
+
 impl Focusable for QueuePanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_list.clone()
@@ -727,7 +898,7 @@ impl Focusable for QueuePanel {
 }
 
 impl Render for QueuePanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (player_view, view) = {
             let p = self.player.read(cx);
             (p.view(), p.queue_view())
@@ -830,33 +1001,9 @@ impl Render for QueuePanel {
                             }),
                         ),
                     )
-                    // Right-aligned after the list controls: a radio keeps playing when the
-                    // queue would end.
-                    .child(
-                        div()
-                            .debug_selector(|| "queue-autoplay".into())
-                            .ml(px(spacing::S2))
-                            .child(
-                                LabeledSwitch::new(
-                                    "queue-autoplay",
-                                    &self.focus_autoplay,
-                                    "Autoplay",
-                                    player_view.autoplay,
-                                    accent,
-                                )
-                                .enabled(ready)
-                                .on_toggle({
-                                    let p = player.clone();
-                                    move |_, cx| {
-                                        p.update(cx, |m, cx| {
-                                            let on = !m.autoplay();
-                                            m.set_autoplay(on, cx)
-                                        });
-                                    }
-                                }),
-                            ),
-                    ),
             );
+
+        let source = self.source_row(&player_view, window, cx);
 
         let list = div()
             .id("queue-list")
@@ -899,6 +1046,7 @@ impl Render for QueuePanel {
             .border_color(color::border_subtle())
             .children(tabs)
             .child(header)
+            .child(source)
             .child(list)
     }
 }
@@ -925,6 +1073,7 @@ mod tests {
             history: (0..history).map(row).collect(),
             current: current.then(|| row(100)),
             upcoming: (0..upcoming).map(|i| row(200 + i)).collect(),
+            heading: None,
         }
     }
 

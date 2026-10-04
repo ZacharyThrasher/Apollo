@@ -25,6 +25,7 @@ use gpui::{
 
 use crate::assets::Icon;
 use crate::library::model::{ArtistTarget, Target};
+use crate::queue_source;
 use crate::library::writes::LibraryWrites;
 use crate::player::PlayerModel;
 use crate::style::{self, color};
@@ -551,27 +552,31 @@ impl TrackMenu {
                 }, cx);
             }
             (Command::Play, Subject::Collection(c)) => {
-                self.with_tracks(c, Pages::All, |menu, rows, cx| {
+                let source = Some(queue_source::of_collection(&c));
+                self.with_tracks(c, Pages::All, move |menu, rows, cx| {
                     let tracks = menu.hinted(rows, cx);
                     menu.player
-                        .update(cx, |p, cx| p.play_tracks(tracks, Some(0), None, cx));
+                        .update(cx, |p, cx| p.play_tracks_from(tracks, Some(0), None, source, cx));
                 }, cx);
             }
             (Command::Shuffle, Subject::Collection(c)) => {
-                self.with_tracks(c, Pages::All, |menu, rows, cx| {
+                let source = Some(queue_source::of_collection(&c));
+                self.with_tracks(c, Pages::All, move |menu, rows, cx| {
                     let tracks = menu.hinted(rows, cx);
                     menu.player
-                        .update(cx, |p, cx| p.play_tracks(tracks, None, Some(true), cx));
+                        .update(cx, |p, cx| p.play_tracks_from(tracks, None, Some(true), source, cx));
                 }, cx);
             }
             (Command::StartRadio, Subject::Track(t)) => {
-                self.start_radio(t.track, t.thumbnail, cx);
+                let name = t.track.title.clone();
+                self.start_radio(t.track, t.thumbnail, name, cx);
             }
             (Command::StartRadio, Subject::Collection(c)) => {
                 // A collection's radio is seeded from its first song.
-                self.with_tracks(c, Pages::First, |menu, rows, cx| {
+                let name = c.title.clone();
+                self.with_tracks(c, Pages::First, move |menu, rows, cx| {
                     if let Some(first) = rows.into_iter().next() {
-                        menu.start_radio(first.track, first.thumbnail, cx);
+                        menu.start_radio(first.track, first.thumbnail, name, cx);
                     }
                 }, cx);
             }
@@ -670,7 +675,13 @@ impl TrackMenu {
     }
 
     /// Play `seed` now; its radio replaces the up-next list when it arrives.
-    fn start_radio(&mut self, seed: Track, thumbnail: Option<String>, cx: &mut Context<Self>) {
+    fn start_radio(
+        &mut self,
+        seed: Track,
+        thumbnail: Option<String>,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
         let video = seed.video_id.as_str().to_owned();
         self.player.update(cx, |p, cx| {
             p.hint_art(&video, thumbnail.as_deref());
@@ -690,7 +701,8 @@ impl TrackMenu {
             let _ = this.update(cx, |menu, cx| match result {
                 Ok(rows) if !rows.is_empty() => {
                     let tracks = menu.hinted(rows, cx);
-                    menu.player.update(cx, |p, cx| p.finish_radio(tracks, cx));
+                    menu.player
+                        .update(cx, |p, cx| p.finish_radio(tracks, queue_source::radio(name), cx));
                 }
                 _ => menu.writes.update(cx, |w, cx| w.raise(RADIO_FAILED, cx)),
             });
