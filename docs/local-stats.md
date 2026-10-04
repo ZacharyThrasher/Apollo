@@ -6,7 +6,7 @@ What Apollo itself played, kept on this machine and never sent anywhere. It feed
 
 ## The play log
 
-* Table `plays` in `apollo.db` (schema migration 5): one row per play that counted, with the
+* Table `plays` in `apollo.db` (schema migration 6): one row per play that counted, with the
   account key, when it counted (unix seconds), the track (video id, title, artists as JSON,
   album title and id, duration), the cover address the app showed for it, and how long it was
   listened to. No URLs of streams, no cookies, nothing about the session.
