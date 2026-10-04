@@ -109,6 +109,11 @@ impl SettingsModel {
         }
     }
 
+    /// Where the settings are kept, for state that is not a switch (the recent searches).
+    pub fn backend(&self) -> Option<Arc<dyn SettingsBackend>> {
+        self.backend.clone()
+    }
+
     pub fn get(&self, setting: &BoolSetting) -> bool {
         if let Some(value) = self.cache.borrow().get(setting.key) {
             return *value;
@@ -157,6 +162,13 @@ pub trait NormalizeStore: Send + Sync {
 pub trait LyricsOpenStore: Send + Sync {
     fn load(&self) -> Option<bool>;
     fn save(&self, on: bool);
+}
+
+/// How each Library tab is sorted, by tab name (`playlists`, `albums`, `artists`) and sort name
+/// (`recent`, `title`, `artist`). Blocking: call off the UI thread.
+pub trait LibrarySortStore: Send + Sync {
+    fn load(&self, tab: &str) -> Option<String>;
+    fn save(&self, tab: &str, sort: &str);
 }
 
 /// Whether gapless playback is on. Blocking: call off the UI thread.
@@ -281,6 +293,24 @@ impl LyricsOpenStore for SqliteSettings {
         if let Some(store) = self.open() {
             if let Err(err) = store.set_setting(KEY_LYRICS_OPEN, if on { "on" } else { "off" }) {
                 eprintln!("could not save the lyrics choice: {err}");
+            }
+        }
+    }
+}
+
+fn library_sort_key(tab: &str) -> String {
+    format!("library_sort_{tab}")
+}
+
+impl LibrarySortStore for SqliteSettings {
+    fn load(&self, tab: &str) -> Option<String> {
+        self.open()?.get_setting(&library_sort_key(tab)).ok()?
+    }
+
+    fn save(&self, tab: &str, sort: &str) {
+        if let Some(store) = self.open() {
+            if let Err(err) = store.set_setting(&library_sort_key(tab), sort) {
+                eprintln!("could not save the library sort: {err}");
             }
         }
     }

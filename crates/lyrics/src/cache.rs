@@ -10,6 +10,10 @@ use crate::{parse_lrc, to_lrc, Lyrics};
 /// How long a remembered "no lyrics" is believed. Sources add lyrics over time.
 pub const NOT_FOUND_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
 
+/// Which matcher wrote a remembered "no lyrics" (kept in the row's body). A "none" from an
+/// older matcher is ignored, so a better one gets to look again. Bump when matching improves.
+const MATCHER_VERSION: &str = "2";
+
 pub trait LyricsCache: Send + Sync {
     /// `Some(None)` is a remembered "no lyrics"; `None` means nothing is known.
     fn get(&self, video_id: &str) -> Option<Option<Lyrics>>;
@@ -56,7 +60,8 @@ impl LyricsCache for SqliteCache {
             "plain" => (!row.body.trim().is_empty()).then(|| Some(Lyrics::Plain(row.body))),
             "none" => {
                 let age = now_secs().saturating_sub(row.fetched_at);
-                (age < NOT_FOUND_TTL.as_secs() as i64).then_some(None)
+                (row.body == MATCHER_VERSION && age < NOT_FOUND_TTL.as_secs() as i64)
+                    .then_some(None)
             }
             _ => None,
         }
@@ -67,7 +72,7 @@ impl LyricsCache for SqliteCache {
         let (kind, body) = match lyrics {
             Some(Lyrics::Synced(lines)) => ("synced", to_lrc(lines)),
             Some(Lyrics::Plain(text)) => ("plain", text.clone()),
-            None => ("none", String::new()),
+            None => ("none", MATCHER_VERSION.to_owned()),
         };
         if let Err(err) = store.put_lyrics(video_id, kind, &body, now_secs()) {
             eprintln!("could not cache lyrics: {err}");
@@ -107,9 +112,22 @@ mod tests {
         // A "no lyrics" answer from long ago is asked again; a found one never ages out.
         let store = Store::open(&path).unwrap();
         let old = now_secs() - NOT_FOUND_TTL.as_secs() as i64 - 1;
-        store.put_lyrics("c", "none", "", old).unwrap();
+        store.put_lyrics("c", "none", MATCHER_VERSION, old).unwrap();
         store.put_lyrics("a", "synced", "[00:01.00]x", old).unwrap();
         assert_eq!(cache.get("c"), None);
         assert!(cache.get("a").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_not_found_from_an_older_matcher_is_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apollo.db");
+        let cache = SqliteCache::at(path.clone());
+        // What the first matcher wrote: "none" with an empty body, fresh.
+        let store = Store::open(&path).unwrap();
+        store.put_lyrics("old", "none", "", now_secs()).unwrap();
+        assert_eq!(cache.get("old"), None);
+        cache.put("old", None);
+        assert_eq!(cache.get("old"), Some(None));
     }
 }

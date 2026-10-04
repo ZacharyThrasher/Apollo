@@ -13,8 +13,9 @@ use std::sync::Mutex;
 use apollo_account::identity::cookie_header_for;
 use apollo_account::jar::CookieJar;
 use apollo_account::service::{AccountService, IdentityState};
+use apollo_domain::links::ExternalLink;
 use apollo_domain::listing::LoadFailure;
-use apollo_provider::{InnerTubeSource, SearchResults};
+use apollo_provider::{InnerTubeSource, LinkTarget, SearchResults};
 use apollo_services_common::{unix_now, SessionProvider, SessionUnavailable};
 
 use crate::search::SearchSource;
@@ -137,18 +138,36 @@ impl AccountSearch {
     }
 }
 
-impl SearchSource for AccountSearch {
-    fn search(&self, query: &str) -> Result<SearchResults, LoadFailure> {
+impl AccountSearch {
+    /// Run one request as the account and hand back any cookie the service rotated.
+    fn with_session<T>(
+        &self,
+        run: impl AsyncFnOnce(&InnerTubeSource) -> Result<T, LoadFailure>,
+    ) -> Result<T, LoadFailure> {
         let session = request_session(&self.account, unix_now())?;
         let source = self.sources.source_for(&session)?;
         let result = self.runtime.block_on(async {
             source.bootstrap_visitor_data().await;
-            source.search(query).await
+            run(&source).await
         });
         if let Some(header_now) = source.cookie().filter(|h| *h != session.header) {
             hand_back_rotation(&self.account, &session, &header_now);
         }
         result
+    }
+}
+
+impl SearchSource for AccountSearch {
+    fn search(&self, query: &str) -> Result<SearchResults, LoadFailure> {
+        self.with_session(async |source| source.search(query).await)
+    }
+
+    fn suggest(&self, query: &str) -> Result<Vec<String>, LoadFailure> {
+        self.with_session(async |source| source.suggestions(query).await)
+    }
+
+    fn resolve_link(&self, link: &ExternalLink) -> Result<LinkTarget, LoadFailure> {
+        self.with_session(async |source| source.resolve_link(link).await)
     }
 }
 
