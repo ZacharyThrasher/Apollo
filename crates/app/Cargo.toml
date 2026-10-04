@@ -57,6 +57,8 @@ apollo-resolver = { path = "../resolver", optional = true }
 raw-window-handle = "0.6"
 souvlaki = { version = "=0.8.3", default-features = false }
 tray-icon = "0.26"
+# System-wide hotkeys (RegisterHotKey) on GPUI's own message loop, like the tray icon.
+global-hotkey = "0.8"
 
 [build-dependencies]
 # Embeds assets/apollo.ico as the exe/window icon (no-op off Windows).
