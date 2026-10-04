@@ -15,7 +15,7 @@ use super::metadata::{
     find_first_str, first_artist_id, flex_column_text, flex_runs, is_explicit, is_upload_endpoint,
     is_upload_row, is_video_endpoint, is_video_row, is_video_type, last_thumbnail,
     list_item_video_id, parse_episode_item, parse_list_item, play_count, runs_text, runs_text_opt,
-    ArtistRun, SongItem,
+    library_toggle as song_library_toggle, ArtistRun, LibraryToggle, SongItem,
 };
 
 /// One clickable card in a home carousel or library grid. Flat + `kind`-tagged so the UI can
@@ -63,6 +63,11 @@ pub struct BrowseItem {
     /// YouTube marks this card explicit ([`is_explicit`]) — a track, or an album whose tracks are.
     #[serde(default)]
     pub explicit: bool,
+    /// Song rows only: "Add to library" / "Remove from library" off the row's own menu, with the
+    /// tokens for both directions. Kept out of the serialised card: the tokens are opaque and
+    /// belong to the session that fetched them.
+    #[serde(skip)]
+    pub library: Option<LibraryToggle>,
 }
 
 /// A titled row of cards on the home feed.
@@ -851,6 +856,7 @@ fn list_item_to_browse_item(node: &Value) -> Option<BrowseItem> {
             is_video: false,
             is_upload: false,
             explicit: is_explicit(node),
+            library: None,
         });
     }
     let vid = list_item_video_id(node)?;
@@ -871,6 +877,7 @@ fn list_item_to_browse_item(node: &Value) -> Option<BrowseItem> {
         is_video: is_video_row(node),
         is_upload: is_upload_row(node),
         explicit: is_explicit(node),
+        library: song_library_toggle(node),
     })
 }
 
@@ -910,6 +917,7 @@ fn card_shelf_main(card: &Value) -> Option<BrowseItem> {
             is_video: nav.is_some_and(is_video_endpoint),
             is_upload: nav.is_some_and(is_upload_endpoint),
             explicit: is_explicit(card),
+            library: None,
         });
     }
     let bid = nav
@@ -930,6 +938,7 @@ fn card_shelf_main(card: &Value) -> Option<BrowseItem> {
         is_video: false,
         is_upload: false,
         explicit: is_explicit(card),
+        library: None,
     })
 }
 
@@ -1255,6 +1264,19 @@ pub fn edit_succeeded(root: &Value) -> bool {
     root.get("status").and_then(Value::as_str) == Some("STATUS_SUCCEEDED")
 }
 
+/// Whether a `feedback` answer says every token it was sent was processed (the answer carries one
+/// `isProcessed` per token). An answer with no responses at all is not success: that is a shape
+/// this parser does not know, and the caller reads the library back instead of believing it.
+pub fn feedback_processed(root: &Value) -> bool {
+    let Some(responses) = root.get("feedbackResponses").and_then(Value::as_array) else {
+        return false;
+    };
+    !responses.is_empty()
+        && responses
+            .iter()
+            .all(|r| r.get("isProcessed").and_then(Value::as_bool) == Some(true))
+}
+
 // --- node parsers -------------------------------------------------------------------------
 
 /// A carousel content node is a two-row card, a track row, or a podcast episode (the home
@@ -1280,6 +1302,7 @@ fn parse_carousel_item(node: &Value) -> Option<BrowseItem> {
         is_video: song.is_video,
         is_upload: song.is_upload,
         explicit: song.explicit,
+        library: song.library,
     })
 }
 
@@ -1315,6 +1338,7 @@ fn parse_two_row_item(node: &Value) -> Option<BrowseItem> {
             is_video: is_video_row(node),
             is_upload: is_upload_row(node),
             explicit: is_explicit(node),
+            library: None,
         });
     }
     // Playlist via watchPlaylistEndpoint (some carousels expose the raw playlistId).
@@ -1336,6 +1360,7 @@ fn parse_two_row_item(node: &Value) -> Option<BrowseItem> {
             is_video: false,
             is_upload: false,
             explicit: is_explicit(node),
+            library: None,
         });
     }
     // Otherwise a browseEndpoint → playlist/album/artist by browseId prefix.
@@ -1362,6 +1387,7 @@ fn parse_two_row_item(node: &Value) -> Option<BrowseItem> {
         is_video: false,
         is_upload: false,
         explicit: is_explicit(node),
+        library: None,
     })
 }
 
@@ -2074,6 +2100,82 @@ mod tests {
         assert!(edit_succeeded(&ok));
         assert!(!edit_succeeded(&failed));
         assert!(!edit_succeeded(&json!({ "responseContext": {} })), "no status is not success");
+    }
+
+    /// A song row whose menu carries the library toggle, in the shape the live rows use: the
+    /// action on offer is the default, and it carries both directions' tokens.
+    fn row_with_library_menu(id: &str, saved: bool) -> serde_json::Value {
+        let (default_icon, toggled_icon) =
+            if saved { ("BOOKMARK", "BOOKMARK_BORDER") } else { ("BOOKMARK_BORDER", "BOOKMARK") };
+        json!({ "musicResponsiveListItemRenderer": {
+            "playlistItemData": { "videoId": id },
+            "flexColumns": [
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "A Song" }] } } },
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                    { "text": "An Artist", "navigationEndpoint": { "browseEndpoint": { "browseId": "UCart" } } }] } } }
+            ],
+            "menu": { "menuRenderer": { "items": [
+                { "toggleMenuServiceItemRenderer": {
+                    "defaultIcon": { "iconType": default_icon },
+                    "defaultServiceEndpoint": { "feedbackEndpoint": { "feedbackToken": format!("{id}-default") } },
+                    "toggledIcon": { "iconType": toggled_icon },
+                    "toggledServiceEndpoint": { "feedbackEndpoint": { "feedbackToken": format!("{id}-toggled") } }
+                } },
+                { "toggleMenuServiceItemRenderer": {
+                    "defaultIcon": { "iconType": "FAVORITE" },
+                    "defaultServiceEndpoint": { "feedbackEndpoint": { "feedbackToken": "like-token" } },
+                    "toggledIcon": { "iconType": "UNFAVORITE" },
+                    "toggledServiceEndpoint": { "feedbackEndpoint": { "feedbackToken": "unlike-token" } }
+                } }
+            ] } }
+        } })
+    }
+
+    #[test]
+    fn the_librarys_songs_list_reads_like_a_playlist_and_keeps_each_rows_library_tokens() {
+        // Library > Songs is a plain music shelf of song rows with a paging token, no header.
+        let root = json!({ "contents": { "singleColumnBrowseResultsRenderer": { "tabs": [{ "tabRenderer": { "content": {
+            "sectionListRenderer": { "contents": [{ "musicShelfRenderer": { "contents": [
+                row_with_library_menu("saved000001", true),
+                row_with_library_menu("saved000002", true),
+                { "continuationItemRenderer": { "continuationEndpoint": { "continuationCommand": { "token": "SONGS_NEXT" } } } }
+            ] } }] } } } }] } } });
+        let page = parse_playlist(&root);
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.continuation.as_deref(), Some("SONGS_NEXT"));
+        let toggle = page.items[0].library.as_ref().expect("the row's menu says it is in the library");
+        assert!(toggle.in_library);
+        assert_eq!(toggle.remove_token.as_deref(), Some("saved000001-default"));
+        assert_eq!(toggle.add_token.as_deref(), Some("saved000001-toggled"));
+        assert!(!page.owned && page.title.is_none(), "no header: not a playlist of anyone's");
+    }
+
+    #[test]
+    fn a_search_song_row_carries_its_library_state_and_the_like_toggle_is_not_mistaken_for_it() {
+        let root = json!({ "contents": { "tabbedSearchResultsRenderer": { "tabs": [{ "tabRenderer": { "content": {
+            "sectionListRenderer": { "contents": [{ "musicShelfRenderer": { "contents": [
+                row_with_library_menu("found000001", false),
+                filtered_song_row("plain000001"),
+            ] } }] }
+        } } }] } } });
+        let page = parse_search_page(&root);
+        assert_eq!(page.items.len(), 2);
+        let toggle = page.items[0].library.as_ref().expect("the search row offers Save to library");
+        assert!(!toggle.in_library);
+        assert_eq!(toggle.add_token.as_deref(), Some("found000001-default"));
+        assert_eq!(toggle.remove_token.as_deref(), Some("found000001-toggled"));
+        assert!(page.items[1].library.is_none(), "a row with no such menu offers none");
+    }
+
+    #[test]
+    fn a_feedback_answer_must_say_every_token_was_processed() {
+        assert!(feedback_processed(&json!({ "feedbackResponses": [{ "isProcessed": true }] })));
+        assert!(!feedback_processed(&json!({ "feedbackResponses": [{ "isProcessed": false }] })));
+        assert!(!feedback_processed(&json!({ "feedbackResponses": [] })), "nothing answered");
+        assert!(!feedback_processed(&json!({ "responseContext": {} })), "an unknown shape");
+        assert!(!feedback_processed(
+            &json!({ "feedbackResponses": [{ "isProcessed": true }, { "other": 1 }] })
+        ));
     }
 
     #[test]

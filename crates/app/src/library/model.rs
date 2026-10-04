@@ -22,7 +22,8 @@ use image::imageops;
 use apollo_provider::{HistoryDay, Hit};
 
 use super::browse::{
-    history_groups, history_len, history_row, sort_artists, sort_collections, HistoryGroup, SortKey,
+    history_groups, history_len, history_row, sort_artists, sort_collections, sort_songs,
+    HistoryGroup, SortKey,
 };
 use super::edits::{self, Edit, EditEvent, LibraryEdits};
 use super::source::{ArtistContent, LibrarySource, TrackRow};
@@ -53,22 +54,28 @@ const CARD_ART_PX: u32 = 288;
 /// An artist banner is kept at its own aspect and shrunk to this width at most.
 const BANNER_ART_PX: u32 = 1600;
 
+/// What the Songs tab's stand-in collection is called; not a browse id the service knows.
+const SONGS_BROWSE_ID: &str = "apollo:library-songs";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
     Playlists,
     Albums,
     Artists,
     History,
+    /// The songs saved to the library (not the likes: those are Liked Music).
+    Songs,
     /// What Apollo itself played: local stats (see `crate::stats`).
     Stats,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Playlists,
         Tab::Albums,
         Tab::Artists,
         Tab::History,
+        Tab::Songs,
         Tab::Stats,
     ];
 }
@@ -333,6 +340,14 @@ pub struct LibraryModel {
     /// The History tab: the play history in the service's date buckets.
     history: Load<Vec<HistoryGroup>>,
     history_rev: u64,
+    /// The Songs tab: the songs saved to the library, as a page of its own (it has no collection
+    /// behind it). `songs_shown` is the loaded list in the chosen order, which is what is drawn,
+    /// selected and played. `songs_stale`: a song was saved since it was read, so the next time
+    /// the tab opens it is read again.
+    songs: Detail,
+    songs_shown: Vec<TrackRow>,
+    songs_rev: u64,
+    songs_stale: bool,
     /// The Stats tab: the report for the chosen period, worked out from the local play log.
     stats: Load<Arc<StatsReport>>,
     stats_period: Period,
@@ -389,6 +404,10 @@ impl LibraryModel {
             artists_rev: 0,
             history: Load::Idle,
             history_rev: 0,
+            songs: songs_page(),
+            songs_shown: Vec::new(),
+            songs_rev: 0,
+            songs_stale: false,
             stats: Load::Idle,
             stats_period: Period::default(),
             stats_rev: 0,
@@ -458,6 +477,27 @@ impl LibraryModel {
             Load::Ready(groups) => history_row(groups, n).map(|(_, row)| row.clone()),
             _ => None,
         }
+    }
+
+    /// The Songs tab's page: its load state and the rows as the service listed them.
+    pub fn songs(&self) -> &Detail {
+        &self.songs
+    }
+
+    /// The rows of the track list on screen: an open page's, else the Songs tab's in its chosen
+    /// order. Nothing for the other tabs.
+    pub fn list_rows(&self) -> &[TrackRow] {
+        match self.stack.last() {
+            Some(Entry::Collection(d)) => d.listing.items(),
+            Some(Entry::Artist(_)) => &[],
+            None if self.tab == Tab::Songs => &self.songs_shown,
+            None => &[],
+        }
+    }
+
+    /// Whether the Songs tab is what the overview shows.
+    pub fn songs_open(&self) -> bool {
+        self.stack.is_empty() && self.tab == Tab::Songs
     }
 
     /// How the tab is ordered: the saved choice, else the default.
@@ -537,6 +577,10 @@ impl LibraryModel {
         self.artists = Load::Idle;
         self.history_rev += 1;
         self.history = Load::Idle;
+        self.songs_rev += 1;
+        self.songs = songs_page();
+        self.songs_shown.clear();
+        self.songs_stale = false;
         self.stats_rev += 1;
         self.stats = Load::Idle;
         self.stats_period = Period::default();
@@ -633,6 +677,9 @@ impl LibraryModel {
         match tab {
             Tab::Artists if matches!(self.artists, Load::Idle) => self.load_artists(cx),
             Tab::History => self.load_history(cx),
+            Tab::Songs if matches!(self.songs.listing.state(), LoadState::Idle) || self.songs_stale => {
+                self.load_songs(cx)
+            }
             Tab::Stats => self.load_stats(cx),
             _ => {}
         }
@@ -760,6 +807,185 @@ impl LibraryModel {
         .detach();
     }
 
+    // ---- songs -----------------------------------------------------------------------------
+
+    pub fn reload_songs(&mut self, cx: &mut Context<Self>) {
+        self.load_songs(cx);
+    }
+
+    /// Loads the library's songs, page after page. The last whole answer is drawn at once and
+    /// the list is read again behind it; without one the rows show as the pages arrive.
+    fn load_songs(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        self.songs_stale = false;
+        self.songs.pending = None;
+        let cache = PageCache::try_global(cx);
+        let ticket = cache.as_ref().map(|c| c.ticket());
+        let cached = cache
+            .as_ref()
+            .and_then(|c| c.get::<Vec<TrackRow>>(keys::SONGS));
+        self.songs_rev += 1;
+        let rev = self.songs_rev;
+        if let Some(cached) = cached {
+            // Rows drawn from the cache; the fetch behind swaps in the current list when whole.
+            let list_rev = self.songs.listing.begin();
+            let seeds = like_seeds(&cached.value, false);
+            let page = Page {
+                items: cached.value,
+                continuation: None,
+                skipped: 0,
+            };
+            self.songs.listing.apply(list_rev, page);
+            let writes = self.writes.read(cx);
+            let seeds: Vec<(String, bool)> = seeds
+                .into_iter()
+                .filter(|(video, _)| writes.liked(video).is_none())
+                .collect();
+            self.writes.update(cx, |w, cx| w.seed(seeds, cx));
+            self.reshow();
+            cx.notify();
+            self.refresh_songs(source, cache, ticket, rev, cx);
+            return;
+        }
+        let list_rev = self.songs.listing.begin();
+        self.reshow();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let mut result = {
+                let source = source.clone();
+                cx.background_executor()
+                    .spawn(async move { source.library_songs() })
+                    .await
+            };
+            loop {
+                let next = this
+                    .update(cx, |m, cx| {
+                        m.apply_songs_page(rev, list_rev, result, ticket.as_ref(), cx)
+                    })
+                    .ok()
+                    .flatten();
+                let Some(token) = next else { break };
+                let source = source.clone();
+                result = cx
+                    .background_executor()
+                    .spawn(async move { source.more_tracks(&token) })
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    /// Applies one page (or failure) of the songs and returns the token of the page to fetch
+    /// next. The whole list is cached once its last page is in.
+    fn apply_songs_page(
+        &mut self,
+        rev: u64,
+        list_rev: Revision,
+        result: Result<Page<TrackRow>, LoadFailure>,
+        ticket: Option<&Ticket>,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        if self.songs_rev != rev {
+            return None;
+        }
+        let mut seeds = Vec::new();
+        let next = match result {
+            Ok(page) => {
+                seeds = like_seeds(&page.items, false);
+                match self.songs.listing.apply(list_rev, page) {
+                    Applied::Yes => self
+                        .songs
+                        .listing
+                        .continuation()
+                        .map(|(_, token)| token.to_owned()),
+                    Applied::Stale | Applied::RepeatedContinuation => None,
+                }
+            }
+            Err(failure) => {
+                self.songs.listing.fail(list_rev, failure);
+                None
+            }
+        };
+        if next.is_some() {
+            self.songs.listing.mark_loading_more(list_rev);
+        }
+        if let (Some(ticket), LoadState::Complete) = (ticket, self.songs.listing.state()) {
+            if let Some(cache) = PageCache::try_global(cx) {
+                cache.put(ticket, keys::SONGS.to_owned(), self.songs.listing.items().to_vec());
+            }
+        }
+        let pending = if self.songs.is_loading() {
+            None
+        } else {
+            self.songs.pending.take()
+        };
+        self.reshow();
+        self.writes.update(cx, |w, cx| w.seed(seeds, cx));
+        if let Some(request) = pending.filter(|_| self.songs.failure().is_none()) {
+            self.play_songs(request, cx);
+        }
+        cx.notify();
+        next
+    }
+
+    /// Read the songs again without clearing what is shown; swap the list in when it is whole
+    /// and differs. Quiet on failure: the rows already shown stay.
+    fn refresh_songs(
+        &mut self,
+        source: Arc<dyn LibrarySource>,
+        cache: Option<PageCache>,
+        ticket: Option<Ticket>,
+        rev: u64,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let mut fresh = Listing::<TrackRow>::new();
+            let list_rev = fresh.begin();
+            let mut result = {
+                let source = source.clone();
+                cx.background_executor()
+                    .spawn(async move { source.library_songs() })
+                    .await
+            };
+            let whole = loop {
+                let Ok(page) = result else {
+                    break false;
+                };
+                if fresh.apply(list_rev, page) != Applied::Yes {
+                    break false;
+                }
+                let Some((_, token)) = fresh.continuation() else {
+                    break true;
+                };
+                let token = token.to_owned();
+                let source = source.clone();
+                result = cx
+                    .background_executor()
+                    .spawn(async move { source.more_tracks(&token) })
+                    .await;
+            };
+            if !whole {
+                return;
+            }
+            if let (Some(cache), Some(ticket)) = (&cache, &ticket) {
+                cache.put(ticket, keys::SONGS.to_owned(), fresh.items().to_vec());
+            }
+            let _ = this.update(cx, |m, cx| {
+                if m.songs_rev != rev || m.songs.is_loading() || m.songs.listing.items() == fresh.items() {
+                    return;
+                }
+                let seeds = like_seeds(fresh.items(), false);
+                m.songs.listing = fresh;
+                m.reshow();
+                m.writes.update(cx, |w, cx| w.seed(seeds, cx));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Plays a history row now, in front of whatever is queued (what a Search result does).
     pub fn play_history(&mut self, n: usize, cx: &mut Context<Self>) {
         let Some(row) = self.history_at(n) else {
@@ -798,7 +1024,7 @@ impl LibraryModel {
             let saved = cx
                 .background_executor()
                 .spawn(async move {
-                    [Tab::Playlists, Tab::Albums, Tab::Artists]
+                    [Tab::Playlists, Tab::Albums, Tab::Artists, Tab::Songs]
                         .into_iter()
                         .filter_map(|tab| {
                             let key = SortKey::from_stored(&store.load(tab.stored())?)?;
@@ -834,6 +1060,9 @@ impl LibraryModel {
             _ => Vec::new(),
         };
         sort_artists(&mut artists, self.sort(Tab::Artists));
+        let mut songs = self.songs.listing.items().to_vec();
+        sort_songs(&mut songs, self.sort(Tab::Songs));
+        self.songs_shown = songs;
         self.shown = Shown {
             playlists,
             albums,
@@ -1016,7 +1245,11 @@ impl LibraryModel {
 
     /// Start over: used by Retry, and after a failure part-way through the pages.
     pub fn reload_detail(&mut self, cx: &mut Context<Self>) {
-        self.load_detail(cx);
+        if self.songs_open() {
+            self.load_songs(cx);
+        } else {
+            self.load_detail(cx);
+        }
     }
 
     fn collection_mut(&mut self, id: u64) -> Option<&mut Detail> {
@@ -1314,9 +1547,41 @@ impl LibraryModel {
                     });
                 }
             }
+            // The dialog's own business: what the lists show did not change.
+            EditEvent::Edited(_) => {}
+            EditEvent::SongSaved { video_id, saved } => self.song_saved(video_id, *saved, cx),
             EditEvent::Failed(_) => {}
         }
         cx.notify();
+    }
+
+    /// A song was saved to the library or taken out: the Songs tab follows. A removal drops the
+    /// row on the spot; a save reads the list again (the row's own details are not known here),
+    /// at once when the tab is the one showing, else the next time it opens.
+    fn song_saved(&mut self, video_id: &str, saved: bool, cx: &mut Context<Self>) {
+        if !saved {
+            let dropped = self
+                .songs
+                .listing
+                .retain(|r| r.track.video_id.as_str() != video_id);
+            if dropped > 0 {
+                self.reshow();
+            }
+            return;
+        }
+        let listed = self
+            .songs
+            .listing
+            .items()
+            .iter()
+            .any(|r| r.track.video_id.as_str() == video_id);
+        if listed || matches!(self.songs.listing.state(), LoadState::Idle) {
+            return;
+        }
+        self.songs_stale = true;
+        if self.songs_open() && !self.songs.is_loading() {
+            self.load_songs(cx);
+        }
     }
 
     fn patch_lists(&mut self, f: impl FnOnce(&mut Collections)) {
@@ -1622,8 +1887,27 @@ impl LibraryModel {
                 }
                 Load::Failed(_) => {}
             },
+            None if self.tab == Tab::Songs => {
+                if self.songs.is_loading() {
+                    self.songs.pending = Some(request);
+                    cx.notify();
+                } else if self.songs.failure().is_none() {
+                    self.play_songs(request, cx);
+                }
+            }
             None => {}
         }
+    }
+
+    /// Plays the Songs tab's rows in the order they are shown.
+    fn play_songs(&mut self, request: PlayRequest, cx: &mut Context<Self>) {
+        let rows: Vec<(Track, Option<String>)> = self
+            .songs_shown
+            .iter()
+            .map(|row| (row.track.clone(), row.thumbnail.clone()))
+            .collect();
+        let source = queue_source::named("Library songs");
+        self.play_tracks(rows, request, Some(source), cx);
     }
 
     fn play_collection(&mut self, id: u64, request: PlayRequest, cx: &mut Context<Self>) {
@@ -1765,6 +2049,25 @@ impl LibraryModel {
                 self.thumbs.map.remove(&old);
             }
         }
+    }
+}
+
+/// The Songs tab's page before anything is read: it has no collection behind it, so the one it
+/// carries is only a name (and never opened or edited: it is not a user playlist).
+fn songs_page() -> Detail {
+    Detail {
+        id: 0,
+        collection: Collection {
+            kind: CollectionKind::Playlist,
+            id: BrowseId::new(SONGS_BROWSE_ID),
+            title: "Songs".into(),
+            subtitle: None,
+            thumbnail: None,
+        },
+        listing: Listing::new(),
+        pending: None,
+        meta: PageMeta::default(),
+        refresh: 0,
     }
 }
 

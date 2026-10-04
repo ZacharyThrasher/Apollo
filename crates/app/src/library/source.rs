@@ -1,7 +1,10 @@
 //! The port the library screen reads through. Blocking by design: the screen calls it from
 //! GPUI's background executor, never on the UI thread, and nothing here touches GPUI types.
 
-use apollo_domain::library::{bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistTarget, WriteFailure};
+use apollo_domain::library::{
+    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy,
+    WriteFailure,
+};
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{BrowseId, Track};
 use apollo_provider::{
@@ -95,6 +98,12 @@ pub trait LibrarySource: Send + Sync {
     /// An artist page: top songs and album rows, all in one answer.
     fn artist(&self, id: &BrowseId) -> Result<ArtistContent, LoadFailure>;
 
+    /// First page of the songs saved to the library (the Songs tab), most recently added first;
+    /// the next pages come from [`Self::more_tracks`] by the page's continuation token.
+    fn library_songs(&self) -> Result<Page<TrackRow>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
     /// The artists behind the account's library, in the service's order (the Artists tab).
     fn library_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
         Err(LoadFailure::Other)
@@ -166,6 +175,23 @@ pub trait LibrarySource: Send + Sync {
         Err(WriteFailure::Unsupported)
     }
 
+    /// Whether the library holds a song, as the last row listing it said. `None` when no row has
+    /// offered a way to change that, which is when the menu leaves the item out. Cheap and
+    /// local: the menu asks it every time it opens.
+    fn song_saved(&self, _video_id: &str) -> Option<bool> {
+        None
+    }
+
+    /// Add a song to the library (`saved`) or take it out. Sent once, never retried: when the
+    /// outcome is unknown the caller reads Library > Songs back.
+    fn set_song_saved(&self, _video_id: &str, _saved: bool) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    /// The library is now known to hold the song (`saved`) or not, because Library > Songs was
+    /// read back, not because this source wrote it. Lets the source keep what it offers true.
+    fn note_song_saved(&self, _video_id: &str, _saved: bool) {}
+
     /// The playlists the account can add a track to, each flagged when it already holds it.
     fn playlists_for(&self, _video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
         Err(LoadFailure::Other)
@@ -208,11 +234,24 @@ pub trait LibrarySource: Send + Sync {
         Err(WriteFailure::Unsupported)
     }
 
+    /// Create a playlist that already holds `video_ids`, in order; the new playlist's bare id.
+    /// One write, so the playlist and its songs land together or not at all.
+    fn create_playlist_with(
+        &self,
+        _title: &str,
+        _description: &str,
+        _privacy: Privacy,
+        _video_ids: &[String],
+    ) -> Result<String, WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
     fn delete_playlist(&self, _playlist_id: &str) -> Result<(), WriteFailure> {
         Err(WriteFailure::Unsupported)
     }
 
-    fn rename_playlist(&self, _playlist_id: &str, _title: &str) -> Result<(), WriteFailure> {
+    /// Change a playlist's title, description and visibility: only what `edit` carries.
+    fn edit_playlist(&self, _playlist_id: &str, _edit: &PlaylistEdit) -> Result<(), WriteFailure> {
         Err(WriteFailure::Unsupported)
     }
 

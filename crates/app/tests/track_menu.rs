@@ -6,17 +6,19 @@ use std::sync::Arc;
 
 use apollo_app::art::{ArtSource, DecodedArt, SyntheticArt};
 use apollo_app::backend::{LibraryTrack, Ports, Prepared};
+use apollo_app::library::edits::{failure_text, Edit};
 use apollo_app::library::model::Tab;
-use apollo_app::library::sim::SimLibrary;
+use apollo_app::library::sim::{SimLibrary, WriteBehaviour};
 use apollo_app::player::PlayerModel;
 use apollo_app::search::SearchSource;
 use apollo_app::style::Fonts;
 use apollo_app::ui::nav::Route;
+use apollo_app::ui::playlist_dialog::Mode;
 use apollo_app::ui::playlist_picker::PlaylistPicker;
 use apollo_app::ui::shell::{self, Shell};
-use apollo_app::ui::track_menu::{Command, Subject, TrackMenu};
+use apollo_app::ui::track_menu::{self, Anchor, Command, Subject, TrackMenu};
 use apollo_app::url_thumbs::NoThumbs;
-use apollo_domain::library::LIKED_MUSIC_BROWSE_ID;
+use apollo_domain::library::{WriteFailure, LIKED_MUSIC_BROWSE_ID};
 use apollo_domain::listing::LoadFailure;
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track};
 use apollo_provider::{Hit, ListedTrack, SearchResults};
@@ -258,6 +260,7 @@ fn right_clicking_a_song_opens_its_menu(cx: &mut TestAppContext) {
             AddToPlaylist,
             AddToCrate,
             ToggleLike,
+            SaveToLibrary,
             GoToArtist,
             GoToAlbum,
             CopyLink
@@ -542,7 +545,7 @@ fn a_playlist_card_gets_the_shorter_menu_and_plays(cx: &mut TestAppContext) {
             Command::AddToQueue,
             Command::StartRadio,
             Command::CopyLink,
-            Command::Rename,
+            Command::EditPlaylist,
             Command::DeletePlaylist
         ]
     );
@@ -609,4 +612,154 @@ fn a_queue_rows_more_button_replaces_the_duration_on_hover_and_opens_the_menu(
     click(vcx, "queue-more-2");
     assert!(is_open(&page, vcx));
     assert_eq!(upcoming(&page, vcx).len(), 2, "More did not remove or play anything");
+}
+
+// ---- saving songs and the queue --------------------------------------------------------------
+
+#[gpui::test]
+fn the_queue_headers_more_button_opens_the_menu_under_itself(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.shell.update(vcx, |s, cx| s.toggle_queue(cx));
+    vcx.run_until_parked();
+    let more = bounds(vcx, "queue-more");
+    click(vcx, "queue-more");
+    assert!(is_open(&page, vcx));
+    assert_eq!(commands(&page, vcx), [Command::SaveQueue]);
+    assert_eq!(
+        page.menu.read_with(vcx, |m, _| m.subject().cloned()),
+        Some(Subject::Queue)
+    );
+    // It hangs under the button, with its right edge lined up.
+    let menu = bounds(vcx, "track-menu");
+    assert!(menu.origin.y >= more.origin.y + more.size.height);
+    assert_eq!(
+        menu.origin.x + menu.size.width,
+        more.origin.x + more.size.width,
+        "right edges line up"
+    );
+}
+
+#[gpui::test]
+fn a_song_is_saved_to_the_library_and_taken_out_from_its_menu(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.sim.preset_library_songs(&[]);
+    open_on_first_song(&page, vcx);
+    let offered = commands(&page, vcx);
+    assert!(offered.contains(&Command::SaveToLibrary));
+    assert!(!offered.contains(&Command::RemoveFromLibrary));
+    choose(&page, vcx, Command::SaveToLibrary);
+    assert_eq!(page.sim.library_song_ids(), [FOUND]);
+    assert_eq!(notice(&page, vcx), None, "success is silent");
+
+    let at = inside_row(vcx, "song-like-0");
+    right_click(vcx, at);
+    let offered = commands(&page, vcx);
+    assert!(offered.contains(&Command::RemoveFromLibrary));
+    assert!(!offered.contains(&Command::SaveToLibrary), "it is saved now");
+    choose(&page, vcx, Command::RemoveFromLibrary);
+    assert!(page.sim.library_song_ids().is_empty());
+    assert_eq!(notice(&page, vcx), None);
+}
+
+#[gpui::test]
+fn a_song_whose_row_offered_no_toggle_has_no_save_item(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.sim.hide_library_toggle(FOUND);
+    open_on_first_song(&page, vcx);
+    let offered = commands(&page, vcx);
+    assert!(!offered.contains(&Command::SaveToLibrary));
+    assert!(!offered.contains(&Command::RemoveFromLibrary));
+}
+
+#[gpui::test]
+fn a_refused_save_leaves_a_toast_and_changes_nothing(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.sim.preset_library_songs(&[]);
+    page.sim
+        .set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Rejected));
+    open_on_first_song(&page, vcx);
+    choose(&page, vcx, Command::SaveToLibrary);
+    assert!(page.sim.library_song_ids().is_empty());
+    assert_eq!(
+        notice(&page, vcx).as_deref(),
+        Some(failure_text(Edit::Save, WriteFailure::Rejected))
+    );
+}
+
+fn open_queue_menu(vcx: &mut VisualTestContext) {
+    vcx.update(|window, cx| {
+        track_menu::open(
+            Subject::Queue,
+            Anchor::Point(point(gpui::px(300.0), gpui::px(300.0))),
+            window,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+}
+
+fn dialog_of(page: &Page, vcx: &mut VisualTestContext) -> Entity<apollo_app::ui::playlist_dialog::PlaylistDialog> {
+    page.shell.read_with(vcx, |s, _| s.dialog().clone())
+}
+
+#[gpui::test]
+fn the_queues_menu_saves_it_as_a_private_playlist_named_for_where_it_plays_from(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    open_queue_menu(vcx);
+    assert_eq!(commands(&page, vcx), [Command::SaveQueue]);
+    choose(&page, vcx, Command::SaveQueue);
+    let dialog = dialog_of(&page, vcx);
+    let ids: Vec<String> = [FIRST, "queued00001", "queued00002"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        dialog.read_with(vcx, |d, _| d.mode().cloned()),
+        Some(Mode::FromQueue {
+            name: "My queue".into(),
+            video_ids: ids.clone(),
+        })
+    );
+    // The name starts filled in, and can be changed before it is made.
+    assert_eq!(
+        dialog.read_with(vcx, |d, cx| d.field().read(cx).text().to_owned()),
+        "My queue"
+    );
+    let field = dialog.read_with(vcx, |d, _| d.field().clone());
+    field.update(vcx, |f, cx| f.set_text("  Road   mix ", cx));
+    dialog.update(vcx, |d, cx| d.submit(cx));
+    vcx.run_until_parked();
+    assert!(!dialog.read_with(vcx, |d, _| d.is_open()));
+    let made = page.sim.owned_ids()[0].clone();
+    assert_eq!(page.sim.created_with(&made), ids);
+    assert_eq!(
+        page.sim.playlist_details(&made).1,
+        Some(apollo_domain::library::Privacy::Private)
+    );
+    assert_eq!(
+        page.sim.write_log(),
+        vec![("create-with:3".to_owned(), "Road mix".to_owned())],
+        "one write holds the playlist and its songs"
+    );
+    assert_eq!(notice(&page, vcx), None, "success is silent");
+}
+
+#[gpui::test]
+fn a_refused_queue_save_keeps_the_dialog_and_leaves_a_toast(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.sim
+        .set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Rejected));
+    open_queue_menu(vcx);
+    choose(&page, vcx, Command::SaveQueue);
+    let dialog = dialog_of(&page, vcx);
+    dialog.update(vcx, |d, cx| d.submit(cx));
+    vcx.run_until_parked();
+    assert!(dialog.read_with(vcx, |d, _| d.is_open()), "the name is not lost");
+    assert!(!dialog.read_with(vcx, |d, _| d.is_busy()));
+    assert_eq!(
+        notice(&page, vcx).as_deref(),
+        Some(failure_text(Edit::SaveQueue, WriteFailure::Rejected))
+    );
 }

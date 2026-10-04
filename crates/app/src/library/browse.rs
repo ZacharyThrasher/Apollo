@@ -53,6 +53,7 @@ impl Tab {
             Self::Albums => "Albums",
             Self::Artists => "Artists",
             Self::History => "History",
+            Self::Songs => "Songs",
             Self::Stats => "Stats",
         }
     }
@@ -64,6 +65,7 @@ impl Tab {
             Self::Albums => "albums",
             Self::Artists => "artists",
             Self::History => "history",
+            Self::Songs => "songs",
             Self::Stats => "stats",
         }
     }
@@ -74,7 +76,7 @@ impl Tab {
     pub fn sorts(self) -> &'static [SortKey] {
         match self {
             Self::Playlists | Self::Artists => &[SortKey::Recent, SortKey::Title],
-            Self::Albums => &[SortKey::Recent, SortKey::Title, SortKey::Artist],
+            Self::Albums | Self::Songs => &[SortKey::Recent, SortKey::Title, SortKey::Artist],
             // Stats picks a period instead of an order.
             Self::History | Self::Stats => &[],
         }
@@ -119,6 +121,24 @@ pub fn sort_collections(list: &mut [Collection], key: SortKey) {
 pub fn sort_artists(list: &mut [Hit], key: SortKey) {
     if key != SortKey::Recent {
         list.sort_by_cached_key(|h| h.title.to_lowercase());
+    }
+}
+
+/// The Songs tab's rows in `key` order. `Recent` is the service's own order; A\u{2013}Z reads the
+/// title and Artist the first artist, then the title. A song with no artist goes last.
+pub fn sort_songs(rows: &mut [TrackRow], key: SortKey) {
+    match key {
+        SortKey::Recent => {}
+        SortKey::Title => rows.sort_by_cached_key(|r| r.track.title.to_lowercase()),
+        SortKey::Artist => rows.sort_by_cached_key(|r| {
+            let artist = r
+                .track
+                .artists
+                .first()
+                .map(|a| a.name.to_lowercase())
+                .unwrap_or_default();
+            (artist.is_empty(), artist, r.track.title.to_lowercase())
+        }),
     }
 }
 
