@@ -14,7 +14,12 @@ use crate::account::AccountModel;
 use crate::home::{Access, HomeModel};
 use crate::library::{LibraryWrites, Notice, Target};
 use crate::lyrics::LyricsModel;
+use crate::keymap::{
+    LikeCurrent, SeekBack, SeekForward, ToggleLyrics, ToggleMute, VolumeDown, VolumeUp,
+    SEEK_STEP_MS, VOLUME_STEP,
+};
 use crate::motion::PanelSlide;
+use crate::os_media::OsCommand;
 use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
 use crate::settings::SettingsModel;
@@ -69,6 +74,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("left", StepBack, Some(crate::ui::slider::KEY_CONTEXT)),
         KeyBinding::new("right", StepForward, Some(crate::ui::slider::KEY_CONTEXT)),
     ]);
+    crate::keymap::bind_keys(cx);
     crate::ui::queue_panel::bind_keys(cx);
     crate::ui::text_field::bind_keys(cx);
     crate::ui::card::bind_keys(cx);
@@ -627,6 +633,13 @@ impl Shell {
         .detach();
     }
 
+    /// The L key: like the playing song, or take the like back (the heart's own toggle).
+    fn like_current(&mut self, cx: &mut Context<Self>) {
+        if let Some(video) = self.player.read(cx).current_video() {
+            self.writes.update(cx, |w, cx| w.toggle_like(&video, cx));
+        }
+    }
+
     pub fn toggle_queue(&mut self, cx: &mut Context<Self>) {
         if self.lyrics_showing(cx) {
             // The queue asked for the side the lyrics are on: lyrics give way.
@@ -985,6 +998,25 @@ impl Render for Shell {
                     this.focus_root(window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ToggleMute, _, cx| {
+                this.player.update(cx, |m, cx| m.toggle_mute(cx));
+            }))
+            .on_action(cx.listener(|this, _: &VolumeUp, _, cx| {
+                this.player.update(cx, |m, cx| m.nudge_volume(VOLUME_STEP, cx));
+            }))
+            .on_action(cx.listener(|this, _: &VolumeDown, _, cx| {
+                this.player.update(cx, |m, cx| m.nudge_volume(-VOLUME_STEP, cx));
+            }))
+            .on_action(cx.listener(|this, _: &SeekBack, _, cx| {
+                this.player
+                    .update(cx, |m, cx| m.os_command(OsCommand::SeekBy(-SEEK_STEP_MS), cx));
+            }))
+            .on_action(cx.listener(|this, _: &SeekForward, _, cx| {
+                this.player
+                    .update(cx, |m, cx| m.os_command(OsCommand::SeekBy(SEEK_STEP_MS), cx));
+            }))
+            .on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_lyrics(cx)))
+            .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| this.like_current(cx)))
             .on_action(cx.listener(|_, _: &FocusNextControl, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &FocusPreviousControl, window, cx| window.focus_prev(cx)))
             .on_action(
