@@ -3,8 +3,8 @@
 //! Vendored from Limusic and trimmed (see NOTICE.md). Differences that matter:
 //! no session "healer" (a 401/403 is surfaced as [`Error::SessionExpired`] and the account layer
 //! decides what it means), no blocklist or hide-video filters, no upload calls, play reporting only through
-//! [`InnerTube::send_tracking_ping`] (https YouTube hosts only, one attempt), and `Session` never
-//! prints its cookie.
+//! [`InnerTube::send_tracking_ping`] (https YouTube hosts only, one attempt), and `Session`
+//! never prints its cookie.
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
