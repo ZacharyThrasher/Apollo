@@ -55,6 +55,7 @@ icons! {
     Warning => "warning-regular",
     Dismiss => "dismiss-regular",
     Delete => "delete-regular",
+    Edit => "edit-regular",
     ChevronDown => "chevron-down-regular",
     ChevronLeft => "chevron-left-regular",
     ChevronRight => "chevron-right-regular",

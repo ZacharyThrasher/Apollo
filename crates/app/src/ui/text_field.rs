@@ -101,6 +101,10 @@ pub struct TextField {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// A plain field is for naming something (a dialog's): no search icon, no clear button, and
+    /// Escape always goes to the owner.
+    plain: bool,
+    max_chars: usize,
 }
 
 impl EventEmitter<TextFieldEvent> for TextField {}
@@ -123,7 +127,23 @@ impl TextField {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            plain: false,
+            max_chars: MAX_CHARS,
         }
+    }
+
+    /// Make this a plain naming field that takes at most `max_chars` characters.
+    pub fn plain(mut self, max_chars: usize) -> Self {
+        self.plain = true;
+        self.max_chars = max_chars;
+        self
+    }
+
+    /// Select all the text, so typing replaces it (a rename starts from the current name).
+    pub fn select_everything(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        cx.notify();
     }
 
     pub fn text(&self) -> &str {
@@ -132,7 +152,7 @@ impl TextField {
 
     /// Replace the text from outside (the clear button). Emits `Changed`.
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.content = truncate_chars(text, MAX_CHARS).into();
+        self.content = truncate_chars(text, self.max_chars).into();
         let end = self.content.len();
         self.selected_range = end..end;
         self.marked_range = None;
@@ -204,7 +224,7 @@ impl TextField {
     }
 
     fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
-        if self.content.is_empty() {
+        if self.plain || self.content.is_empty() {
             // Nothing to clear: let the owner (an ancestor's handler) decide where focus goes.
             cx.propagate();
         } else {
@@ -350,11 +370,11 @@ impl TextField {
             .unwrap_or(self.content.len())
     }
 
-    /// `new_text` cut so the result stays within [`MAX_CHARS`] after `range` is replaced.
+    /// `new_text` cut so the result stays within the field's limit after `range` is replaced.
     fn fit(&self, range: &Range<usize>, new_text: &str) -> String {
         let kept =
             self.content[..range.start].chars().count() + self.content[range.end..].chars().count();
-        truncate_chars(new_text, MAX_CHARS.saturating_sub(kept))
+        truncate_chars(new_text, self.max_chars.saturating_sub(kept))
     }
 }
 
@@ -687,7 +707,8 @@ impl Render for TextField {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let clear_target = entity.clone();
-        let has_text = !self.content.is_empty();
+        let plain = self.plain;
+        let has_text = !self.content.is_empty() && !plain;
         style::text_style(div(), typography::LIST_TITLE, cx)
             .id("text-field")
             .key_context(KEY_CONTEXT)
@@ -728,13 +749,15 @@ impl Render for TextField {
             .border_color(color::border_subtle())
             .text_color(color::text_primary())
             .line_height(px(layout::ICON_SIZE))
-            .child(
-                gpui::svg()
-                    .path(Icon::SearchRegular.path())
-                    .size(px(layout::ICON_SIZE))
-                    .flex_none()
-                    .text_color(color::text_secondary()),
-            )
+            .when(!plain, |d| {
+                d.child(
+                    gpui::svg()
+                        .path(Icon::SearchRegular.path())
+                        .size(px(layout::ICON_SIZE))
+                        .flex_none()
+                        .text_color(color::text_secondary()),
+                )
+            })
             .child(
                 div()
                     .flex_1()

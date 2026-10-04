@@ -1,7 +1,7 @@
 //! The port the library screen reads through. Blocking by design: the screen calls it from
 //! GPUI's background executor, never on the UI thread, and nothing here touches GPUI types.
 
-use apollo_domain::library::{Collection, PlaylistTarget, WriteFailure};
+use apollo_domain::library::{bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{BrowseId, Track};
 use apollo_provider::{ArtistSection, HomePage};
@@ -53,6 +53,12 @@ pub trait LibrarySource: Send + Sync {
     /// First page of a collection's tracks.
     fn tracks(&self, collection: &Collection) -> Result<Page<TrackRow>, LoadFailure>;
 
+    /// First page of a collection's tracks with what the page says about editing and saving it.
+    /// A source that has nothing to say about that answers with the default (nothing editable).
+    fn page(&self, collection: &Collection) -> Result<(Page<TrackRow>, PageMeta), LoadFailure> {
+        Ok((self.tracks(collection)?, PageMeta::default()))
+    }
+
     /// A following page, by the continuation token the previous page carried.
     fn more_tracks(&self, token: &str) -> Result<Page<TrackRow>, LoadFailure>;
 
@@ -100,6 +106,70 @@ pub trait LibrarySource: Send + Sync {
     /// Add a track to a playlist the account owns (the bare id of a [`PlaylistTarget`]). A track
     /// already there is not added twice.
     fn add_to_playlist(&self, _playlist_id: &str, _video_id: &str) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    // ---- playlist editing -------------------------------------------------------------------
+    // None of these is retried by the source: a timeout is an unknown outcome
+    // ([`WriteFailure::Unknown`]) and `library::edits` reads the state back to settle it.
+
+    /// Names the account the next write would go to (the signed-in session and its channel), or
+    /// `None` when a source has no accounts. `library::edits` compares it with what it saw when
+    /// the write was asked for and sends nothing when they differ, so a write never lands on an
+    /// account other than the one the person acted in.
+    fn account_token(&self) -> Option<String> {
+        None
+    }
+
+    /// The bare ids of the playlists the account can edit (the add-to-playlist sheet's list).
+    fn editable_playlists(&self) -> Result<Vec<String>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
+    /// The id a save to the library of `collection` is made on: a playlist's bare id; an album's
+    /// audio playlist, which takes reading its page.
+    fn save_target(&self, collection: &Collection) -> Result<String, LoadFailure> {
+        match collection.kind {
+            CollectionKind::Playlist => Ok(bare_playlist_id(collection.id.as_str()).to_owned()),
+            CollectionKind::Album => Err(LoadFailure::Other),
+        }
+    }
+
+    /// Create an empty private playlist; the new playlist's bare id.
+    fn create_playlist(&self, _title: &str) -> Result<String, WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    fn delete_playlist(&self, _playlist_id: &str) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    fn rename_playlist(&self, _playlist_id: &str, _title: &str) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    /// Remove one row of a playlist (the row's own occurrence token names it).
+    fn remove_from_playlist(
+        &self,
+        _playlist_id: &str,
+        _video_id: &str,
+        _occurrence: &str,
+    ) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    /// Move one row in front of another; `before` `None` moves it to the end.
+    fn move_in_playlist(
+        &self,
+        _playlist_id: &str,
+        _occurrence: &str,
+        _before: Option<&str>,
+    ) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    /// Save a playlist or album to the library (`saved`) or take it out, by its save target.
+    fn set_saved(&self, _save_id: &str, _saved: bool) -> Result<(), WriteFailure> {
         Err(WriteFailure::Unsupported)
     }
 }

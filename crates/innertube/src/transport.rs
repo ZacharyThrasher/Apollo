@@ -21,6 +21,12 @@ pub const ORIGIN: &str = "https://music.youtube.com";
 pub const REFERER: &str = "https://music.youtube.com/";
 pub const SW_JS_DATA_URL: &str = "https://music.youtube.com/sw.js_data";
 
+/// Whether a failed attempt is sent again: only a transient error, and only while attempts remain.
+/// A write that must not repeat has one attempt in all, so it is never sent again.
+fn may_retry(attempt: u32, max_attempts: u32, transient: bool) -> bool {
+    transient && attempt < max_attempts
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("http: {0}")]
@@ -294,6 +300,31 @@ impl InnerTube {
         body: &B,
         set_login: bool,
     ) -> Result<serde_json::Value, Error> {
+        self.post_attempts(path, client, body, set_login, 3).await
+    }
+
+    /// [`Self::post`] with exactly one attempt. For a write that is not idempotent (creating a
+    /// playlist, removing or moving a row): a timeout leaves its outcome unknown, and sending it
+    /// again could do it twice. The caller reads the state back instead (Apollo addition, see
+    /// NOTICE.md).
+    pub async fn post_once<B: Serialize>(
+        &self,
+        path: &str,
+        client: &YouTubeClient,
+        body: &B,
+        set_login: bool,
+    ) -> Result<serde_json::Value, Error> {
+        self.post_attempts(path, client, body, set_login, 1).await
+    }
+
+    async fn post_attempts<B: Serialize>(
+        &self,
+        path: &str,
+        client: &YouTubeClient,
+        body: &B,
+        set_login: bool,
+        max_attempts: u32,
+    ) -> Result<serde_json::Value, Error> {
         // `path` may already carry query params (e.g. browse continuations); chain accordingly.
         let sep = if path.contains('?') { '&' } else { '?' };
         let url = format!("{BASE_URL}{path}{sep}prettyPrint=false");
@@ -321,7 +352,7 @@ impl InnerTube {
                     return Ok(resp.json().await?);
                 }
                 // Retry only on connect/timeout (transient).
-                Err(e) if attempt < 3 && (e.is_timeout() || e.is_connect() || e.is_request()) => {
+                Err(e) if may_retry(attempt, max_attempts, e.is_timeout() || e.is_connect() || e.is_request()) => {
                     tracing::warn!(attempt, error = %e.without_url(), "retrying InnerTube POST {path}");
                     tokio::time::sleep(delay).await;
                     delay *= 2;
@@ -424,6 +455,16 @@ fn parse_visitor_data(body: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_single_attempt_write_is_never_sent_again() {
+        // `post` allows three attempts; `post_once` one, so even a timeout is not repeated.
+        assert!(may_retry(1, 3, true));
+        assert!(may_retry(2, 3, true));
+        assert!(!may_retry(3, 3, true));
+        assert!(!may_retry(1, 1, true));
+        assert!(!may_retry(1, 3, false));
+    }
 
     #[test]
     fn sha1_known_vector() {

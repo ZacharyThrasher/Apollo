@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use apollo_domain::account::{Validation, ValidationError};
-use apollo_domain::library::{Collection, CollectionKind, PlaylistTarget, WriteFailure};
+use apollo_domain::library::{
+    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistTarget, WriteFailure,
+};
 use apollo_domain::listing::{LoadFailure, Page};
 use innertube::{Clients, InnerTube, Rating, Session, YouTubeClient, METADATA_CLIENT};
 use tokio::sync::Notify;
@@ -10,7 +12,7 @@ use crate::artist::{page_from_artist, ArtistPage};
 use crate::home::{home_page, HomePage};
 use crate::map::{
     account_validation, classify, classify_write, collections_from_grid, liked_from_rating,
-    page_from_album, page_from_continuation, page_from_playlist, target_from_option, track_from_song,
+    meta_from_album, meta_from_playlist, page_from_album, page_from_continuation, page_from_playlist, target_from_option, track_from_song,
     ListedTrack,
 };
 use crate::search::{search_results, SearchResults};
@@ -113,6 +115,33 @@ impl InnerTubeSource {
             .await
             .map_err(|e| classify(&e))?;
         Ok(page_from_playlist(&page))
+    }
+
+    /// [`Self::playlist`] with what the page says about editing and saving it.
+    pub async fn playlist_with_meta(
+        &self,
+        browse_id: &str,
+    ) -> Result<(Page<ListedTrack>, PageMeta), LoadFailure> {
+        let browse = playlist_browse_id(browse_id);
+        let page = self
+            .tube
+            .playlist(&self.client, &browse, None)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok((page_from_playlist(&page), meta_from_playlist(&page, &browse)))
+    }
+
+    /// [`Self::album`] with the audio playlist the save is made on and the saved flag.
+    pub async fn album_with_meta(
+        &self,
+        browse_id: &str,
+    ) -> Result<(Page<ListedTrack>, PageMeta), LoadFailure> {
+        let page = self
+            .tube
+            .album(&self.client, browse_id)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok((page_from_album(&page), meta_from_album(&page)))
     }
 
     pub async fn album(&self, browse_id: &str) -> Result<Page<ListedTrack>, LoadFailure> {
@@ -253,6 +282,85 @@ impl InnerTubeSource {
         let bare = playlist_id.strip_prefix("VL").unwrap_or(playlist_id);
         self.tube
             .add_to_playlist(&self.client, bare, video_id)
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// The playlists the account can edit, as bare ids: the "Save to playlist" sheet asked about
+    /// a fixed, public video (`probe_video`). Only the sheet's playlist list is read; what it
+    /// holds of that video is ignored.
+    pub async fn editable_playlists(&self, probe_video: &str) -> Result<Vec<String>, LoadFailure> {
+        let options = self
+            .tube
+            .add_to_playlist_options(&self.client, probe_video)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(options.into_iter().map(|o| o.id).collect())
+    }
+
+    /// Create an empty private playlist and return its bare id. Never retried: an unknown outcome
+    /// comes back as [`WriteFailure::Unknown`] for the caller to read back.
+    pub async fn create_playlist(&self, title: &str) -> Result<String, WriteFailure> {
+        self.tube
+            .create_playlist(&self.client, title)
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// Delete a playlist the account owns (`playlist_id` may carry the `VL` prefix).
+    pub async fn delete_playlist(&self, playlist_id: &str) -> Result<(), WriteFailure> {
+        self.tube
+            .delete_playlist(&self.client, bare_playlist_id(playlist_id))
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
+    pub async fn rename_playlist(
+        &self,
+        playlist_id: &str,
+        title: &str,
+    ) -> Result<(), WriteFailure> {
+        self.tube
+            .rename_playlist(&self.client, bare_playlist_id(playlist_id), title)
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// Remove one row (`set_video_id` is the row's own token) of a playlist the account owns.
+    pub async fn remove_from_playlist(
+        &self,
+        playlist_id: &str,
+        video_id: &str,
+        set_video_id: &str,
+    ) -> Result<(), WriteFailure> {
+        self.tube
+            .remove_from_playlist(&self.client, bare_playlist_id(playlist_id), video_id, set_video_id)
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// Move one row in front of another (`None`: to the end).
+    pub async fn move_in_playlist(
+        &self,
+        playlist_id: &str,
+        set_video_id: &str,
+        before_set_video_id: Option<&str>,
+    ) -> Result<(), WriteFailure> {
+        self.tube
+            .move_in_playlist(
+                &self.client,
+                bare_playlist_id(playlist_id),
+                set_video_id,
+                before_set_video_id,
+            )
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// Save a playlist or album to the library, or take it out (see `InnerTube::save_playlist`).
+    pub async fn set_saved(&self, save_id: &str, saved: bool) -> Result<(), WriteFailure> {
+        self.tube
+            .save_playlist(&self.client, bare_playlist_id(save_id), saved)
             .await
             .map_err(|e| classify_write(&e))
     }

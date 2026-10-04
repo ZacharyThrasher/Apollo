@@ -12,7 +12,7 @@ use gpui::{
 
 use crate::account::AccountModel;
 use crate::home::{Access, HomeModel};
-use crate::library::{LibraryWrites, Notice, Target};
+use crate::library::{LibraryEdits, LibraryWrites, Notice, Target};
 use crate::lyrics::LyricsModel;
 use crate::keymap::{
     LikeCurrent, SeekBack, SeekForward, ToggleLyrics, ToggleMute, VolumeDown, VolumeUp,
@@ -33,6 +33,7 @@ use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
+use crate::ui::playlist_dialog::{self, DialogHandle, PlaylistDialog};
 use crate::ui::playlist_picker::{self, PlaylistPicker};
 use crate::ui::queue_panel::QueuePanel;
 use crate::ui::search_page::{self, SearchPage};
@@ -83,6 +84,7 @@ pub fn bind_keys(cx: &mut App) {
     home_page::bind_keys(cx);
     playlist_picker::bind_keys(cx);
     track_menu::bind_keys(cx);
+    playlist_dialog::bind_keys(cx);
 }
 
 /// A toast on screen, possibly on its way out.
@@ -104,7 +106,11 @@ pub struct Shell {
     home_epoch: u64,
     /// Likes and playlist adds, and the short error a failed one leaves.
     writes: Entity<LibraryWrites>,
+    /// Playlist edits (create, rename, delete, save) and what the account owns.
+    edits: Entity<LibraryEdits>,
     picker: Entity<PlaylistPicker>,
+    /// The dialog that names, renames and confirms deleting a playlist.
+    dialog: Entity<PlaylistDialog>,
     /// The menu a right-click or a row's More button opens.
     menu: Entity<TrackMenu>,
     /// The error on screen: it outlives the notice by the length of its fade-out.
@@ -197,7 +203,11 @@ impl Shell {
         let root_focus = cx.focus_handle();
         let weak = cx.weak_entity();
         let writes = cx.new(|cx| LibraryWrites::new(player.clone(), cx));
+        let edits = cx.new(|_| LibraryEdits::new(player.clone(), writes.clone()));
         let picker = cx.new(|cx| PlaylistPicker::new(player.clone(), writes.clone(), cx));
+        let dialog = cx.new(|cx| PlaylistDialog::new(player.clone(), edits.clone(), cx));
+        cx.observe(&dialog, |_, _, cx| cx.notify()).detach();
+        cx.set_global(DialogHandle(dialog.clone()));
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         cx.observe(&picker, |_, _, cx| cx.notify()).detach();
         let menu = cx.new(|cx| {
@@ -205,10 +215,22 @@ impl Shell {
                 player.clone(),
                 writes.clone(),
                 picker.clone(),
+                edits.clone(),
                 {
                     let weak = weak.clone();
                     move |target, window, cx| {
                         let _ = weak.update(cx, |s, cx| s.open_target(target, window, cx));
+                    }
+                },
+                {
+                    let weak = weak.clone();
+                    move |collection, occurrence, cx| {
+                        let _ = weak.update(cx, |s, cx| {
+                            let model = s.library.read(cx).model().clone();
+                            model.update(cx, |m, cx| {
+                                m.remove_row(collection.library_key(), occurrence, cx)
+                            });
+                        });
                     }
                 },
                 cx,
@@ -257,6 +279,7 @@ impl Shell {
                 player.clone(),
                 writes.clone(),
                 picker.clone(),
+                edits.clone(),
                 {
                     let weak = weak.clone();
                     move |window, cx| {
@@ -333,7 +356,9 @@ impl Shell {
             home_access: Access::Waiting,
             home_epoch: 0,
             writes,
+            edits,
             picker,
+            dialog,
             menu,
             toast: None,
             detail_origin: None,
@@ -382,6 +407,8 @@ impl Shell {
             self.writes.update(cx, |w, cx| w.reset(cx));
             self.picker.update(cx, |p, cx| p.reset(cx));
             self.menu.update(cx, |m, cx| m.reset(cx));
+            self.edits.update(cx, |e, cx| e.reset(cx));
+            self.dialog.update(cx, |d, cx| d.reset(cx));
         }
         let model = self.account.read(cx);
         let (signed_out, by_choice) = (model.is_signed_out(), model.is_signed_out_by_choice());
@@ -459,6 +486,14 @@ impl Shell {
 
     pub fn menu(&self) -> &Entity<TrackMenu> {
         &self.menu
+    }
+
+    pub fn edits(&self) -> &Entity<LibraryEdits> {
+        &self.edits
+    }
+
+    pub fn dialog(&self) -> &Entity<PlaylistDialog> {
+        &self.dialog
     }
 
     pub fn nav_expanded(&self) -> bool {
@@ -956,6 +991,7 @@ impl Render for Shell {
         });
         let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
         let menu = self.menu.read(cx).is_open().then(|| self.menu.clone());
+        let dialog = self.dialog.read(cx).is_open().then(|| self.dialog.clone());
 
         let fonts = cx.global::<style::Fonts>().text.clone();
         div()
@@ -1025,6 +1061,7 @@ impl Render for Shell {
             .children(toast)
             .children(picker)
             .children(menu)
+            .children(dialog)
     }
 }
 

@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use apollo_domain::library::{Collection, PlaylistTarget, WriteFailure};
+use apollo_domain::library::{Collection, CollectionKind, PageMeta, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::BrowseId;
 use apollo_provider::{HomePage, InnerTubeSource, ListedTrack};
@@ -18,6 +18,10 @@ use innertube::{Locale, Session};
 
 use super::source::{ArtistContent, LibrarySource, TrackRow};
 use crate::art::DecodedArt;
+
+/// The public video the editable-playlist list is asked about: the sheet is per video, and only
+/// its list of playlists is read. Read-only; it adds the video nowhere.
+const PROBE_VIDEO: &str = "dQw4w9WgXcQ";
 
 const ART_TIMEOUT: Duration = Duration::from_secs(10);
 const ART_MAX_BYTES: u64 = 8 * 1024 * 1024;
@@ -177,6 +181,20 @@ impl LibrarySource for InnerTubeLibrary {
         })
     }
 
+    fn page(&self, collection: &Collection) -> Result<(Page<TrackRow>, PageMeta), LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            let (page, meta) = match collection.kind {
+                CollectionKind::Playlist => {
+                    source.playlist_with_meta(collection.id.as_str()).await
+                }
+                CollectionKind::Album => source.album_with_meta(collection.id.as_str()).await,
+            }?;
+            Ok((rows(page), meta))
+        })
+    }
+
     fn more_tracks(&self, token: &str) -> Result<Page<TrackRow>, LoadFailure> {
         let source = self.source()?;
         self.rt
@@ -249,6 +267,100 @@ impl LibrarySource for InnerTubeLibrary {
         self.rt.block_on(async {
             source.ensure_visitor_data().await;
             source.add_to_playlist(playlist_id, video_id).await
+        })
+    }
+
+    fn account_token(&self) -> Option<String> {
+        let snapshot = self.session.snapshot()?;
+        let channel = (self.data_sync_id)().unwrap_or_default();
+        Some(format!("{}:{channel}", snapshot.epoch))
+    }
+
+    fn editable_playlists(&self) -> Result<Vec<String>, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.editable_playlists(PROBE_VIDEO).await
+        })
+    }
+
+    fn save_target(&self, collection: &Collection) -> Result<String, LoadFailure> {
+        match collection.kind {
+            CollectionKind::Playlist => Ok(apollo_domain::library::bare_playlist_id(
+                collection.id.as_str(),
+            )
+            .to_owned()),
+            // An album is saved on its audio playlist, which only its page names.
+            CollectionKind::Album => {
+                let source = self.source()?;
+                let (_, meta) = self.rt.block_on(async {
+                    source.ensure_visitor_data().await;
+                    source.album_with_meta(collection.id.as_str()).await
+                })?;
+                meta.save_id.ok_or(LoadFailure::Parse)
+            }
+        }
+    }
+
+    fn create_playlist(&self, title: &str) -> Result<String, WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.create_playlist(title).await
+        })
+    }
+
+    fn delete_playlist(&self, playlist_id: &str) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.delete_playlist(playlist_id).await
+        })
+    }
+
+    fn rename_playlist(&self, playlist_id: &str, title: &str) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.rename_playlist(playlist_id, title).await
+        })
+    }
+
+    fn remove_from_playlist(
+        &self,
+        playlist_id: &str,
+        video_id: &str,
+        occurrence: &str,
+    ) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source
+                .remove_from_playlist(playlist_id, video_id, occurrence)
+                .await
+        })
+    }
+
+    fn move_in_playlist(
+        &self,
+        playlist_id: &str,
+        occurrence: &str,
+        before: Option<&str>,
+    ) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source
+                .move_in_playlist(playlist_id, occurrence, before)
+                .await
+        })
+    }
+
+    fn set_saved(&self, save_id: &str, saved: bool) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.set_saved(save_id, saved).await
         })
     }
 

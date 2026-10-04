@@ -1,7 +1,7 @@
-//! High-level endpoint facade over the transport. Read paths plus the two writes Apollo makes:
-//! `rate` (like / unlike) and adding one track to a playlist. Playlist create, rename, delete and
-//! removal, and the library `feedback` toggles, stay out until a milestone needs them
-//! (see NOTICE.md).
+//! High-level endpoint facade over the transport. Read paths plus the writes Apollo makes: `rate`
+//! (like / unlike), adding one track to a playlist, and playlist editing (create, rename, delete,
+//! remove or move a row, save or unsave a playlist or album). The library `feedback` toggles stay
+//! out until a milestone needs them (see NOTICE.md).
 
 use serde::Serialize;
 
@@ -578,6 +578,124 @@ impl InnerTube {
             Err(Error::Refused("playlist edit was not accepted".into()))
         }
     }
+
+    // --- playlist editing (Apollo addition, see NOTICE.md). ------------------------------------
+    //
+    // Every one goes out once (`post_once`): none of them is retried by the transport, because a
+    // timeout leaves the outcome unknown and a blind resend of a create, remove or move could do
+    // it twice. The caller reads the state back instead.
+
+    /// Create an empty, private playlist (`playlist/create`) and return its bare id (`PL…`).
+    ///
+    /// A reply that carries no playlist id is [`Error::Json`]: the playlist may well exist, so
+    /// the caller treats it as an unknown outcome and looks for it in the library.
+    pub async fn create_playlist(
+        &self,
+        client: &YouTubeClient,
+        title: &str,
+    ) -> Result<String, Error> {
+        let body = create_playlist_body(self.context_for(client), title);
+        let value = self.post_once("playlist/create", client, &body, true).await?;
+        value
+            .get("playlistId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                Error::Json(serde::de::Error::custom("no playlistId in the create response"))
+            })
+    }
+
+    /// Delete a playlist the account owns (`playlist/delete`). `playlist_id` is the bare id.
+    pub async fn delete_playlist(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+    ) -> Result<(), Error> {
+        let body = delete_playlist_body(self.context_for(client), playlist_id);
+        self.post_once("playlist/delete", client, &body, true).await?;
+        Ok(())
+    }
+
+    /// Rename a playlist the account owns (`ACTION_SET_PLAYLIST_NAME`).
+    pub async fn rename_playlist(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        title: &str,
+    ) -> Result<(), Error> {
+        let body = edit_body(
+            self.context_for(client),
+            playlist_id,
+            serde_json::json!({ "action": "ACTION_SET_PLAYLIST_NAME", "playlistName": title }),
+        );
+        self.edit_once(client, &body).await
+    }
+
+    /// Remove one row of a playlist the account owns (`ACTION_REMOVE_VIDEO`). `set_video_id` is
+    /// the row's own token (`playlistSetVideoId`), so a video listed twice loses only that row.
+    pub async fn remove_from_playlist(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        video_id: &str,
+        set_video_id: &str,
+    ) -> Result<(), Error> {
+        let body = edit_body(
+            self.context_for(client),
+            playlist_id,
+            serde_json::json!({
+                "action": "ACTION_REMOVE_VIDEO",
+                "setVideoId": set_video_id,
+                "removedVideoId": video_id,
+            }),
+        );
+        self.edit_once(client, &body).await
+    }
+
+    /// Move one row of a playlist the account owns to sit before another (`ACTION_MOVE_VIDEO_BEFORE`);
+    /// `before_set_video_id` `None` moves it to the end. Both are row tokens.
+    pub async fn move_in_playlist(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        set_video_id: &str,
+        before_set_video_id: Option<&str>,
+    ) -> Result<(), Error> {
+        let body = edit_body(
+            self.context_for(client),
+            playlist_id,
+            move_action(set_video_id, before_set_video_id),
+        );
+        self.edit_once(client, &body).await
+    }
+
+    /// Save a playlist or album to the library, or take it out again (`like/like`,
+    /// `like/removelike` with a playlist target). `playlist_id` is the bare playlist id; for an
+    /// album it is the album's audio playlist (`OLAK5uy_…`), not its `MPRE…` browse id.
+    pub async fn save_playlist(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        saved: bool,
+    ) -> Result<(), Error> {
+        let body = save_playlist_body(self.context_for(client), playlist_id);
+        self.post_once(save_playlist_path(saved), client, &body, true).await?;
+        Ok(())
+    }
+
+    async fn edit_once(
+        &self,
+        client: &YouTubeClient,
+        body: &serde_json::Value,
+    ) -> Result<(), Error> {
+        let value = self.post_once("browse/edit_playlist", client, body, true).await?;
+        if browse::edit_succeeded(&value) {
+            Ok(())
+        } else {
+            Err(Error::Refused("playlist edit was not accepted".into()))
+        }
+    }
 }
 
 fn rate_path(rating: Rating) -> &'static str {
@@ -657,6 +775,85 @@ fn add_options_body(context: Context, video_id: &str) -> serde_json::Value {
         exclude_watch_later: true,
     })
     .expect("a plain struct serialises")
+}
+
+fn create_playlist_body(context: Context, title: &str) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        title: String,
+        description: &'static str,
+        privacy_status: &'static str,
+    }
+    serde_json::to_value(Body {
+        context,
+        title: title.to_owned(),
+        description: "",
+        // Always private: a new playlist is never public until its owner says so on the site.
+        privacy_status: "PRIVATE",
+    })
+    .expect("a plain struct serialises")
+}
+
+fn delete_playlist_body(context: Context, playlist_id: &str) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        playlist_id: String,
+    }
+    serde_json::to_value(Body { context, playlist_id: playlist_id.to_owned() })
+        .expect("a plain struct serialises")
+}
+
+/// A `browse/edit_playlist` request carrying one action.
+fn edit_body(context: Context, playlist_id: &str, action: serde_json::Value) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        playlist_id: String,
+        actions: [serde_json::Value; 1],
+    }
+    serde_json::to_value(Body { context, playlist_id: playlist_id.to_owned(), actions: [action] })
+        .expect("a plain struct serialises")
+}
+
+/// The move action: before the row `before`, or to the end when there is none.
+fn move_action(set_video_id: &str, before: Option<&str>) -> serde_json::Value {
+    let mut action = serde_json::json!({
+        "action": "ACTION_MOVE_VIDEO_BEFORE",
+        "setVideoId": set_video_id,
+    });
+    if let Some(before) = before {
+        action["movedSetVideoIdSuccessor"] = before.into();
+    }
+    action
+}
+
+fn save_playlist_path(saved: bool) -> &'static str {
+    if saved {
+        "like/like"
+    } else {
+        "like/removelike"
+    }
+}
+
+fn save_playlist_body(context: Context, playlist_id: &str) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        target: Target,
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Target {
+        playlist_id: String,
+    }
+    serde_json::to_value(Body { context, target: Target { playlist_id: playlist_id.to_owned() } })
+        .expect("a plain struct serialises")
 }
 
 fn add_to_playlist_body(context: Context, playlist_id: &str, video_id: &str) -> serde_json::Value {
@@ -752,5 +949,74 @@ mod tests {
         assert_eq!(body["videoIds"], serde_json::json!(["dQw4w9WgXcQ"]));
         assert!(body.get("videoId").is_none(), "the service rejects the singular with a 400");
         assert_eq!(body["excludeWatchLater"], true);
+    }
+    #[test]
+    fn a_new_playlist_is_private_and_untouched_by_a_description() {
+        let (tube, client) = tube();
+        let body = create_playlist_body(tube.context_for(&client), "Apollo test");
+        assert_eq!(body["title"], "Apollo test");
+        assert_eq!(body["privacyStatus"], "PRIVATE");
+        assert_eq!(body["description"], "");
+        assert!(body.get("videoIds").is_none(), "created empty");
+        assert_eq!(body["context"]["user"]["onBehalfOfUser"], "PAGE1");
+    }
+
+    #[test]
+    fn delete_names_only_the_playlist() {
+        let (tube, client) = tube();
+        let body = delete_playlist_body(tube.context_for(&client), "PLabc");
+        assert_eq!(body["playlistId"], "PLabc");
+        assert_eq!(body["context"]["client"]["clientName"], "WEB_REMIX");
+        let mut keys: Vec<_> = body.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["context", "playlistId"]);
+    }
+
+    #[test]
+    fn rename_remove_and_move_are_single_edit_actions() {
+        let (tube, client) = tube();
+        let rename = edit_body(
+            tube.context_for(&client),
+            "PLabc",
+            json!({ "action": "ACTION_SET_PLAYLIST_NAME", "playlistName": "New" }),
+        );
+        assert_eq!(rename["playlistId"], "PLabc");
+        assert_eq!(
+            rename["actions"],
+            json!([{ "action": "ACTION_SET_PLAYLIST_NAME", "playlistName": "New" }])
+        );
+        let remove = edit_body(
+            tube.context_for(&client),
+            "PLabc",
+            json!({ "action": "ACTION_REMOVE_VIDEO", "setVideoId": "SV1", "removedVideoId": "vid" }),
+        );
+        assert_eq!(remove["actions"].as_array().unwrap().len(), 1);
+        assert_eq!(remove["actions"][0]["setVideoId"], "SV1");
+        assert_eq!(remove["actions"][0]["removedVideoId"], "vid");
+    }
+
+    #[test]
+    fn a_move_names_the_row_it_goes_before_and_goes_to_the_end_without_one() {
+        assert_eq!(
+            move_action("SV1", Some("SV9")),
+            json!({
+                "action": "ACTION_MOVE_VIDEO_BEFORE",
+                "setVideoId": "SV1",
+                "movedSetVideoIdSuccessor": "SV9",
+            })
+        );
+        let to_end = move_action("SV1", None);
+        assert_eq!(to_end["action"], "ACTION_MOVE_VIDEO_BEFORE");
+        assert!(to_end.get("movedSetVideoIdSuccessor").is_none());
+    }
+
+    #[test]
+    fn saving_is_a_like_on_the_playlist_and_unsaving_clears_it() {
+        assert_eq!(save_playlist_path(true), "like/like");
+        assert_eq!(save_playlist_path(false), "like/removelike");
+        let (tube, client) = tube();
+        let body = save_playlist_body(tube.context_for(&client), "OLAK5uy_x");
+        assert_eq!(body["target"], json!({ "playlistId": "OLAK5uy_x" }));
+        assert!(body["target"].get("videoId").is_none());
     }
 }

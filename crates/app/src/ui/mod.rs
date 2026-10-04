@@ -11,6 +11,7 @@ pub mod now_playing;
 pub mod player_bar;
 pub mod playback_page;
 pub mod playing_row;
+pub mod playlist_dialog;
 pub mod playlist_picker;
 pub mod queue_panel;
 pub mod row_actions;
