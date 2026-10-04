@@ -388,6 +388,32 @@ impl InnerTubeSource {
         Ok(radio_tracks(&next.items, video_id))
     }
 
+    /// The tracks of a radio or mix playlist that has no seed song (`RDEM…` an artist's radio,
+    /// `RDAO…` its shuffle mix), as the `next` panel lists them. Repeats and unplayable rows are
+    /// left out.
+    pub async fn mix(&self, playlist_id: &str) -> Result<Vec<ListedTrack>, LoadFailure> {
+        let next = self
+            .tube
+            .next(&self.client, None, Some(playlist_id))
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(radio_tracks(&next.items, ""))
+    }
+
+    /// Subscribe to or unsubscribe from an artist's channel (`UC…`) as the signed-in account.
+    /// Sent once: a failure that says [`WriteFailure::outcome_unknown`] means the account may or
+    /// may not have changed, and the caller reads the artist page back to find out.
+    pub async fn set_subscribed(
+        &self,
+        channel_id: &str,
+        subscribed: bool,
+    ) -> Result<(), WriteFailure> {
+        self.tube
+            .subscribe(&self.client, channel_id, subscribed)
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
     /// The playlists the account can add `video_id` to, each flagged when it already holds it.
     pub async fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
         let options = self

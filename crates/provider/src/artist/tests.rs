@@ -120,13 +120,16 @@ fn a_signed_in_page_maps_into_top_songs_and_album_rows() {
 }
 
 #[test]
-fn carousels_that_open_nothing_here_are_left_out_without_a_failure() {
+fn music_videos_are_left_out_without_a_failure() {
     let root = response(
         Some("An Artist"),
         vec![
             carousel(
-                "Fans might also like",
-                vec![card("Someone", "1M subscribers", "UCother")],
+                "Videos",
+                vec![json!({ "musicTwoRowItemRenderer": {
+                    "title": { "runs": [{ "text": "A Video" }] },
+                    "navigationEndpoint": { "watchEndpoint": { "videoId": "vvvvvvvvvvv" } }
+                } })],
             ),
             carousel("Featured on", vec![card("A Mix", "Playlist", "VLPLmix")]),
         ],
@@ -135,7 +138,88 @@ fn carousels_that_open_nothing_here_are_left_out_without_a_failure() {
     assert_eq!(page.sections.len(), 1);
     assert_eq!(page.sections[0].title, "Featured on");
     assert_eq!(page.sections[0].items[0].kind, CollectionKind::Playlist);
-    assert_eq!(page.skipped, 0, "an artist row is not an unreadable row");
+    assert_eq!(page.skipped, 0, "a video row is not an unreadable row");
+}
+
+#[test]
+fn similar_artists_become_their_own_list_in_order_without_repeats() {
+    let root = response(
+        Some("An Artist"),
+        vec![carousel(
+            "Fans might also like",
+            vec![
+                card("Someone", "1M subscribers", "UCone"),
+                card("Another", "2M subscribers", "UCtwo"),
+                card("Someone", "1M subscribers", "UCone"),
+                card("   ", "No name", "UCthree"),
+            ],
+        )],
+    );
+    let page = mapped(&root).unwrap();
+    let names: Vec<&str> = page.related.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["Someone", "Another"]);
+    assert_eq!(page.related[0].id.as_str(), "UCone");
+    assert_eq!(
+        page.related[0].thumbnail.as_deref(),
+        Some("https://example.test/card.jpg")
+    );
+    assert!(page.sections.is_empty(), "artists are not an album shelf");
+    assert_eq!(page.skipped, 1, "the nameless card is counted, not hidden");
+    assert!(!page.is_empty(), "similar artists alone are something to show");
+}
+
+#[test]
+fn the_header_carries_the_bio_the_counts_and_the_subscription() {
+    let mut root = full();
+    let header = &mut root["header"]["musicImmersiveHeaderRenderer"];
+    header["description"] = json!({ "runs": [{ "text": "  A long bio.  " }] });
+    header["monthlyListenerCount"] = json!({ "runs": [{ "text": "137M monthly audience" }] });
+    header["subscriptionButton"] = json!({ "subscribeButtonRenderer": {
+        "channelId": "UCchannel",
+        "subscribed": true,
+        "longSubscriberCountText": { "runs": [{ "text": "32.7M subscribers" }] }
+    } });
+    header["playButton"] = json!({ "buttonRenderer": { "navigationEndpoint": {
+        "watchPlaylistEndpoint": { "playlistId": "RDAOshuffle" } } } });
+    header["startRadioButton"] = json!({ "buttonRenderer": { "navigationEndpoint": {
+        "watchPlaylistEndpoint": { "playlistId": "RDEMradio" } } } });
+    let page = mapped(&root).unwrap();
+    assert_eq!(page.description.as_deref(), Some("A long bio."));
+    assert_eq!(page.subscribers.as_deref(), Some("32.7M subscribers"));
+    assert_eq!(
+        page.monthly_listeners.as_deref(),
+        Some("137M monthly audience")
+    );
+    assert_eq!(page.channel_id, "UCchannel");
+    assert!(page.subscribed);
+    assert_eq!(page.radio_playlist_id.as_deref(), Some("RDEMradio"));
+    assert_eq!(page.shuffle_playlist_id.as_deref(), Some("RDAOshuffle"));
+}
+
+#[test]
+fn a_header_with_none_of_that_is_not_subscribed_and_has_nothing_to_show() {
+    let page = mapped(&full()).unwrap();
+    assert_eq!(page.description, None);
+    assert_eq!(page.subscribers, None);
+    assert_eq!(page.monthly_listeners, None);
+    assert!(!page.subscribed);
+    assert_eq!(page.channel_id, "UCartist", "the browse id is the channel id");
+    assert_eq!(page.radio_playlist_id, None);
+    assert_eq!(page.shuffle_playlist_id, None);
+    assert_eq!(page.top_songs_id, None);
+}
+
+#[test]
+fn show_all_opens_the_top_songs_playlist() {
+    let root = response(
+        Some("An Artist"),
+        vec![json!({ "musicShelfRenderer": {
+            "contents": [song_row("aaaaaaaaaaa", "First")],
+            "bottomEndpoint": { "browseEndpoint": { "browseId": "VLOLAK5uy_top" } }
+        } })],
+    );
+    let page = mapped(&root).unwrap();
+    assert_eq!(page.top_songs_id.unwrap().as_str(), "VLOLAK5uy_top");
 }
 
 #[test]
@@ -196,6 +280,20 @@ fn a_recorded_page_maps_its_header_and_the_playlists_it_can_open() {
     assert!(
         page.top_songs.is_empty(),
         "anonymous pages carry no top songs"
+    );
+    // The recorded header is where the real shuffle and radio ids were first seen side by side:
+    // the shuffle mix (`RDAO…`) sits under `playButton`, which sorts before the radio's button.
+    assert_eq!(
+        page.shuffle_playlist_id.as_deref(),
+        Some("RDAOHSpo_Uv9STIRtF73zMywLg")
+    );
+    assert_eq!(
+        page.radio_playlist_id.as_deref(),
+        Some("RDEMHSpo_Uv9STIRtF73zMywLg")
+    );
+    assert_eq!(
+        page.monthly_listeners.as_deref(),
+        Some("244M monthly audience")
     );
     assert_eq!(page.sections.len(), 1, "videos open nothing here");
     let playlists = &page.sections[0];

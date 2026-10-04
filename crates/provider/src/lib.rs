@@ -10,7 +10,7 @@ mod map;
 mod search;
 mod source;
 
-pub use artist::{page_from_artist, ArtistPage, ArtistSection};
+pub use artist::{page_from_artist, ArtistPage, ArtistSection, RelatedArtist};
 pub use explore::{explore_page, mood_playlists, worst, ExplorePage, MoodTile};
 pub use home::{home_page, HomeItem, HomePage, HomeShelf};
 pub use map::{
