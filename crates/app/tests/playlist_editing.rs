@@ -20,7 +20,7 @@ use apollo_app::ui::playlist_picker::PlaylistPicker;
 use apollo_app::ui::shell::{self, Shell};
 use apollo_app::ui::track_menu::{self, Anchor, Command, Subject, TrackMenu};
 use apollo_app::url_thumbs::NoThumbs;
-use apollo_domain::library::{Collection, WriteFailure};
+use apollo_domain::library::{Collection, Privacy, WriteFailure};
 use apollo_domain::listing::LoadFailure;
 use apollo_provider::SearchResults;
 use apollo_runtime::mock::{MockEngine, MockResolver};
@@ -383,13 +383,13 @@ fn rename_from_a_playlist_card_menu(cx: &mut TestAppContext) {
     let at = bounds(vcx, &format!("library-row-{ix}")).center();
     right_click(vcx, at);
     let offered = commands(&page, vcx);
-    assert!(offered.contains(&Command::Rename));
+    assert!(offered.contains(&Command::EditPlaylist));
     assert!(offered.contains(&Command::DeletePlaylist));
     assert!(!offered.contains(&Command::SaveToLibrary));
     assert!(!offered.contains(&Command::RemoveFromLibrary), "your own playlists are not 'saved'");
-    choose(&page, vcx, Command::Rename);
+    choose(&page, vcx, Command::EditPlaylist);
     assert!(!menu_open(&page, vcx));
-    assert!(matches!(dialog_mode(&page, vcx), Some(Mode::Rename(c)) if c.title == ROAD_TRIP));
+    assert!(matches!(dialog_mode(&page, vcx), Some(Mode::Edit(c)) if c.title == ROAD_TRIP));
     // It starts from the current name.
     assert_eq!(
         page.dialog.read_with(vcx, |d, cx| d.field().read(cx).text().to_owned()),
@@ -401,13 +401,13 @@ fn rename_from_a_playlist_card_menu(cx: &mut TestAppContext) {
     assert!(log(&page).is_empty());
 
     right_click(vcx, at);
-    choose(&page, vcx, Command::Rename);
+    choose(&page, vcx, Command::EditPlaylist);
     type_name(&page, vcx, "  Summer drive ");
     submit(&page, vcx);
     assert!(!dialog_open(&page, vcx));
     assert_eq!(
         log(&page),
-        vec![("rename:Summer drive".to_owned(), ROAD_TRIP_ID.to_owned())]
+        vec![("edit:title=Summer drive".to_owned(), ROAD_TRIP_ID.to_owned())]
     );
     assert_eq!(titles(&page, vcx, Tab::Playlists)[ix], "Summer drive");
 }
@@ -418,7 +418,7 @@ fn a_failed_rename_keeps_the_old_title_and_the_dialog(cx: &mut TestAppContext) {
     let ix = row_of(&page, vcx, Tab::Playlists, ROAD_TRIP);
     let at = bounds(vcx, &format!("library-row-{ix}")).center();
     right_click(vcx, at);
-    choose(&page, vcx, Command::Rename);
+    choose(&page, vcx, Command::EditPlaylist);
     type_name(&page, vcx, "Summer drive");
     page.sim
         .set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Rejected));
@@ -427,7 +427,7 @@ fn a_failed_rename_keeps_the_old_title_and_the_dialog(cx: &mut TestAppContext) {
     assert_eq!(titles(&page, vcx, Tab::Playlists)[ix], ROAD_TRIP);
     assert_eq!(
         notice(&page, vcx).as_deref(),
-        Some(failure_text(Edit::Rename, WriteFailure::Rejected))
+        Some(failure_text(Edit::Update, WriteFailure::Rejected))
     );
 }
 
@@ -483,8 +483,8 @@ fn renaming_from_the_page_menu_retitles_the_open_page(cx: &mut TestAppContext) {
     // Right-click on the header, beside the title.
     let more = bounds(vcx, "detail-more").center();
     right_click(vcx, point(more.x - gpui::px(300.0), more.y));
-    assert!(commands(&page, vcx).contains(&Command::Rename), "right-click on the header too");
-    choose(&page, vcx, Command::Rename);
+    assert!(commands(&page, vcx).contains(&Command::EditPlaylist), "right-click on the header too");
+    choose(&page, vcx, Command::EditPlaylist);
     type_name(&page, vcx, "Summer drive");
     submit(&page, vcx);
     let title = page.view.read_with(vcx, |v, cx| {
@@ -504,7 +504,7 @@ fn only_one_write_per_playlist_is_out_at_a_time(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     let renames: Vec<_> = log(&page)
         .into_iter()
-        .filter(|(what, _)| what.starts_with("rename:"))
+        .filter(|(what, _)| what.starts_with("edit:"))
         .collect();
     assert_eq!(renames.len(), 1, "the second ask while one is out is ignored");
 }
@@ -550,7 +550,7 @@ fn another_persons_playlist_has_no_song_editing(cx: &mut TestAppContext) {
     click(vcx, "detail-more");
     let offered = commands(&page, vcx);
     assert!(offered.contains(&Command::RemoveFromLibrary));
-    assert!(!offered.contains(&Command::Rename));
+    assert!(!offered.contains(&Command::EditPlaylist));
     assert!(!offered.contains(&Command::DeletePlaylist));
 }
 
@@ -718,7 +718,7 @@ fn an_album_can_be_taken_out_of_the_library_and_saved_again(cx: &mut TestAppCont
     right_click(vcx, at);
     let offered = commands(&page, vcx);
     assert!(offered.contains(&Command::RemoveFromLibrary));
-    assert!(!offered.contains(&Command::Rename));
+    assert!(!offered.contains(&Command::EditPlaylist));
     choose(&page, vcx, Command::RemoveFromLibrary);
     assert!(!titles(&page, vcx, Tab::Albums).contains(&"Greenhouse".to_owned()));
     assert!(log(&page).iter().any(|(w, id)| w == "unsave" && id.starts_with("OLAK5uy_")));
@@ -748,7 +748,7 @@ fn another_persons_playlist_is_saved_and_unsaved_from_its_card(cx: &mut TestAppC
     let at = bounds(vcx, &format!("library-row-{handle_row}")).center();
     right_click(vcx, at);
     let offered = commands(&page, vcx);
-    assert!(offered.contains(&Command::RemoveFromLibrary) || offered.contains(&Command::Rename));
+    assert!(offered.contains(&Command::RemoveFromLibrary) || offered.contains(&Command::EditPlaylist));
     vcx.simulate_keystrokes("escape");
 
     // Drive the same menu through the shared entry point.
@@ -907,4 +907,255 @@ fn the_new_playlist_button_waits_for_the_library(cx: &mut TestAppContext) {
         !on_screen(vcx, "library-new-playlist"),
         "no button while the library failed to load"
     );
+}
+
+// ---- edit playlist: description and privacy --------------------------------------------------------
+
+fn open_edit_dialog(page: &Page, vcx: &mut VisualTestContext) -> Collection {
+    let ix = row_of(page, vcx, Tab::Playlists, ROAD_TRIP);
+    let at = bounds(vcx, &format!("library-row-{ix}")).center();
+    right_click(vcx, at);
+    choose(page, vcx, Command::EditPlaylist);
+    collection(page, vcx, Tab::Playlists, ROAD_TRIP)
+}
+
+fn set_description(page: &Page, vcx: &mut VisualTestContext, text: &str) {
+    let field = page.dialog.read_with(vcx, |d, _| d.description_field().clone());
+    field.update(vcx, |f, cx| f.set_text(text, cx));
+    vcx.run_until_parked();
+}
+
+fn description(page: &Page, vcx: &mut VisualTestContext) -> String {
+    page.dialog
+        .read_with(vcx, |d, cx| d.description_field().read(cx).text().to_owned())
+}
+
+fn pick_privacy(page: &Page, vcx: &mut VisualTestContext, privacy: Privacy) {
+    page.dialog.update(vcx, |d, cx| d.set_privacy(privacy, cx));
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_edit_dialog_offers_the_description_and_privacy_once_the_page_has_been_read(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    let ix = row_of(&page, vcx, Tab::Playlists, ROAD_TRIP);
+    let at = bounds(vcx, &format!("library-row-{ix}")).center();
+    right_click(vcx, at);
+    choose(&page, vcx, Command::EditPlaylist);
+    // The name is there at once; the rest needs the playlist's page.
+    vcx.run_until_parked();
+    assert!(page.dialog.read_with(vcx, |d, _| d.details_shown()));
+    assert!(on_screen(vcx, "playlist-dialog-field"));
+    assert!(on_screen(vcx, "playlist-dialog-description"));
+    assert!(on_screen(vcx, "playlist-dialog-privacy-row"));
+    assert_eq!(description(&page, vcx), "");
+    assert_eq!(page.dialog.read_with(vcx, |d, _| d.privacy()), Some(Privacy::Private));
+    // The description is three rows tall.
+    let field = bounds(vcx, "playlist-dialog-field");
+    let blurb = bounds(vcx, "playlist-dialog-description");
+    assert!(blurb.size.height > field.size.height);
+}
+
+#[gpui::test]
+fn an_edit_sends_only_the_description_and_privacy_that_changed_and_closes_quietly(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    open_edit_dialog(&page, vcx);
+    vcx.run_until_parked();
+    set_description(&page, vcx, "Songs for the highway  \r\nwindows down");
+    pick_privacy(&page, vcx, Privacy::Unlisted);
+    submit(&page, vcx);
+    assert!(!dialog_open(&page, vcx));
+    assert_eq!(
+        page.sim.playlist_details(ROAD_TRIP_ID),
+        (
+            Some("Songs for the highway\nwindows down".to_owned()),
+            Some(Privacy::Unlisted)
+        ),
+        "the description arrives cleaned"
+    );
+    let writes = log(&page);
+    assert_eq!(writes.len(), 1, "one write carries both");
+    assert!(!writes[0].0.contains("title="), "the name was not touched: {writes:?}");
+    assert_eq!(notice(&page, vcx), None, "success is silent");
+
+    // Reopened, it starts from what is there now, and with nothing changed sends nothing.
+    open_edit_dialog(&page, vcx);
+    vcx.run_until_parked();
+    assert_eq!(description(&page, vcx), "Songs for the highway\nwindows down");
+    assert_eq!(page.dialog.read_with(vcx, |d, _| d.privacy()), Some(Privacy::Unlisted));
+    submit(&page, vcx);
+    assert!(!dialog_open(&page, vcx));
+    assert_eq!(log(&page).len(), 1);
+}
+
+#[gpui::test]
+fn the_name_description_and_privacy_go_in_one_write_and_a_cleared_description_is_sent(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    open_edit_dialog(&page, vcx);
+    vcx.run_until_parked();
+    type_name(&page, vcx, "Summer drive");
+    set_description(&page, vcx, "Sun");
+    pick_privacy(&page, vcx, Privacy::Public);
+    submit(&page, vcx);
+    assert_eq!(log(&page).len(), 1);
+    assert_eq!(titles(&page, vcx, Tab::Playlists).iter().filter(|t| *t == "Summer drive").count(), 1);
+    assert_eq!(
+        page.sim.playlist_details(ROAD_TRIP_ID),
+        (Some("Sun".to_owned()), Some(Privacy::Public))
+    );
+
+    let ix = row_of(&page, vcx, Tab::Playlists, "Summer drive");
+    let at = bounds(vcx, &format!("library-row-{ix}")).center();
+    right_click(vcx, at);
+    choose(&page, vcx, Command::EditPlaylist);
+    vcx.run_until_parked();
+    set_description(&page, vcx, "  \n ");
+    submit(&page, vcx);
+    assert_eq!(page.sim.playlist_details(ROAD_TRIP_ID).0.as_deref(), Some(""));
+    assert_eq!(log(&page).len(), 2);
+}
+
+#[gpui::test]
+fn a_failed_edit_keeps_the_dialog_and_everything_typed(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_edit_dialog(&page, vcx);
+    vcx.run_until_parked();
+    set_description(&page, vcx, "Night drives");
+    pick_privacy(&page, vcx, Privacy::Public);
+    page.sim
+        .set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Rejected));
+    submit(&page, vcx);
+    assert!(dialog_open(&page, vcx));
+    assert!(!page.dialog.read_with(vcx, |d, _| d.is_busy()));
+    assert_eq!(description(&page, vcx), "Night drives");
+    assert_eq!(page.dialog.read_with(vcx, |d, _| d.privacy()), Some(Privacy::Public));
+    assert_eq!(
+        notice(&page, vcx).as_deref(),
+        Some(failure_text(Edit::Update, WriteFailure::Rejected))
+    );
+    assert_eq!(page.sim.playlist_details(ROAD_TRIP_ID), (None, None), "nothing was written");
+}
+
+#[gpui::test]
+fn enter_in_the_description_is_a_line_break_and_tab_visits_every_control(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    open_edit_dialog(&page, vcx);
+    vcx.run_until_parked();
+    // Name first; Tab goes to the description, then the privacy button.
+    vcx.simulate_keystrokes("tab");
+    set_description(&page, vcx, "one");
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_input("two");
+    assert!(dialog_open(&page, vcx), "Enter did not confirm the dialog");
+    assert_eq!(description(&page, vcx), "one\ntwo");
+    vcx.simulate_keystrokes("tab");
+    vcx.simulate_keystrokes("tab");
+    vcx.simulate_keystrokes("tab");
+    vcx.simulate_keystrokes("shift-tab");
+    assert!(dialog_open(&page, vcx));
+}
+
+#[gpui::test]
+fn the_privacy_button_offers_the_three_choices_with_a_check_on_the_current_one(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    open_edit_dialog(&page, vcx);
+    vcx.run_until_parked();
+    // The button sits at the right end of its row.
+    let row = bounds(vcx, "playlist-dialog-privacy-row");
+    let button = point(row.origin.x + row.size.width - gpui::px(30.0), row.center().y);
+    vcx.simulate_click(button, Modifiers::none());
+    vcx.run_until_parked();
+    let choices = page.shell.read_with(vcx, |s, _| s.choices().clone());
+    assert!(choices.read_with(vcx, |c, _| c.is_open()));
+    let labels: Vec<String> = choices
+        .read_with(vcx, |c, _| c.labels())
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(labels, ["Private", "Unlisted", "Public"]);
+}
+
+#[gpui::test]
+fn a_playlist_that_is_not_yours_has_no_edit_item_and_its_dialog_never_asks_the_page(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    let others = collection(&page, vcx, Tab::Playlists, "Liked Music");
+    page.dialog.update_in(vcx, |d, window, cx| {
+        d.open(Mode::Edit(others.clone()), window, cx)
+    });
+    vcx.run_until_parked();
+    assert!(
+        !page.dialog.read_with(vcx, |d, _| d.details_shown()),
+        "only the name is offered for what the account does not own"
+    );
+}
+
+
+// ---- the description on the playlist page ----------------------------------------------------------
+
+/// A playlist of somebody else's that carries a description in the simulation.
+const DESCRIBED: &str = "Mix 020";
+
+fn shown_description(vcx: &mut VisualTestContext) -> bool {
+    vcx.debug_bounds("detail-description").is_some()
+}
+
+#[gpui::test]
+fn a_playlist_without_a_description_shows_none(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_playlist(&page, vcx, ROAD_TRIP);
+    assert!(!shown_description(vcx));
+}
+
+#[gpui::test]
+fn another_persons_description_is_shown_and_clicking_it_does_nothing(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_playlist(&page, vcx, DESCRIBED);
+    assert!(shown_description(vcx), "the blurb the service sent is on the page");
+    let at = bounds(vcx, "detail-description").center();
+    vcx.simulate_click(at, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(!dialog_open(&page, vcx), "it is not theirs to edit");
+}
+
+#[gpui::test]
+fn a_description_set_in_the_dialog_appears_under_the_title_and_a_click_reopens_the_dialog(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    open_playlist(&page, vcx, ROAD_TRIP);
+    choose_from_header(&page, vcx);
+    set_description(&page, vcx, "Songs for the road");
+    submit(&page, vcx);
+    assert!(!dialog_open(&page, vcx));
+    assert!(shown_description(vcx), "the open page follows the edit");
+
+    let at = bounds(vcx, "detail-description").center();
+    vcx.simulate_click(at, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(dialog_open(&page, vcx), "a click on your own description edits it");
+    assert!(matches!(dialog_mode(&page, vcx), Some(Mode::Edit(_))));
+    assert_eq!(description(&page, vcx), "Songs for the road");
+
+    // Clearing it takes it off the page again.
+    set_description(&page, vcx, "");
+    submit(&page, vcx);
+    assert!(!shown_description(vcx));
+}
+
+fn choose_from_header(page: &Page, vcx: &mut VisualTestContext) {
+    let more = bounds(vcx, "detail-more").center();
+    right_click(vcx, point(more.x - gpui::px(300.0), more.y));
+    choose(page, vcx, Command::EditPlaylist);
 }

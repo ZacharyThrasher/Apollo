@@ -303,3 +303,37 @@ fn the_recorded_anonymous_feed_beside_a_music_shelf_keeps_the_music() {
     // Three podcast shows, the shelf they sat on and the taste-builder shelf.
     assert_eq!(page.skipped, 5);
 }
+
+#[test]
+fn the_recorded_chips_come_through_without_podcasts_and_with_their_tokens() {
+    let mut root: Value = serde_json::from_str(RECORDED).expect("fixture parses");
+    let contents = root
+        .pointer_mut("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
+        .and_then(Value::as_array_mut)
+        .expect("section list");
+    contents.insert(
+        0,
+        shelf(
+            "Quick picks",
+            vec![list_song("aaaaaaaaaaa", "Song", "A", "UCa")],
+        ),
+    );
+    let page = home_page(&parse_home(&root)).unwrap();
+    let titles: Vec<&str> = page.chips.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        ["Energize", "Party", "Feel good", "Relax", "Workout", "Commute", "Romance", "Sad", "Focus", "Sleep"],
+        "the service's order, Podcasts left out"
+    );
+    assert!(
+        page.chips.iter().all(|c| c.params.starts_with("ggNC")),
+        "each carries the token that re-browses the feed for it"
+    );
+}
+
+#[test]
+fn a_page_saved_before_chips_existed_still_reads() {
+    let old = r#"{"shelves":[],"continuation":null,"skipped":0}"#;
+    let page: HomePage = serde_json::from_str(old).expect("old pages read");
+    assert!(page.chips.is_empty());
+}

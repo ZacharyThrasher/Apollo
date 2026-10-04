@@ -3,7 +3,7 @@ use std::time::Duration;
 use apollo_domain::account::{IdentityId, Validation, ValidationError};
 use apollo_domain::library::{
     bare_playlist_id, is_user_playlist_id, Collection, CollectionKind, PageMeta, PlaylistTarget,
-    WriteFailure,
+    Privacy, WriteFailure,
 };
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track, VideoId};
@@ -201,6 +201,11 @@ pub fn meta_from_playlist(p: &PlaylistPage, browse_id: &str) -> PageMeta {
         owned: p.owned && is_user_playlist_id(bare),
         save_id: (!bare.is_empty()).then(|| bare.to_owned()),
         in_library: None,
+        // The blurb is on any playlist's header, so a page can show it; whether it is offered for
+        // editing is `owned`'s say. Visibility is the owner's edit header's alone, and never
+        // guessed for a list the account does not own.
+        description: p.description.clone().filter(|d| !d.trim().is_empty()),
+        privacy: p.privacy.as_deref().and_then(Privacy::from_service_word).filter(|_| p.owned),
     }
 }
 
@@ -211,6 +216,8 @@ pub fn meta_from_album(a: &AlbumPage) -> PageMeta {
         owned: false,
         save_id: a.playlist_id.clone().filter(|id| !id.is_empty()),
         in_library: Some(a.in_library),
+        description: None,
+        privacy: None,
     }
 }
 

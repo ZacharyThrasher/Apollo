@@ -23,6 +23,6 @@ pub use models::context::Locale;
 pub use models::player::PlayerLoudness;
 pub use tracking::{new_nonce, PingState, PlaybackTracking, WatchtimePing};
 pub use models::metadata::{
-    AccountIdentity, AccountInfo, NextResult, Rating, SearchResult, SongItem,
+    AccountIdentity, AccountInfo, LibraryToggle, NextResult, Rating, SearchResult, SongItem,
 };
 pub use transport::{cookie_sapisid, Error, InnerTube, Session};

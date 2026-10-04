@@ -877,6 +877,9 @@ impl PlayerModel {
     /// The radio's tracks replace everything that was up next, and the queue now plays from
     /// `source` (the radio).
     pub fn finish_radio(&mut self, tracks: Vec<Track>, source: QueueSource, cx: &mut Context<Self>) {
+        // A blocked artist's songs are not added by a radio.
+        let blocked = crate::blocked_artists::snapshot(cx);
+        let tracks = apollo_domain::blocklist::retain_allowed(tracks, &blocked, |t| t);
         let edit = |q: &mut Queue| {
             q.clear_upcoming();
             q.append_radio(tracks);
@@ -1464,6 +1467,9 @@ impl PlayerModel {
             .chain(queue.upcoming())
             .map(|e| e.track.video_id.as_str().to_owned())
             .collect();
+        // A blocked artist's songs are not added by autoplay.
+        let blocked = crate::blocked_artists::snapshot(cx);
+        let rows = apollo_domain::blocklist::retain_allowed(rows, &blocked, |r| &r.track);
         let mut tracks = Vec::new();
         for row in rows {
             if tracks.len() == RADIO_APPEND {

@@ -44,6 +44,8 @@ pub mod keys {
     pub const ARTISTS: &str = "lib:artists";
     /// The Library's History tab.
     pub const HISTORY: &str = "lib:history";
+    /// The Library's Songs tab.
+    pub const SONGS: &str = "lib:songs";
 
     /// An album or playlist page: its whole track list.
     pub fn collection(id: &BrowseId) -> String {
@@ -400,6 +402,11 @@ impl PageCache {
     /// The set of playlists or albums changed (one was created, deleted or saved).
     pub fn invalidate_library(&self) {
         self.invalidate(keys::COLLECTIONS);
+    }
+
+    /// A song was saved to or removed from the library: the Songs tab's list changed.
+    pub fn invalidate_songs(&self) {
+        self.invalidate(keys::SONGS);
     }
 
     /// An artist page changed.

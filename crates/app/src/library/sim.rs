@@ -7,14 +7,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apollo_domain::library::{
-    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistTarget, WriteFailure,
-    LIKED_MUSIC_BROWSE_ID,
+    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy,
+    WriteFailure, LIKED_MUSIC_BROWSE_ID,
 };
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track};
 use apollo_provider::{
-    ArtistSection, ExplorePage, HistoryDay, Hit, HomeItem, HomePage, HomeShelf, ListedTrack,
-    MoodTile, RelatedArtist,
+    ArtistSection, ExplorePage, HistoryDay, Hit, HomeChip, HomeItem, HomePage, HomeShelf,
+    ListedTrack, MoodTile, RelatedArtist,
 };
 
 use super::source::{ArtistContent, LibrarySource, TrackRow};
@@ -29,6 +29,10 @@ pub const PAGE_SIZE: usize = 100;
 pub const LONG_LEN: usize = 3_000;
 
 pub const LONG_ID: &str = "VLPLsimlong";
+/// The simulated Library > Songs list, paged like the long playlist when it is long.
+pub const SONGS_ID: &str = "FEmusic_liked_videos";
+/// How many songs `preset_long_library_songs` puts in the list: three pages.
+pub const LONG_SONGS: usize = 250;
 pub const EMPTY_ID: &str = "VLPLsimempty";
 pub const BROKEN_ID: &str = "VLPLsimbroken";
 const ROAD_TRIP_ID: &str = "VLPLsimroad";
@@ -54,6 +58,12 @@ const RADIO_BATCH: usize = 10;
 /// Token of the home feed's second and third batches.
 pub const HOME_SECOND: &str = "sim-home@2";
 pub const HOME_THIRD: &str = "sim-home@3";
+/// The simulated mood chips of the home feed, `(title, params)`.
+pub const HOME_CHIPS: [(&str, &str); 3] = [
+    ("Relax", "sim-chip-relax"),
+    ("Workout", "sim-chip-workout"),
+    ("Focus", "sim-chip-focus"),
+];
 /// Songs on the simulated "Quick picks" shelf: enough for several pages of columns.
 pub const QUICK_PICKS: usize = 20;
 
@@ -137,6 +147,8 @@ const ROAD_TRIP_FIXTURES: [usize; 3] = [0, 1, 5];
 struct SimState {
     /// Video ids in Liked Music, most recently liked first.
     liked: Vec<String>,
+    /// Video ids the account thumbs-downed ("Not interested").
+    disliked: Vec<String>,
     /// `(bare playlist id, video id)` added through `add_to_playlist`, oldest first.
     added: Vec<(String, String)>,
     writes: WriteBehaviour,
@@ -145,8 +157,11 @@ struct SimState {
     /// Writes the simulation received, `(what, video id)`, for tests.
     log: Vec<(String, String)>,
     home: HomeBehaviour,
-    /// Home requests the simulation received: `""` for the first batch, else the token.
+    /// Home requests the simulation received: `""` for the first batch, else the token, and
+    /// `chip:` and the chip's params for a mood chip.
     home_log: Vec<String>,
+    /// Makes mood chip requests fail.
+    chip_failure: Option<LoadFailure>,
     explore: ExploreBehaviour,
     /// Explore requests received.
     explore_requests: u32,
@@ -186,18 +201,31 @@ struct SimState {
     mixes: Vec<String>,
     /// Makes `artist` fail once the page has been seen (the read-back after an unknown write).
     artist_fails: Option<LoadFailure>,
+    /// Video ids in Library > Songs, most recently added first.
+    songs: Vec<String>,
+    /// Songs whose row offered no library toggle, so nothing can be done about them from here.
+    no_toggle: HashSet<String>,
+    /// Songs the model told the source are in the library because Library > Songs listed them.
+    listed_saved: HashSet<String>,
+    /// What playlists were last given as a description and a visibility, by bare id.
+    descriptions: HashMap<String, String>,
+    privacies: HashMap<String, Privacy>,
+    /// The videos a playlist was created with, by bare id.
+    created_with: HashMap<String, Vec<String>>,
 }
 
 impl SimState {
     fn new() -> Self {
         Self {
             liked: FIXTURES.iter().take(6).map(|f| f.id.to_owned()).collect(),
+            disliked: Vec::new(),
             added: Vec::new(),
             writes: WriteBehaviour::default(),
             playlists: None,
             log: Vec::new(),
             home: HomeBehaviour::default(),
             home_log: Vec::new(),
+            chip_failure: None,
             explore: ExploreBehaviour::default(),
             explore_requests: 0,
             mood_log: Vec::new(),
@@ -218,6 +246,18 @@ impl SimState {
             subscribed: Vec::new(),
             mixes: Vec::new(),
             artist_fails: None,
+            songs: vec![
+                FIXTURES[3].id.to_owned(),
+                FIXTURES[1].id.to_owned(),
+                format!("{GENERATED_PREFIX}{:05}", 0),
+                format!("{GENERATED_PREFIX}{:05}", 1),
+                format!("{GENERATED_PREFIX}{:05}", 2),
+            ],
+            no_toggle: HashSet::new(),
+            listed_saved: HashSet::new(),
+            descriptions: HashMap::new(),
+            privacies: HashMap::new(),
+            created_with: HashMap::new(),
         }
     }
 }
@@ -267,6 +307,11 @@ impl SimLibrary {
     /// The home requests received, `""` for a first batch and the token for a following one.
     pub fn home_log(&self) -> Vec<String> {
         self.state().home_log.clone()
+    }
+
+    /// Makes the home feed's mood chips fail (tests).
+    pub fn set_chip_failure(&self, failure: Option<LoadFailure>) {
+        self.state().chip_failure = failure;
     }
 
     /// How the Related tab is answered from now on (tests).
@@ -338,6 +383,11 @@ impl SimLibrary {
         self.state().playlists = failure;
     }
 
+    /// Video ids the account thumbs-downed, most recent first.
+    pub fn disliked_ids(&self) -> Vec<String> {
+        self.state().disliked.clone()
+    }
+
     /// Video ids in Liked Music, most recently liked first.
     pub fn liked_ids(&self) -> Vec<String> {
         self.state().liked.clone()
@@ -380,6 +430,58 @@ impl SimLibrary {
     }
 
     /// Liked Music as the service holds it now.
+    /// The video ids in Library > Songs, most recently added first.
+    pub fn library_song_ids(&self) -> Vec<String> {
+        self.state().songs.clone()
+    }
+
+    /// Replace Library > Songs with exactly these videos.
+    pub fn preset_library_songs(&self, ids: &[&str]) {
+        self.state().songs = ids.iter().map(|id| (*id).to_owned()).collect();
+    }
+
+    /// Fill Library > Songs with [`LONG_SONGS`] generated songs (paged).
+    pub fn preset_long_library_songs(&self) {
+        self.state().songs = (0..LONG_SONGS)
+            .map(|n| format!("{GENERATED_PREFIX}{:05}", n + 10))
+            .collect();
+    }
+
+    /// The video ids the Songs tab has told the source it holds, sorted.
+    pub fn songs_noted_saved(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.state().listed_saved.iter().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Make this song's row offer no library toggle (the menu then has no save item for it).
+    pub fn hide_library_toggle(&self, video_id: &str) {
+        self.state().no_toggle.insert(video_id.to_owned());
+    }
+
+    /// The description and visibility a playlist was last given.
+    pub fn playlist_details(&self, bare_id: &str) -> (Option<String>, Option<Privacy>) {
+        let state = self.state();
+        (
+            state.descriptions.get(bare_id).cloned(),
+            state.privacies.get(bare_id).copied(),
+        )
+    }
+
+    /// The videos a playlist was created holding.
+    pub fn created_with(&self, bare_id: &str) -> Vec<String> {
+        self.state().created_with.get(bare_id).cloned().unwrap_or_default()
+    }
+
+    fn song_rows(&self) -> Vec<TrackRow> {
+        self.state()
+            .songs
+            .iter()
+            .enumerate()
+            .map(|(n, id)| song_row(id, n))
+            .collect()
+    }
+
     fn liked_rows(&self) -> Vec<TrackRow> {
         self.state()
             .liked
@@ -482,6 +584,27 @@ fn liked_row(id: &str, n: usize) -> TrackRow {
             liked: Some(true),
         },
     }
+}
+
+/// A Library > Songs row for a video id: the fixture or generated track when it is one, else a
+/// plain row named for the id. Library rows carry no occurrence token.
+fn song_row(id: &str, n: usize) -> TrackRow {
+    let mut row = match FIXTURES.iter().find(|f| f.id == id) {
+        Some(f) => fixture_row(f, n),
+        None => match id.strip_prefix(GENERATED_PREFIX).and_then(|n| n.parse::<usize>().ok()) {
+            Some(g) => generated_row(g),
+            None => TrackRow {
+                track: Track::new(id, format!("Song {id}")),
+                occurrence: None,
+                thumbnail: None,
+                explicit: false,
+                liked: None,
+            },
+        },
+    };
+    row.occurrence = None;
+    row.liked = None;
+    row
 }
 
 /// The collections the simulation lists, in service order (Liked Music first, as the service
@@ -878,6 +1001,13 @@ fn home_batch(token: Option<&str>) -> Option<HomePage> {
     };
     Some(match token {
         None => HomePage {
+            chips: HOME_CHIPS
+                .iter()
+                .map(|(title, params)| HomeChip {
+                    title: (*title).into(),
+                    params: (*params).into(),
+                })
+                .collect(),
             shelves: vec![
                 shelf("Quick picks", quick),
                 shelf("Albums for you", albums),
@@ -887,6 +1017,7 @@ fn home_batch(token: Option<&str>) -> Option<HomePage> {
             skipped: 0,
         },
         Some(HOME_SECOND) => HomePage {
+            chips: Vec::new(),
             shelves: vec![
                 shelf("Artists you might like", artists),
                 shelf("From your library", playlists),
@@ -895,6 +1026,7 @@ fn home_batch(token: Option<&str>) -> Option<HomePage> {
             skipped: 0,
         },
         Some(HOME_THIRD) => HomePage {
+            chips: Vec::new(),
             shelves: vec![shelf(
                 "More albums",
                 FIXTURES.iter().rev().map(home_album).collect(),
@@ -935,6 +1067,9 @@ impl SimLibrary {
     fn rows(&self, id: &str) -> Option<Vec<TrackRow>> {
         if id == LIKED_MUSIC_BROWSE_ID {
             return Some(self.liked_rows());
+        }
+        if id == SONGS_ID {
+            return Some(self.song_rows());
         }
         let bare = id.strip_prefix("VL").unwrap_or(id);
         if let Some(rows) = self.state().edited_rows.get(bare) {
@@ -1006,15 +1141,27 @@ impl LibrarySource for SimLibrary {
         let key = collection.library_key().to_owned();
         let state = self.state();
         let meta = match collection.kind {
-            CollectionKind::Playlist => PageMeta {
-                owned: owned_ids(&state).contains(&key),
-                save_id: Some(key),
-                in_library: None,
-            },
+            CollectionKind::Playlist => {
+                let owned = owned_ids(&state).contains(&key);
+                PageMeta {
+                    owned,
+                    description: state
+                        .descriptions
+                        .get(&key)
+                        .cloned()
+                        .or_else(|| (!owned).then(|| foreign_description(&key)).flatten()),
+                    privacy: owned
+                        .then(|| state.privacies.get(&key).copied().unwrap_or_default()),
+                    save_id: Some(key),
+                    in_library: None,
+                }
+            }
             CollectionKind::Album => PageMeta {
                 owned: false,
                 save_id: Some(album_save_id(&key)),
                 in_library: Some(library_now(&state).iter().any(|c| c.library_key() == key)),
+                description: None,
+                privacy: None,
             },
         };
         Ok((page, meta))
@@ -1027,6 +1174,48 @@ impl LibrarySource for SimLibrary {
         let offset: usize = offset.parse().map_err(|_| LoadFailure::Parse)?;
         let rows = self.rows(id).ok_or(LoadFailure::Other)?;
         Ok(page_of(id, rows, offset))
+    }
+
+    fn library_songs(&self) -> Result<Page<TrackRow>, LoadFailure> {
+        self.wait(LATENCY);
+        if let Some(f) = self.state().tabs {
+            return Err(f);
+        }
+        Ok(page_of(SONGS_ID, self.song_rows(), 0))
+    }
+
+    fn song_saved(&self, video_id: &str) -> Option<bool> {
+        let state = self.state();
+        (!state.no_toggle.contains(video_id)).then(|| state.songs.iter().any(|id| id == video_id))
+    }
+
+    fn note_song_saved(&self, video_id: &str, saved: bool) {
+        let mut state = self.state();
+        if saved {
+            state.listed_saved.insert(video_id.to_owned());
+        } else {
+            state.listed_saved.remove(video_id);
+        }
+    }
+
+    fn set_song_saved(&self, video_id: &str, saved: bool) -> Result<(), WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        if self.state().no_toggle.contains(video_id) {
+            return Err(WriteFailure::Rejected);
+        }
+        let lands = self.write_answer(
+            if saved { "song-save" } else { "song-unsave" }.to_owned(),
+            video_id,
+        );
+        let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        if applies {
+            let mut state = self.state();
+            state.songs.retain(|id| id != video_id);
+            if saved {
+                state.songs.insert(0, video_id.to_owned());
+            }
+        }
+        lands.map(|_| ())
     }
 
     fn artist(&self, id: &BrowseId) -> Result<ArtistContent, LoadFailure> {
@@ -1082,6 +1271,28 @@ impl LibrarySource for SimLibrary {
         Ok(library_artist_hits())
     }
 
+    fn subscribed_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        self.wait(LATENCY);
+        let (failure, channels) = {
+            let state = self.state();
+            (state.tabs, state.subscribed.clone())
+        };
+        if let Some(f) = failure {
+            return Err(f);
+        }
+        Ok(channels
+            .iter()
+            .filter_map(|channel| artist_content(channel))
+            .map(|artist| Hit {
+                id: BrowseId::new(artist.channel_id),
+                title: artist.name,
+                subtitle: artist.subscribers,
+                thumbnail: artist.thumbnail,
+                explicit: false,
+            })
+            .collect())
+    }
+
     fn history(&self) -> Result<Vec<HistoryDay>, LoadFailure> {
         self.wait(LATENCY);
         if let Some(f) = self.state().tabs {
@@ -1104,6 +1315,50 @@ impl LibrarySource for SimLibrary {
                 home_batch(None).ok_or(LoadFailure::Other)
             }
         }
+    }
+
+    fn home_chip(&self, params: &str) -> Result<HomePage, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        let failure = {
+            let mut state = self.state();
+            state.home_log.push(format!("chip:{params}"));
+            state.chip_failure
+        };
+        if let Some(f) = failure {
+            return Err(f);
+        }
+        let title = HOME_CHIPS
+            .iter()
+            .find(|(_, p)| *p == params)
+            .map(|(t, _)| *t)
+            .ok_or(LoadFailure::Other)?;
+        // A mood's feed: its own shelves, built from the fixtures in a different order per mood.
+        let spin = params.bytes().map(usize::from).sum::<usize>() % FIXTURES.len();
+        let rotated = || FIXTURES.iter().enumerate().cycle().skip(spin).take(FIXTURES.len());
+        Ok(HomePage {
+            // The service sends the chip row with a filtered feed too; the app keeps its own.
+            chips: HOME_CHIPS
+                .iter()
+                .map(|(title, params)| HomeChip {
+                    title: (*title).into(),
+                    params: (*params).into(),
+                })
+                .collect(),
+            shelves: vec![
+                HomeShelf {
+                    title: format!("{title} picks"),
+                    items: rotated()
+                        .map(|(n, f)| home_song(fixture_row(f, n), f.art))
+                        .collect(),
+                },
+                HomeShelf {
+                    title: format!("{title} albums"),
+                    items: rotated().take(6).map(|(_, f)| home_album(f)).collect(),
+                },
+            ],
+            continuation: None,
+            skipped: 0,
+        })
     }
 
     fn home_more(&self, token: &str) -> Result<HomePage, LoadFailure> {
@@ -1187,6 +1442,26 @@ impl LibrarySource for SimLibrary {
             }
         }
         lands.map(|_| ())
+    }
+
+    fn set_disliked(&self, video_id: &str) -> Result<(), WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        let lands = self.write_answer("dislike".to_owned(), video_id);
+        let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        if applies {
+            // Like and dislike exclude each other, as on the service.
+            let mut state = self.state();
+            state.liked.retain(|id| id != video_id);
+            if !state.disliked.iter().any(|id| id == video_id) {
+                state.disliked.insert(0, video_id.to_owned());
+            }
+        }
+        lands.map(|_| ())
+    }
+
+    fn disliked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        Ok(Some(self.state().disliked.iter().any(|id| id == video_id)))
     }
 
     fn liked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
@@ -1289,13 +1564,65 @@ impl LibrarySource for SimLibrary {
         reply
     }
 
-    fn rename_playlist(&self, playlist_id: &str, title: &str) -> Result<(), WriteFailure> {
+    fn create_playlist_with(
+        &self,
+        title: &str,
+        description: &str,
+        privacy: Privacy,
+        video_ids: &[String],
+    ) -> Result<String, WriteFailure> {
         self.wait(PAGE_LATENCY);
-        let (applies, reply) = self.begin_write(format!("rename:{title}"), playlist_id);
+        let (applies, reply) = self.begin_write(format!("create-with:{}", video_ids.len()), title);
+        let id = {
+            let mut state = self.state();
+            let id = format!("PLsimnew{:03}", state.next_playlist);
+            if applies {
+                state.next_playlist += 1;
+                state.created.insert(0, (id.clone(), title.to_owned()));
+                let rows: Vec<TrackRow> = video_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(n, video)| {
+                        let mut row = liked_row(video, n);
+                        row.occurrence = Some(format!("occ-created-{id}-{n}"));
+                        row.liked = None;
+                        row
+                    })
+                    .collect();
+                state.edited_rows.insert(id.clone(), rows);
+                state.created_with.insert(id.clone(), video_ids.to_vec());
+                state.descriptions.insert(id.clone(), description.to_owned());
+                state.privacies.insert(id.clone(), privacy);
+            }
+            id
+        };
+        reply.map(|()| id)
+    }
+
+    fn edit_playlist(&self, playlist_id: &str, edit: &PlaylistEdit) -> Result<(), WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        let mut parts = Vec::new();
+        if let Some(title) = &edit.title {
+            parts.push(format!("title={title}"));
+        }
+        if let Some(description) = &edit.description {
+            parts.push(format!("description={description}"));
+        }
+        if let Some(privacy) = edit.privacy {
+            parts.push(format!("privacy={}", privacy.service_word()));
+        }
+        let (applies, reply) = self.begin_write(format!("edit:{}", parts.join(";")), playlist_id);
         if applies {
-            self.state()
-                .titles
-                .insert(playlist_id.to_owned(), title.to_owned());
+            let mut state = self.state();
+            if let Some(title) = &edit.title {
+                state.titles.insert(playlist_id.to_owned(), title.clone());
+            }
+            if let Some(description) = &edit.description {
+                state.descriptions.insert(playlist_id.to_owned(), description.clone());
+            }
+            if let Some(privacy) = edit.privacy {
+                state.privacies.insert(playlist_id.to_owned(), privacy);
+            }
         }
         reply
     }
@@ -1402,6 +1729,17 @@ fn owned_list(state: &SimState) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The blurb a playlist of somebody else's carries; only one of them has any.
+pub const FOREIGN_DESCRIBED_ID: &str = "VLPLsimmix020";
+
+fn foreign_description(key: &str) -> Option<String> {
+    (key == FOREIGN_DESCRIBED_ID.trim_start_matches("VL")).then(|| {
+        "Slow mornings, long drives and a few songs that never get old. Built over about three \
+         years by someone who could not stop adding to it, and updated whenever something fits."
+            .to_owned()
+    })
+}
+
 fn owned_ids(state: &SimState) -> Vec<String> {
     owned_list(state).into_iter().map(|(id, _)| id).collect()
 }
@@ -1455,7 +1793,7 @@ fn library_now(state: &SimState) -> Vec<Collection> {
 
 fn page_of(id: &str, rows: Vec<TrackRow>, offset: usize) -> Page<TrackRow> {
     // Only the long playlist is paged; everything else arrives in one page.
-    let size = if id == LONG_ID { PAGE_SIZE } else { usize::MAX };
+    let size = if id == LONG_ID || id == SONGS_ID { PAGE_SIZE } else { usize::MAX };
     let end = offset.saturating_add(size).min(rows.len());
     let continuation = (end < rows.len()).then(|| format!("{id}@{end}"));
     Page {

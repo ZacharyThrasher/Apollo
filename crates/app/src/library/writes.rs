@@ -1,4 +1,5 @@
-//! Library writes: liking and unliking tracks and adding a track to a playlist.
+//! Library writes: liking and unliking tracks, telling YouTube Music a song is not wanted, and
+//! adding a track to a playlist.
 //!
 //! The model keeps what the screens show about each track's like state and applies a change
 //! the moment it is asked for (optimistically). The write then goes to the service on a
@@ -60,6 +61,10 @@ struct LikeEntry {
 pub struct LibraryWrites {
     player: Entity<PlayerModel>,
     likes: HashMap<String, LikeEntry>,
+    /// Songs a "Not interested" is out for.
+    disliking: HashSet<String>,
+    /// Songs the service is known to hold a thumbs-down for (this session).
+    disliked: HashSet<String>,
     /// `(playlist id, video id)` pairs added here: shown as held right away, taken back on failure.
     added: HashSet<(String, String)>,
     /// The current track last asked about, so each track is asked once.
@@ -79,6 +84,8 @@ impl LibraryWrites {
         Self {
             player,
             likes: HashMap::new(),
+            disliking: HashSet::new(),
+            disliked: HashSet::new(),
             added: HashSet::new(),
             checked: None,
             generation: 0,
@@ -128,6 +135,8 @@ impl LibraryWrites {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
         self.likes.clear();
+        self.disliking.clear();
+        self.disliked.clear();
         self.added.clear();
         self.checked = None;
         self.notice = None;
@@ -373,6 +382,120 @@ impl LibraryWrites {
         .detach();
     }
 
+    // ---- not interested -------------------------------------------------------------------
+
+    /// "Not interested": the thumbs-down YouTube Music's own menu sends. The request goes out
+    /// once and is never retried; when its outcome is unknown the service is asked what it holds,
+    /// and that answer settles it. A liked song stops being liked at once (the service drops the
+    /// like with the dislike) and is put back if the write fails. Success is silent.
+    pub fn not_interested(&mut self, video_id: &str, cx: &mut Context<Self>) {
+        if self.disliking.contains(video_id) || self.disliked.contains(video_id) {
+            return;
+        }
+        if self.is_pending(video_id) {
+            // A like or unlike for this song is still out: the two must not cross.
+            self.raise(BUSY_TEXT, cx);
+            return;
+        }
+        let Some(source) = self.source(cx) else {
+            self.raise(not_interested_failure_text(WriteFailure::Unsupported), cx);
+            return;
+        };
+        let was_liked = self.is_liked(video_id);
+        if was_liked {
+            if let Some(e) = self.likes.get_mut(video_id) {
+                e.shown = false;
+                e.local = true;
+            }
+            if let Some(cache) = PageCache::try_global(cx) {
+                cache.invalidate_liked_music();
+            }
+        }
+        self.disliking.insert(video_id.to_owned());
+        cx.notify();
+        let (video, generation) = (video_id.to_owned(), self.generation);
+        cx.spawn(async move |this, cx| {
+            let sent = video.clone();
+            let result = {
+                let source = source.clone();
+                cx.background_executor()
+                    .spawn(async move { source.set_disliked(&sent) })
+                    .await
+            };
+            // An unknown outcome is read back, never sent again.
+            let result = match result {
+                Err(failure) if failure.outcome_unknown() => {
+                    let asked = video.clone();
+                    let held = cx
+                        .background_executor()
+                        .spawn(async move { source.disliked(&asked) })
+                        .await;
+                    match held {
+                        Ok(Some(true)) => Ok(()),
+                        _ => Err(failure),
+                    }
+                }
+                other => other,
+            };
+            let _ = this.update(cx, |m, cx| {
+                if m.generation == generation {
+                    m.not_interested_answered(&video, was_liked, result, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn not_interested_answered(
+        &mut self,
+        video_id: &str,
+        was_liked: bool,
+        result: Result<(), WriteFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        self.disliking.remove(video_id);
+        match result {
+            Ok(()) => {
+                self.disliked.insert(video_id.to_owned());
+                if let Some(e) = self.likes.get_mut(video_id) {
+                    e.shown = false;
+                    e.confirmed = Some(false);
+                }
+                if let Some(cache) = PageCache::try_global(cx) {
+                    cache.invalidate_liked_music();
+                }
+                if was_liked {
+                    cx.emit(WritesEvent::LikeSettled {
+                        video_id: video_id.to_owned(),
+                        liked: false,
+                    });
+                }
+            }
+            Err(failure) => {
+                if was_liked {
+                    if let Some(e) = self.likes.get_mut(video_id) {
+                        e.shown = true;
+                    }
+                    if let Some(cache) = PageCache::try_global(cx) {
+                        cache.invalidate_liked_music();
+                    }
+                }
+                self.raise(not_interested_failure_text(failure), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A "Not interested" for this song is out.
+    pub fn is_disliking(&self, video_id: &str) -> bool {
+        self.disliking.contains(video_id)
+    }
+
+    /// The service is known to hold a thumbs-down for this song (sent or read back this session).
+    pub fn is_disliked(&self, video_id: &str) -> bool {
+        self.disliked.contains(video_id)
+    }
+
     // ---- add to a playlist ---------------------------------------------------------------
 
     /// Add a track to a playlist: shown as held at once, taken back (with an error) if the
@@ -493,6 +616,18 @@ pub fn like_failure_text(liked: bool, failure: WriteFailure) -> &'static str {
     }
 }
 
+/// What a "Not interested" says when a like for the same song is still out.
+pub const BUSY_TEXT: &str = "Try again in a moment";
+
+/// What a failed "Not interested" says.
+pub fn not_interested_failure_text(failure: WriteFailure) -> &'static str {
+    match failure {
+        WriteFailure::Session => "Sign-in expired",
+        WriteFailure::Throttled => "Too many requests",
+        _ => "Couldn't send that",
+    }
+}
+
 /// What a failed add to a playlist says.
 pub fn add_failure_text(failure: WriteFailure) -> &'static str {
     match failure {
@@ -519,6 +654,7 @@ mod tests {
                 like_failure_text(true, failure),
                 like_failure_text(false, failure),
                 add_failure_text(failure),
+                not_interested_failure_text(failure),
             ] {
                 assert!(text.split_whitespace().count() <= 6, "{text}");
             }

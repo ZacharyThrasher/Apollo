@@ -68,9 +68,21 @@ impl HomeShelf {
     }
 }
 
+/// A mood chip above the home feed ("Relax", "Workout"): asking the feed again with its `params`
+/// gives that mood's feed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HomeChip {
+    pub title: String,
+    pub params: String,
+}
+
 /// One answer of the home feed: a batch of shelves and the way to the next batch.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HomePage {
+    /// The mood chips the service offered with this answer, in its order. Saved pages from before
+    /// chips existed read as having none.
+    #[serde(default)]
+    pub chips: Vec<HomeChip>,
     pub shelves: Vec<HomeShelf>,
     pub continuation: Option<String>,
     /// Shelves and items the answer carried that could not be shown.
@@ -111,10 +123,26 @@ pub fn home_page(parsed: &innertube::HomePage) -> Result<HomePage, LoadFailure> 
         return Err(LoadFailure::Parse);
     }
     Ok(HomePage {
+        chips: chips_of(parsed),
         shelves,
         continuation: parsed.continuation.clone().filter(|t| !t.trim().is_empty()),
         skipped,
     })
+}
+
+/// The chips a response carried that Apollo shows: podcasts are not music here (their shows are
+/// dropped from every shelf too), so that chip is left out.
+fn chips_of(parsed: &innertube::HomePage) -> Vec<HomeChip> {
+    parsed
+        .chips
+        .iter()
+        .filter(|c| !c.title.trim().eq_ignore_ascii_case("podcasts") && !c.title.trim().is_empty())
+        .filter(|c| !c.params.trim().is_empty())
+        .map(|c| HomeChip {
+            title: c.title.trim().to_owned(),
+            params: c.params.clone(),
+        })
+        .collect()
 }
 
 pub(crate) fn item_from_card(card: &BrowseItem) -> Option<HomeItem> {

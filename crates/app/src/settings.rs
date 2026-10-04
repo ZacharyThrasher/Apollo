@@ -57,6 +57,9 @@ pub const ADD_PLAYS_TO_HISTORY: BoolSetting = BoolSetting::new("add_plays_to_his
 /// Home > Personal shelves: "On repeat" and "Forgotten favourites" from Apollo's own play log sit
 /// among Home's shelves. Off hides them; the log itself is kept either way.
 pub const PERSONAL_SHELVES: BoolSetting = BoolSetting::new("personal_shelves", true);
+/// Home > Mood chips: the row of mood chips ("Relax", "Workout") under Home's title, which filter
+/// the feed the way YouTube Music's do. Off hides the row and shows the ordinary feed.
+pub const MOOD_CHIPS: BoolSetting = BoolSetting::new("mood_chips", true);
 /// Window > Close to tray: the close button hides the window and playback continues.
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
@@ -89,6 +92,39 @@ pub const EQUALIZER_GAINS: TextSetting = TextSetting::new("equalizer_gains", "")
 /// Audio > Output device: the id of the device chosen (mpv's device name). Empty is "System
 /// default". Kept while the device is unplugged, so it is used again when it returns.
 pub const AUDIO_DEVICE: TextSetting = TextSetting::new("audio_device", "");
+
+/// Data > Export library: the format the save dialog proposes (`json` or `csv`, see
+/// `export::ExportFormat`).
+pub const EXPORT_FORMAT: TextSetting = TextSetting::new("export_format", "json");
+
+/// The settings keys the diagnostics report lists, with their values. A key that is not here is
+/// not in the report: the table also holds the recent searches, the saved queue and window
+/// positions, which a report has no business carrying. A new setting goes here when it helps
+/// to know its value.
+pub const REPORTED_KEYS: &[&str] = &[
+    KEY_VOLUME,
+    KEY_AUTOPLAY,
+    KEY_NORMALIZE,
+    KEY_GAPLESS,
+    KEY_LYRICS_OPEN,
+    KEY_RELATED_OPEN,
+    ADD_PLAYS_TO_HISTORY.key,
+    PERSONAL_SHELVES.key,
+    CLOSE_TO_TRAY.key,
+    START_MINIMIZED_TO_TRAY.key,
+    PAUSE_ON_OTHER_AUDIO.key,
+    MINI_PLAYER_ON_TOP.key,
+    DISCORD_PRESENCE.key,
+    GLOBAL_HOTKEYS.key,
+    MINI_PLAYER_HUD.key,
+    HUD_AUTO_HIDE.key,
+    EQUALIZER_ENABLED.key,
+    EQUALIZER_GAINS.key,
+    AUDIO_DEVICE.key,
+    EXPORT_FORMAT.key,
+    crate::search::SAVE_RECENT_SEARCHES.key,
+    crate::search::HIDE_MUSIC_VIDEOS.key,
+];
 
 /// Where settings are kept. Blocking: the model only calls it off the UI thread for writes.
 pub trait SettingsBackend: Send + Sync {

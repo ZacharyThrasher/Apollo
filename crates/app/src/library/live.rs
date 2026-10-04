@@ -9,11 +9,13 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use apollo_domain::library::{Collection, CollectionKind, PageMeta, PlaylistTarget, WriteFailure};
+use apollo_domain::library::{
+    Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy, WriteFailure,
+};
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::BrowseId;
 use apollo_provider::{
-    ExplorePage, HistoryDay, HomePage, HomeShelf, Hit, InnerTubeSource, ListedTrack,
+    ExplorePage, HistoryDay, HomePage, HomeShelf, Hit, InnerTubeSource, LibraryMarks, ListedTrack,
 };
 use apollo_services_common::{unix_now, SecretString, SessionProvider};
 use innertube::{Locale, Session};
@@ -45,6 +47,9 @@ pub struct InnerTubeLibrary {
     data_sync_id: DataSyncId,
     built: Mutex<Option<Built>>,
     agent: ureq::Agent,
+    /// What rows said about saving songs to the library: shared with the Search source, and
+    /// emptied when the account changes (a token belongs to the session that was given it).
+    marks: Arc<LibraryMarks>,
 }
 
 impl InnerTubeLibrary {
@@ -52,6 +57,7 @@ impl InnerTubeLibrary {
     pub fn new(
         session: Arc<dyn SessionProvider>,
         data_sync_id: DataSyncId,
+        marks: Arc<LibraryMarks>,
     ) -> Result<Self, String> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -69,6 +75,7 @@ impl InnerTubeLibrary {
             data_sync_id,
             built: Mutex::new(None),
             agent,
+            marks,
         })
     }
 
@@ -85,6 +92,8 @@ impl InnerTubeLibrary {
         }
         let cookie = cookie_header(snapshot.cookies_netscape.expose(), unix_now())
             .ok_or(LoadFailure::Session)?;
+        // A different session or channel: nothing noted for the old one applies.
+        self.marks.clear();
         let source = InnerTubeSource::new(
             Session {
                 locale: Locale::default(),
@@ -94,7 +103,8 @@ impl InnerTubeLibrary {
             },
             None,
         )
-        .map_err(|_| LoadFailure::Other)?;
+        .map_err(|_| LoadFailure::Other)?
+        .with_marks(self.marks.clone());
         self.spawn_rotation(&source, cookie, snapshot.epoch);
         *built = Some(Built {
             epoch: snapshot.epoch,
@@ -203,11 +213,27 @@ impl LibrarySource for InnerTubeLibrary {
             .block_on(async { Ok(rows(source.continuation(token).await?)) })
     }
 
+    fn library_songs(&self) -> Result<Page<TrackRow>, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            Ok(rows(source.library_songs().await?))
+        })
+    }
+
     fn library_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
         let source = self.source()?;
         self.rt.block_on(async {
             source.ensure_visitor_data().await;
             source.library_artists().await
+        })
+    }
+
+    fn subscribed_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.subscribed_artists().await
         })
     }
 
@@ -248,6 +274,14 @@ impl LibrarySource for InnerTubeLibrary {
         self.rt.block_on(async {
             source.ensure_visitor_data().await;
             source.home().await
+        })
+    }
+
+    fn home_chip(&self, params: &str) -> Result<HomePage, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.home_chip(params).await
         })
     }
 
@@ -311,12 +345,48 @@ impl LibrarySource for InnerTubeLibrary {
         })
     }
 
+    fn set_disliked(&self, video_id: &str) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.set_disliked(video_id).await
+        })
+    }
+
+    fn disliked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.disliked(video_id).await
+        })
+    }
+
     fn liked(&self, video_id: &str) -> Result<Option<bool>, LoadFailure> {
         let source = self.source()?;
         self.rt.block_on(async {
             source.ensure_visitor_data().await;
             source.liked(video_id).await
         })
+    }
+
+    fn song_saved(&self, video_id: &str) -> Option<bool> {
+        self.marks.state(video_id)
+    }
+
+    fn set_song_saved(&self, video_id: &str, saved: bool) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.set_song_saved(video_id, saved).await
+        })
+    }
+
+    fn note_song_saved(&self, video_id: &str, saved: bool) {
+        if saved {
+            self.marks.listed(video_id);
+        } else {
+            self.marks.set(video_id, false);
+        }
     }
 
     fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
@@ -383,11 +453,27 @@ impl LibrarySource for InnerTubeLibrary {
         })
     }
 
-    fn rename_playlist(&self, playlist_id: &str, title: &str) -> Result<(), WriteFailure> {
+    fn create_playlist_with(
+        &self,
+        title: &str,
+        description: &str,
+        privacy: Privacy,
+        video_ids: &[String],
+    ) -> Result<String, WriteFailure> {
         let source = self.source().map_err(write_failure)?;
         self.rt.block_on(async {
             source.ensure_visitor_data().await;
-            source.rename_playlist(playlist_id, title).await
+            source
+                .create_playlist_with(title, description, privacy, video_ids)
+                .await
+        })
+    }
+
+    fn edit_playlist(&self, playlist_id: &str, edit: &PlaylistEdit) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.edit_playlist(playlist_id, edit).await
         })
     }
 

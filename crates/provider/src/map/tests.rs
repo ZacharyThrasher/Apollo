@@ -440,6 +440,35 @@ fn only_an_owner_headed_pl_playlist_is_editable_and_it_saves_on_its_bare_id() {
 }
 
 #[test]
+fn an_owned_playlist_says_what_it_holds_for_the_edit_dialog_and_a_foreign_one_only_its_blurb() {
+    let mut json = playlist_json(vec![row("aaaaaaaaaaa", "s1", "Song")], None);
+    json["header"] = json!({ "musicEditablePlaylistDetailHeaderRenderer": {
+        "header": { "musicResponsiveHeaderRenderer": {
+            "title": { "runs": [{ "text": "Mine" }] },
+            "description": { "runs": [{ "text": "for the drive" }] }
+        } },
+        "editHeader": { "musicPlaylistEditHeaderRenderer": { "privacy": "UNLISTED" } }
+    } });
+    let meta = meta_from_playlist(&parse_playlist(&json), "VLPLabc123");
+    assert_eq!(meta.description.as_deref(), Some("for the drive"));
+    assert_eq!(meta.privacy, Some(Privacy::Unlisted));
+    // A visibility the app has no word for is unknown, not a guess.
+    json["header"]["musicEditablePlaylistDetailHeaderRenderer"]["editHeader"]
+        ["musicPlaylistEditHeaderRenderer"]["privacy"] = json!("SOMETHING_NEW");
+    assert_eq!(meta_from_playlist(&parse_playlist(&json), "VLPLabc123").privacy, None);
+    // The same blurb on a list the account does not own is still on its page, but it is not
+    // owned, so it is never offered for editing, and there is no visibility to report.
+    let mut theirs = playlist_json(vec![row("aaaaaaaaaaa", "s1", "Song")], None);
+    theirs["header"] = json!({ "musicResponsiveHeaderRenderer": {
+        "title": { "runs": [{ "text": "Theirs" }] },
+        "description": { "runs": [{ "text": "not yours" }] }
+    } });
+    let meta = meta_from_playlist(&parse_playlist(&theirs), "VLPLzzz");
+    assert!(!meta.owned);
+    assert_eq!((meta.description.as_deref(), meta.privacy), (Some("not yours"), None));
+}
+
+#[test]
 fn an_album_saves_on_its_audio_playlist_and_says_whether_it_is_saved() {
     let header = |toggled: bool| {
         json!({ "header": { "musicResponsiveHeaderRenderer": {

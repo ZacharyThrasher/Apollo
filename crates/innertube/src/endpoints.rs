@@ -1,7 +1,8 @@
 //! High-level endpoint facade over the transport. Read paths plus the writes Apollo makes: `rate`
 //! (like / unlike), adding one track to a playlist, `subscribe` (an artist's channel), and
 //! playlist editing (create, rename, delete, remove or move a row, save or unsave a playlist or
-//! album). The library `feedback` toggles stay out until a milestone needs them (see NOTICE.md).
+//! album), editing a playlist's description and visibility, creating one that already holds songs,
+//! and the library `feedback` toggle of a single song (see NOTICE.md).
 
 use serde::Serialize;
 
@@ -550,6 +551,12 @@ impl InnerTube {
         self.library_grid(client, "FEmusic_library_corpus_track_artists").await
     }
 
+    /// The artists the account subscribes to (`FEmusic_library_corpus_artists`), as list rows
+    /// like the library artists. Read-only; the export's "subscribed artists". Needs login.
+    pub async fn subscribed_artists(&self, client: &YouTubeClient) -> Result<Vec<BrowseItem>, Error> {
+        self.library_grid(client, "FEmusic_library_corpus_artists").await
+    }
+
     /// A playlist or album page by browseId (`VL…` / `MPRE…`). context/08.
     ///
     /// `sort` asks YouTube to order the tracks — see `PlaylistSort::params`. Passing `None` gets
@@ -679,6 +686,19 @@ impl InnerTube {
         Ok(())
     }
 
+    /// [`Self::rate`] sent exactly once, whatever happens (no transport retry). For a rating the
+    /// owner asked for by hand where the outcome of a timeout is read back rather than guessed.
+    pub async fn rate_once(
+        &self,
+        client: &YouTubeClient,
+        video_id: &str,
+        rating: Rating,
+    ) -> Result<(), Error> {
+        let body = rate_body(self.context_for(client), video_id);
+        self.post_once(rate_path(rating), client, &body, true).await?;
+        Ok(())
+    }
+
     /// Subscribe to or unsubscribe from an artist's channel (`subscription/subscribe` and
     /// `subscription/unsubscribe`, the requests the artist page's own button makes). `channel_id`
     /// is the artist's `UC…` id.
@@ -789,6 +809,69 @@ impl InnerTube {
             serde_json::json!({ "action": "ACTION_SET_PLAYLIST_NAME", "playlistName": title }),
         );
         self.edit_once(client, &body).await
+    }
+
+    /// Change a playlist's title, description and visibility in one request
+    /// (`ACTION_SET_PLAYLIST_NAME`, `ACTION_SET_PLAYLIST_DESCRIPTION`,
+    /// `ACTION_SET_PLAYLIST_PRIVACY`): only what is `Some` is sent. `privacy` is the service's own
+    /// word (`PRIVATE`, `UNLISTED` or `PUBLIC`). With nothing to change nothing is sent.
+    pub async fn edit_playlist(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        title: Option<&str>,
+        description: Option<&str>,
+        privacy: Option<&str>,
+    ) -> Result<(), Error> {
+        let actions = edit_actions(title, description, privacy);
+        if actions.is_empty() {
+            return Ok(());
+        }
+        let body = edit_actions_body(self.context_for(client), playlist_id, actions);
+        self.edit_once(client, &body).await
+    }
+
+    /// Create a playlist that already holds `video_ids`, in order (`playlist/create` with
+    /// `videoIds`): one write, so the playlist and its songs land together or not at all.
+    /// `privacy` is the service's own word. A reply that carries no playlist id is
+    /// [`Error::Json`], like [`Self::create_playlist`]: the playlist may well exist.
+    pub async fn create_playlist_with(
+        &self,
+        client: &YouTubeClient,
+        title: &str,
+        description: &str,
+        privacy: &str,
+        video_ids: &[String],
+    ) -> Result<String, Error> {
+        let body =
+            create_playlist_with_body(self.context_for(client), title, description, privacy, video_ids);
+        let value = self.post_once("playlist/create", client, &body, true).await?;
+        value
+            .get("playlistId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                Error::Json(serde::de::Error::custom("no playlistId in the create response"))
+            })
+    }
+
+    /// Add a song to the library or take it out (`feedback`), by the token its row's menu carried
+    /// for that direction ([`crate::LibraryToggle`]). Sent once: the answer must say the token was
+    /// processed, anything else is [`Error::Refused`], and a lost reply is left to the caller to
+    /// settle by reading the library back.
+    pub async fn library_feedback(
+        &self,
+        client: &YouTubeClient,
+        token: &str,
+    ) -> Result<(), Error> {
+        let body = feedback_body(self.context_for(client), token);
+        let value = self.post_once("feedback", client, &body, true).await?;
+        if browse::feedback_processed(&value) {
+            Ok(())
+        } else {
+            Err(Error::Refused("library change was not accepted".into()))
+        }
     }
 
     /// Remove one row of a playlist the account owns (`ACTION_REMOVE_VIDEO`). `set_video_id` is
@@ -974,6 +1057,86 @@ fn create_playlist_body(context: Context, title: &str) -> serde_json::Value {
     .expect("a plain struct serialises")
 }
 
+fn create_playlist_with_body(
+    context: Context,
+    title: &str,
+    description: &str,
+    privacy: &str,
+    video_ids: &[String],
+) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        title: String,
+        description: String,
+        privacy_status: String,
+        video_ids: Vec<String>,
+    }
+    serde_json::to_value(Body {
+        context,
+        title: title.to_owned(),
+        description: description.to_owned(),
+        privacy_status: privacy.to_owned(),
+        video_ids: video_ids.to_vec(),
+    })
+    .expect("a plain struct serialises")
+}
+
+fn feedback_body(context: Context, token: &str) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        feedback_tokens: [String; 1],
+    }
+    serde_json::to_value(Body { context, feedback_tokens: [token.to_owned()] })
+        .expect("a plain struct serialises")
+}
+
+/// The edit actions for the parts of a playlist that are being changed, in the order the site
+/// sends them.
+fn edit_actions(
+    title: Option<&str>,
+    description: Option<&str>,
+    privacy: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let mut actions = Vec::new();
+    if let Some(title) = title {
+        actions.push(serde_json::json!({ "action": "ACTION_SET_PLAYLIST_NAME", "playlistName": title }));
+    }
+    if let Some(description) = description {
+        actions.push(serde_json::json!({
+            "action": "ACTION_SET_PLAYLIST_DESCRIPTION",
+            "playlistDescription": description,
+        }));
+    }
+    if let Some(privacy) = privacy {
+        actions.push(serde_json::json!({
+            "action": "ACTION_SET_PLAYLIST_PRIVACY",
+            "playlistPrivacy": privacy,
+        }));
+    }
+    actions
+}
+
+/// A `browse/edit_playlist` request carrying several actions.
+fn edit_actions_body(
+    context: Context,
+    playlist_id: &str,
+    actions: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        playlist_id: String,
+        actions: Vec<serde_json::Value>,
+    }
+    serde_json::to_value(Body { context, playlist_id: playlist_id.to_owned(), actions })
+        .expect("a plain struct serialises")
+}
+
 fn delete_playlist_body(context: Context, playlist_id: &str) -> serde_json::Value {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -1147,6 +1310,63 @@ mod tests {
         assert_eq!(body["privacyStatus"], "PRIVATE");
         assert_eq!(body["description"], "");
         assert!(body.get("videoIds").is_none(), "created empty");
+        assert_eq!(body["context"]["user"]["onBehalfOfUser"], "PAGE1");
+    }
+
+    #[test]
+    fn a_playlist_created_from_songs_carries_them_in_order_with_its_details() {
+        let (tube, client) = tube();
+        let ids = vec!["aaaaaaaaaaa".to_owned(), "bbbbbbbbbbb".to_owned(), "ccccccccccc".to_owned()];
+        let body = create_playlist_with_body(
+            tube.context_for(&client),
+            "My queue",
+            "",
+            "PRIVATE",
+            &ids,
+        );
+        assert_eq!(body["title"], "My queue");
+        assert_eq!(body["privacyStatus"], "PRIVATE");
+        assert_eq!(body["videoIds"], json!(["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"]));
+        assert_eq!(body["context"]["user"]["onBehalfOfUser"], "PAGE1");
+    }
+
+    #[test]
+    fn an_edit_sends_only_the_parts_that_changed_in_the_sites_order() {
+        assert!(edit_actions(None, None, None).is_empty(), "nothing to change, nothing to send");
+        assert_eq!(
+            edit_actions(Some("New name"), None, None),
+            vec![json!({ "action": "ACTION_SET_PLAYLIST_NAME", "playlistName": "New name" })]
+        );
+        assert_eq!(
+            edit_actions(None, Some("Songs for the road"), Some("UNLISTED")),
+            vec![
+                json!({
+                    "action": "ACTION_SET_PLAYLIST_DESCRIPTION",
+                    "playlistDescription": "Songs for the road"
+                }),
+                json!({ "action": "ACTION_SET_PLAYLIST_PRIVACY", "playlistPrivacy": "UNLISTED" }),
+            ]
+        );
+        // Clearing the description is a change too: an empty string is sent, not skipped.
+        assert_eq!(
+            edit_actions(None, Some(""), None),
+            vec![json!({ "action": "ACTION_SET_PLAYLIST_DESCRIPTION", "playlistDescription": "" })]
+        );
+        let (tube, client) = tube();
+        let body = edit_actions_body(
+            tube.context_for(&client),
+            "PLabc",
+            edit_actions(Some("A"), Some("B"), Some("PUBLIC")),
+        );
+        assert_eq!(body["playlistId"], "PLabc");
+        assert_eq!(body["actions"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_library_toggle_sends_exactly_one_token() {
+        let (tube, client) = tube();
+        let body = feedback_body(tube.context_for(&client), "TOKEN123");
+        assert_eq!(body["feedbackTokens"], json!(["TOKEN123"]));
         assert_eq!(body["context"]["user"]["onBehalfOfUser"], "PAGE1");
     }
 

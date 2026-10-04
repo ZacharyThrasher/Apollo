@@ -4,7 +4,7 @@
 use crate::library::source::TrackRow;
 
 /// The rows of a loaded list that are shown, as positions in that list.
-pub(super) enum Visible {
+pub enum Visible {
     /// No filter: the first `n` rows, in place.
     All(usize),
     /// The kept rows' positions, in list order.

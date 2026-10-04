@@ -7,7 +7,6 @@
 //! `crates/theme` through `style`; the patterns follow the nav rail (selected tint, accent
 //! bar) and the player bar (error row, no-art tile).
 
-mod filter;
 mod stats;
 mod tabs;
 
@@ -50,7 +49,7 @@ use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{TextField, TextFieldEvent};
 use crate::ui::tooltip::Tooltip;
-use filter::Visible;
+use crate::library::filter::Visible;
 
 mod artist;
 
@@ -109,6 +108,8 @@ const INDEX_WIDTH: f32 = spacing::S8;
 const DURATION_WIDTH: f32 = spacing::S12;
 /// The detail header's cover.
 const HEADER_ART: f32 = 96.0;
+/// Lines of a playlist's description the page header shows.
+const DESCRIPTION_LINES: usize = 2;
 /// The album column needs room; below this window width it is dropped.
 const ALBUM_COLUMN_MIN_WINDOW: f32 = 1000.0;
 /// Skeleton rows drawn while loading: enough to fill a tall window.
@@ -130,12 +131,15 @@ struct Focus {
     tab_albums: FocusHandle,
     tab_artists: FocusHandle,
     tab_history: FocusHandle,
+    tab_songs: FocusHandle,
     tab_stats: FocusHandle,
     /// The sort button, and the popover it opens (not a tab stop).
     sort: FocusHandle,
     sort_menu: FocusHandle,
     play: FocusHandle,
     shuffle: FocusHandle,
+    /// A playlist page's description, when it opens the Edit playlist dialog.
+    description: FocusHandle,
     list: FocusHandle,
     retry: FocusHandle,
     /// The Playlists tab's New playlist button.
@@ -218,6 +222,9 @@ pub struct LibraryView {
     focus: Focus,
     playlists_scroll: UniformListScrollHandle,
     albums_scroll: UniformListScrollHandle,
+    /// The Songs tab's virtualized list and its filter field (made when the tab first shows).
+    songs_scroll: UniformListScrollHandle,
+    songs_filter: Option<Entity<TextField>>,
     /// The Artists tab's and the History tab's scrolling columns.
     artists_scroll: ScrollHandle,
     history_scroll: ScrollHandle,
@@ -311,11 +318,13 @@ impl LibraryView {
             tab_albums: stop(cx, 6),
             tab_artists: stop(cx, 6),
             tab_history: stop(cx, 6),
+            tab_songs: stop(cx, 6),
             tab_stats: stop(cx, 6),
             sort: stop(cx, 7),
             sort_menu: cx.focus_handle(),
             play: stop(cx, 7),
             shuffle: stop(cx, 8),
+            description: stop(cx, 8),
             list: stop(cx, 9),
             retry: stop(cx, 10),
             new_playlist: stop(cx, 8),
@@ -348,6 +357,8 @@ impl LibraryView {
             focus,
             playlists_scroll: UniformListScrollHandle::new(),
             albums_scroll: UniformListScrollHandle::new(),
+            songs_scroll: UniformListScrollHandle::new(),
+            songs_filter: None,
             artists_scroll: ScrollHandle::new(),
             history_scroll: ScrollHandle::new(),
             stats_scroll: ScrollHandle::new(),
@@ -521,9 +532,14 @@ impl LibraryView {
         model.depth() == 0 && model.tab() == Tab::Stats
     }
 
-    /// The playlist or album page on screen: its filter field, once it has one.
+    /// The track list on screen's filter field (a playlist or album page's, or the Songs tab's),
+    /// once it has one.
     pub fn filter_field(&self, cx: &App) -> Option<Entity<TextField>> {
-        self.model.read(cx).detail()?;
+        let model = self.model.read(cx);
+        if model.songs_open() {
+            return self.songs_filter.clone();
+        }
+        model.detail()?;
         self.pages.last()?.filter.clone()
     }
 
@@ -546,10 +562,7 @@ impl LibraryView {
 
     /// The rows of the playlist or album on screen that the filter keeps.
     fn visible(&self, cx: &App) -> Visible {
-        let Some(d) = self.model.read(cx).detail() else {
-            return Visible::All(0);
-        };
-        Visible::of(d.listing.items(), &self.filter_text(cx))
+        Visible::of(self.model.read(cx).list_rows(), &self.filter_text(cx))
     }
 
     /// Esc with a filter in use clears it before it closes the page. Whether it did.
@@ -570,11 +583,36 @@ impl LibraryView {
             return Some(field);
         }
         self.model.read(cx).detail()?;
+        let field = self.new_filter(window, cx);
+        self.pages.last_mut()?.filter = Some(field.clone());
+        Some(field)
+    }
+
+    /// The Songs tab's filter field, made on first use.
+    pub(super) fn ensure_songs_filter(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TextField> {
+        if let Some(field) = self.songs_filter.clone() {
+            return field;
+        }
+        let field = self.new_filter(window, cx);
+        self.songs_filter = Some(field.clone());
+        field
+    }
+
+    fn new_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextField> {
         let focus = cx.focus_handle().tab_index(9).tab_stop(true);
         let clear = cx.focus_handle().tab_index(9).tab_stop(true);
         let field = cx.new(|_| TextField::new("Filter", focus, clear));
         cx.subscribe_in(&field, window, |this, _, event, window, cx| match event {
             TextFieldEvent::Changed => {
+                // The Songs tab's Play and Shuffle queue what the filter keeps.
+                if this.model.read(cx).songs_open() {
+                    let text = this.filter_text(cx);
+                    this.model.update(cx, |m, _| m.set_songs_query(&text));
+                }
                 this.selected = 0;
                 this.hover.clear();
                 this.scroll_handle(cx)
@@ -584,8 +622,7 @@ impl LibraryView {
             TextFieldEvent::Submit => window.focus(&this.focus.list, cx),
         })
         .detach();
-        self.pages.last_mut()?.filter = Some(field.clone());
-        Some(field)
+        field
     }
 
     fn scroll_handle(&self, cx: &App) -> &UniformListScrollHandle {
@@ -596,6 +633,8 @@ impl LibraryView {
                 .map_or(&self.playlists_scroll, |page| &page.list)
         } else if model.tab() == Tab::Playlists {
             &self.playlists_scroll
+        } else if model.tab() == Tab::Songs {
+            &self.songs_scroll
         } else {
             &self.albums_scroll
         }
@@ -610,6 +649,7 @@ impl LibraryView {
         match model.detail() {
             Some(_) => self.visible(cx).len(),
             None if model.tab() == Tab::History => model.history_count(),
+            None if model.tab() == Tab::Songs => self.visible(cx).len(),
             None if model.tab() == Tab::Stats => model.stats_row_count(),
             None if model.tab() == Tab::Artists => 0,
             None => model.list(model.tab()).len(),
@@ -646,7 +686,7 @@ impl LibraryView {
 
     fn page_rows(&self, cx: &App) -> isize {
         let model = self.model.read(cx);
-        let row = if model.depth() > 0 || matches!(model.tab(), Tab::History | Tab::Stats) {
+        let row = if model.depth() > 0 || matches!(model.tab(), Tab::History | Tab::Songs | Tab::Stats) {
             TRACK_ROW
         } else {
             COLLECTION_ROW
@@ -689,6 +729,12 @@ impl LibraryView {
             }
             None if model.tab() == Tab::History => {
                 self.model.update(cx, |m, cx| m.play_history(index, cx));
+            }
+            None if model.tab() == Tab::Songs => {
+                if let Some(real) = self.visible(cx).get(index) {
+                    self.model
+                        .update(cx, |m, cx| m.request_play(PlayRequest::row(real), cx));
+                }
             }
             None if model.tab() == Tab::Stats => self.activate_stat(index, window, cx),
             None => {
@@ -896,6 +942,7 @@ impl LibraryView {
         let body: AnyElement = match tab {
             Tab::Artists => self.render_artists_tab(accent, window, cx),
             Tab::History => self.render_history_tab(accent, window, cx),
+            Tab::Songs => self.render_songs_tab(accent, window, cx),
             Tab::Stats => self.render_stats_tab(accent, window, cx),
             Tab::Playlists | Tab::Albums => {
                 let (state, count) = {
@@ -979,6 +1026,7 @@ impl LibraryView {
                 Tab::Albums => "Albums",
                 Tab::Artists => "Artists",
                 Tab::History => "History",
+                Tab::Songs => "Songs",
                 Tab::Stats => "Stats",
             },
             ListKind::Tracks => "Tracks",
@@ -1063,7 +1111,7 @@ impl LibraryView {
             model.history_at(self.selected)?
         } else {
             let real = self.visible(cx).get(self.selected)?;
-            model.detail()?.listing.items().get(real)?.clone()
+            model.list_rows().get(real)?.clone()
         };
         Some((row.track, row.thumbnail))
     }
@@ -1093,7 +1141,7 @@ impl LibraryView {
             }
         } else {
             let real = self.visible(cx).get(self.selected)?;
-            model.detail()?.listing.items().get(real)?.clone()
+            model.list_rows().get(real)?.clone()
         };
         Some((
             row.track.video_id.as_str().to_owned(),
@@ -1285,6 +1333,98 @@ impl LibraryView {
 
     // ---- detail --------------------------------------------------------------------------
 
+    /// Play (filled) and Shuffle, as a playlist, album or the Songs tab shows them. `enabled`
+    /// is "there are rows, or they are on their way"; `pending` is the play command waiting
+    /// for the rows, which keeps its own button busy.
+    fn play_buttons(
+        &self,
+        enabled: bool,
+        pending: Option<PlayRequest>,
+        name: &'static str,
+        accent: Accent,
+    ) -> AnyElement {
+        let play_busy = pending.is_some_and(|p| p.shuffle != Some(true));
+        let shuffle_busy = pending.is_some_and(|p| p.shuffle == Some(true));
+        let (model, model2) = (self.model.clone(), self.model.clone());
+        let (play_name, shuffle_name) = match name {
+            "songs" => ("songs-play", "songs-shuffle"),
+            _ => ("detail-play", "detail-shuffle"),
+        };
+        div()
+            .flex()
+            .flex_row()
+            .gap(px(spacing::S2))
+            .mt(px(spacing::S2))
+            .child(
+                div().debug_selector(move || play_name.into()).child(
+                    TextButton::new("library-play", &self.focus.play, "Play", accent)
+                        .primary()
+                        .enabled(enabled)
+                        .busy(play_busy)
+                        .on_click(move |_, cx| {
+                            model.update(cx, |m, cx| m.request_play(PlayRequest::PLAY_ALL, cx))
+                        }),
+                ),
+            )
+            .child(
+                div().debug_selector(move || shuffle_name.into()).child(
+                    TextButton::new("library-shuffle", &self.focus.shuffle, "Shuffle", accent)
+                        .enabled(enabled)
+                        .busy(shuffle_busy)
+                        .on_click(move |_, cx| {
+                            model2.update(cx, |m, cx| m.request_play(PlayRequest::SHUFFLE, cx))
+                        }),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// A playlist's description under its title and counts: two lines at most, and a click opens
+    /// the Edit playlist dialog on a playlist of the account's own. Nothing when there is none.
+    fn description_line(
+        &self,
+        collection: &Collection,
+        text: Option<String>,
+        editable: bool,
+        accent: Accent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let text = text?;
+        let el = style::text_style(div(), typography::BODY, cx)
+            .id("detail-description")
+            .debug_selector(|| "detail-description".into())
+            .relative()
+            .min_w_0()
+            .rounded(px(radius::SMALL))
+            .text_color(color::text_secondary())
+            .line_clamp(DESCRIPTION_LINES)
+            .child(SharedString::from(text));
+        if !editable {
+            return Some(el.into_any_element());
+        }
+        let focus = self.focus.description.clone();
+        let ring = keyboard_focused(&focus, window);
+        let collection = collection.clone();
+        Some(
+            el.cursor_pointer()
+                .track_focus(&focus)
+                .role(gpui::Role::Button)
+                .aria_label("Edit description")
+                .on_click(move |event, window, cx| {
+                    // Space is the global play/pause key.
+                    if let gpui::ClickEvent::Keyboard(k) = event {
+                        if k.button == gpui::KeyboardButton::Space {
+                            return;
+                        }
+                    }
+                    playlist_dialog::open(Mode::Edit(collection.clone()), window, cx);
+                })
+                .when(ring, |d| d.child(focus_ring(color::accent(accent), radius::SMALL)))
+                .into_any_element(),
+        )
+    }
+
     fn render_detail(
         &mut self,
         accent: Accent,
@@ -1293,7 +1433,7 @@ impl LibraryView {
     ) -> AnyElement {
         let animations = !cx.reduce_motion();
         let filter = self.ensure_filter(window, cx);
-        let (collection, loading, failure, pending, items, skipped, confirmed_empty, editable) = {
+        let (collection, loading, failure, pending, items, skipped, confirmed_empty, editable, blurb) = {
             let d: &Detail = self.model.read(cx).detail().expect("detail is open");
             (
                 d.collection.clone(),
@@ -1304,6 +1444,7 @@ impl LibraryView {
                 d.listing.skipped(),
                 d.listing.is_confirmed_empty(),
                 d.can_edit(),
+                d.meta.description.clone().filter(|t| !t.trim().is_empty()),
             )
         };
         let what = if collection.kind == CollectionKind::Album {
@@ -1331,10 +1472,8 @@ impl LibraryView {
         let count = (!loading && failure.is_none())
             .then(|| track_count_text(collection.subtitle.as_deref(), items))
             .flatten();
-        let play_busy = pending.is_some_and(|p| p.shuffle != Some(true));
-        let shuffle_busy = pending.is_some_and(|p| p.shuffle == Some(true));
-        let model = self.model.clone();
-        let model2 = self.model.clone();
+        let blurb = self.description_line(&collection, blurb, editable, accent, window, cx);
+        let buttons = self.play_buttons(can_play || loading, pending, "detail", accent);
 
         let header = div()
             .flex()
@@ -1388,39 +1527,8 @@ impl LibraryView {
                             // A non-breaking space keeps the line's height while it is empty.
                             .child(count.unwrap_or_else(|| "\u{a0}".into())),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(spacing::S2))
-                            .mt(px(spacing::S2))
-                            .child(
-                                TextButton::new("library-play", &self.focus.play, "Play", accent)
-                                    .primary()
-                                    .enabled(can_play || loading)
-                                    .busy(play_busy)
-                                    .on_click(move |_, cx| {
-                                        model.update(cx, |m, cx| {
-                                            m.request_play(PlayRequest::PLAY_ALL, cx)
-                                        })
-                                    }),
-                            )
-                            .child(
-                                TextButton::new(
-                                    "library-shuffle",
-                                    &self.focus.shuffle,
-                                    "Shuffle",
-                                    accent,
-                                )
-                                .enabled(can_play || loading)
-                                .busy(shuffle_busy)
-                                .on_click(move |_, cx| {
-                                    model2.update(cx, |m, cx| {
-                                        m.request_play(PlayRequest::SHUFFLE, cx)
-                                    })
-                                }),
-                            ),
-                    ),
+                    .children(blurb)
+                    .child(buttons),
             )
             // Right-aligned, once there are rows to filter.
             .children(filter.filter(|_| items > 0).map(|field| {
@@ -1502,6 +1610,7 @@ impl LibraryView {
         let (ix, real) = (frame.ix, frame.real);
         // The History tab's rows are track rows with no page behind them.
         let history = self.history_open(cx);
+        let songs = self.model.read(cx).songs_open();
         let (row, album_collection, loading, failure, skipped, editable): (
             Option<TrackRow>,
             bool,
@@ -1517,6 +1626,16 @@ impl LibraryView {
                 (row, false, false, None, 0, None)
             } else if history {
                 (model.history_at(real), false, false, None, 0, None)
+            } else if songs {
+                let page = model.songs();
+                (
+                    model.list_rows().get(real).cloned(),
+                    false,
+                    page.is_loading(),
+                    page.failure(),
+                    page.listing.skipped(),
+                    None,
+                )
             } else {
                 let d = model.detail().expect("a page is open");
                 (

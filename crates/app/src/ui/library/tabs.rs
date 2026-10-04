@@ -1,4 +1,4 @@
-//! The Library overview's tab row and sort control, and the Artists and History tabs.
+//! The Library overview's tab row and sort control, and the Artists, History and Songs tabs.
 //!
 //! The tab row is the nav's selected-tint pattern. The sort control is a compact text button at
 //! the row's right end that opens an anchored popover in the track menu's style (bg.overlay,
@@ -45,6 +45,7 @@ impl LibraryView {
             Tab::Albums => &self.focus.tab_albums,
             Tab::Artists => &self.focus.tab_artists,
             Tab::History => &self.focus.tab_history,
+            Tab::Songs => &self.focus.tab_songs,
             Tab::Stats => &self.focus.tab_stats,
         }
     }
@@ -66,6 +67,19 @@ impl LibraryView {
             .collect();
         let sort = (current.sorts().len() > 1 || current == Tab::Stats)
             .then(|| self.sort_control(current, accent, window, cx));
+        // The Songs tab filters its rows the way a playlist page does, once it has rows.
+        let has_songs = current == Tab::Songs && self.model.read(cx).songs_open() && {
+            let page = self.model.read(cx).songs();
+            !page.listing.items().is_empty()
+        };
+        let filter = has_songs.then(|| {
+            let field = self.ensure_songs_filter(window, cx);
+            div()
+                .debug_selector(|| "library-filter".into())
+                .w(px(FILTER_WIDTH))
+                .flex_none()
+                .child(field)
+        });
         // Making a playlist needs the library to be there: the button shows once it has loaded.
         let can_create = current == Tab::Playlists
             && matches!(self.model.read(cx).collections(), Load::Ready(_));
@@ -107,6 +121,7 @@ impl LibraryView {
                     .items_center()
                     .gap(px(spacing::S2))
                     .children(new_playlist)
+                    .children(filter)
                     .children(sort),
             )
             .into_any_element()
@@ -641,6 +656,89 @@ impl LibraryView {
                     )
                     .into_any_element()
             }
+        }
+    }
+
+    // ---- songs -----------------------------------------------------------------------------
+
+    /// The songs saved to the library: the shared track rows in a virtualized list, in the tab's
+    /// chosen order, with the tab row's filter. A row's menu says Remove from library.
+    /// The Songs tab: Play and Shuffle over the rows, then the rows.
+    pub(super) fn render_songs_tab(
+        &mut self,
+        accent: Accent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (items, loading, pending) = {
+            let page = self.model.read(cx).songs();
+            (page.listing.items().len(), page.is_loading(), page.pending)
+        };
+        // Once there are rows, or they are on their way; a failure or an empty library has
+        // nothing to play.
+        let buttons = (items > 0 || loading)
+            .then(|| self.play_buttons(true, pending, "songs", accent));
+        let body = self.songs_body(accent, window, cx);
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_h_0()
+            .children(buttons.map(|b| div().flex_none().mb(px(spacing::S3)).child(b)))
+            .child(div().flex_1().min_h_0().child(body))
+            .into_any_element()
+    }
+
+    fn songs_body(
+        &mut self,
+        accent: Accent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (items, loading, failure, skipped, confirmed_empty) = {
+            let page = self.model.read(cx).songs();
+            (
+                page.listing.items().len(),
+                page.is_loading(),
+                page.failure(),
+                page.listing.skipped(),
+                page.listing.is_confirmed_empty(),
+            )
+        };
+        let visible = self.visible(cx).len();
+        let filtering = !self.filter_text(cx).is_empty();
+        if items == 0 && loading {
+            Self::skeleton_rows(SKELETON_ROWS, TRACK_ROW, TRACK_ART, !cx.reduce_motion())
+        } else if let (0, Some(failure)) = (items, failure) {
+            let model = self.model.clone();
+            self.notice(
+                Self::failure_line(failure, "your songs"),
+                true,
+                "Retry",
+                accent,
+                move |_, cx| model.update(cx, |m, cx| m.reload_songs(cx)),
+                cx,
+            )
+        } else if confirmed_empty || items == 0 {
+            self.search_notice("No songs saved yet", accent, cx)
+        } else if filtering && visible == 0 && !loading {
+            let this = cx.entity();
+            self.notice(
+                "No matches",
+                false,
+                "Clear",
+                accent,
+                move |_, cx| {
+                    this.update(cx, |t, cx| {
+                        t.clear_filter(cx);
+                    })
+                },
+                cx,
+            )
+        } else {
+            // One extra row at the end carries the loading / partial-failure / skipped note.
+            let footer = loading || failure.is_some() || skipped > 0;
+            self.render_list(visible + usize::from(footer), ListKind::Tracks, window, cx)
         }
     }
 }

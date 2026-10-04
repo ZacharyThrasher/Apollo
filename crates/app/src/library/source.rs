@@ -1,7 +1,10 @@
 //! The port the library screen reads through. Blocking by design: the screen calls it from
 //! GPUI's background executor, never on the UI thread, and nothing here touches GPUI types.
 
-use apollo_domain::library::{bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistTarget, WriteFailure};
+use apollo_domain::library::{
+    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy,
+    WriteFailure,
+};
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{BrowseId, Track};
 use apollo_provider::{
@@ -95,8 +98,20 @@ pub trait LibrarySource: Send + Sync {
     /// An artist page: top songs and album rows, all in one answer.
     fn artist(&self, id: &BrowseId) -> Result<ArtistContent, LoadFailure>;
 
+    /// First page of the songs saved to the library (the Songs tab), most recently added first;
+    /// the next pages come from [`Self::more_tracks`] by the page's continuation token.
+    fn library_songs(&self) -> Result<Page<TrackRow>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
     /// The artists behind the account's library, in the service's order (the Artists tab).
     fn library_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
+    /// The artists the account subscribes to, in the service's order (the data export). Not
+    /// the Artists tab's list, which is the artists behind the saved songs.
+    fn subscribed_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
         Err(LoadFailure::Other)
     }
 
@@ -107,6 +122,12 @@ pub trait LibrarySource: Send + Sync {
 
     /// The account's home feed: its first batch of shelves and the token for the next batch.
     fn home(&self) -> Result<HomePage, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
+    /// The home feed filtered to a mood chip (`params` is a chip's token from an earlier home
+    /// answer).
+    fn home_chip(&self, _params: &str) -> Result<HomePage, LoadFailure> {
         Err(LoadFailure::Other)
     }
 
@@ -160,11 +181,40 @@ pub trait LibrarySource: Send + Sync {
         Ok(None)
     }
 
+    /// Tell the service the account is not interested in a track (the thumbs-down). Sent once,
+    /// never retried: when the outcome is unknown the caller reads [`Self::disliked`] back. A
+    /// liked track is no longer liked afterwards.
+    fn set_disliked(&self, _video_id: &str) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    /// Whether the account has thumbs-downed a track; `None` when the service did not say.
+    fn disliked(&self, _video_id: &str) -> Result<Option<bool>, LoadFailure> {
+        Ok(None)
+    }
+
     /// Subscribe to or unsubscribe from an artist (`UC…` channel id). Sent once, never retried:
     /// when the outcome is unknown the caller reads the artist page back.
     fn set_subscribed(&self, _channel_id: &str, _subscribed: bool) -> Result<(), WriteFailure> {
         Err(WriteFailure::Unsupported)
     }
+
+    /// Whether the library holds a song, as the last row listing it said. `None` when no row has
+    /// offered a way to change that, which is when the menu leaves the item out. Cheap and
+    /// local: the menu asks it every time it opens.
+    fn song_saved(&self, _video_id: &str) -> Option<bool> {
+        None
+    }
+
+    /// Add a song to the library (`saved`) or take it out. Sent once, never retried: when the
+    /// outcome is unknown the caller reads Library > Songs back.
+    fn set_song_saved(&self, _video_id: &str, _saved: bool) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    /// The library is now known to hold the song (`saved`) or not, because Library > Songs was
+    /// read back, not because this source wrote it. Lets the source keep what it offers true.
+    fn note_song_saved(&self, _video_id: &str, _saved: bool) {}
 
     /// The playlists the account can add a track to, each flagged when it already holds it.
     fn playlists_for(&self, _video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
@@ -208,11 +258,24 @@ pub trait LibrarySource: Send + Sync {
         Err(WriteFailure::Unsupported)
     }
 
+    /// Create a playlist that already holds `video_ids`, in order; the new playlist's bare id.
+    /// One write, so the playlist and its songs land together or not at all.
+    fn create_playlist_with(
+        &self,
+        _title: &str,
+        _description: &str,
+        _privacy: Privacy,
+        _video_ids: &[String],
+    ) -> Result<String, WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
     fn delete_playlist(&self, _playlist_id: &str) -> Result<(), WriteFailure> {
         Err(WriteFailure::Unsupported)
     }
 
-    fn rename_playlist(&self, _playlist_id: &str, _title: &str) -> Result<(), WriteFailure> {
+    /// Change a playlist's title, description and visibility: only what `edit` carries.
+    fn edit_playlist(&self, _playlist_id: &str, _edit: &PlaylistEdit) -> Result<(), WriteFailure> {
         Err(WriteFailure::Unsupported)
     }
 

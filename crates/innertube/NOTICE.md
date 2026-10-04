@@ -25,7 +25,7 @@ Re-sync by diffing against upstream at a newer revision; keep the list below cur
 | `rustypipe_fallback.rs` and the `rustypipe` dependency | Anonymous stream fallback; the spec forbids guest fallback |
 | `blocklist.rs`, hide-videos filter | Product features, not part of the adapter; can come back as domain policy |
 | Session "healer" (`wait_for_session_heal`, `begin_heal`, `without_healing`, 90 s wait) | App-specific webview healing. A 401/403 now returns `Error::SessionExpired` and raises `session_rejected`; the account model decides what it means |
-| `post_upload`, playlist cover and the other `edit_playlist` actions (description, privacy, playlist-wide moves), `feedback`, `subscribe` | Write actions, not needed. Re-vendored in M3: `like/like`, `like/removelike` (`rate`), `edit_playlist` add-video, `playlist/get_add_to_playlist`. Added by Apollo for playlist editing: see Local changes |
+| `post_upload`, playlist cover and the playlist-wide `edit_playlist` moves, `subscribe` | Write actions, not needed. Re-vendored in M3: `like/like`, `like/removelike` (`rate`), `edit_playlist` add-video, `playlist/get_add_to_playlist`. Added by Apollo for playlist editing, description/privacy and single-song library saves: see Local changes |
 | `register_playback`, CPN generation | History write; M4 |
 | Lyrics (`models/lyrics.rs`, `IOS_MUSIC` client) | M4 |
 | `tests/live_smoke.rs`, `examples/`, `integration-tests` feature | Network tests; ours must run offline |
@@ -59,6 +59,17 @@ Re-sync by diffing against upstream at a newer revision; keep the list below cur
   (`playlistId` in the create answer, `STATUS_SUCCEEDED` on the edits) are from memory of the
   service, not recordings, and are verified only in the signed-in Windows check (against a
   scratch playlist named "Apollo test").
+
+- Library songs, queue save and playlist details (Apollo additions): `edit_playlist` now sends a
+  multi-action body (`ACTION_SET_PLAYLIST_NAME`, `ACTION_SET_PLAYLIST_DESCRIPTION`,
+  `ACTION_SET_PLAYLIST_PRIVACY` for whichever of name/description/privacy changed),
+  `create_playlist_with` (`playlist/create` with `videoIds`, description and privacy, used by
+  "Save as playlist…"), and `library_feedback` (`feedback` with the library toggle token a song
+  row carries, via `post_once`; a `feedback_processed` answer of `STATUS_SUCCEEDED` is success).
+  `BrowseItem.library` parses the toggle token from the row's menu, and the library "Songs" tab
+  reads `FEmusic_liked_videos`. Playlist pages now carry description and privacy. Request bodies
+  are unit-tested offline; the response shapes are from memory of the service, not recordings,
+  and are verified only in the signed-in Windows check (scratch playlist "Apollo test").
 
 - `InnerTube::player_loudness` and `models/player.rs` (Zach approved one metadata-only `player`
   call per track for volume normalization, 2026-10-03): the plain WEB_REMIX `player` request

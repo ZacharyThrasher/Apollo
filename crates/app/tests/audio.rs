@@ -456,6 +456,8 @@ fn edit_opens_the_editor_without_flipping_the_switch_and_done_closes_it(cx: &mut
 #[gpui::test]
 fn a_preset_sets_the_curve_turns_the_equalizer_on_and_is_saved(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx, &[]);
+    // A tall window: the panel opens below the Playback and Home rows.
+    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(1600.0)));
     settings_page(&page, vcx);
     click(vcx, "setting-equalizer-edit");
 

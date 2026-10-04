@@ -212,7 +212,10 @@ pub fn prepare(
         return Err("Liked Music has no playable tracks".into());
     }
 
-    let search = AccountSearch::new(account.clone())?;
+    // What rows say about saving songs to the library is kept in one place for Search and the
+    // library screen.
+    let marks = Arc::new(apollo_provider::LibraryMarks::default());
+    let search = AccountSearch::new(account.clone(), marks.clone())?;
     let art = Arc::new(HttpArt::new(thumbs));
     // The library screen reads the account's playlists and albums through InnerTube. It asks the
     // account for the session (and, for a login that can act as several channels, the selected
@@ -224,6 +227,7 @@ pub fn prepare(
             IdentityState::Selected(identity) => identity.page_id,
             _ => None,
         }),
+        marks,
     )
     .map_err(|e| format!("library source: {e}"))?;
 

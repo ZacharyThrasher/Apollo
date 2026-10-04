@@ -463,3 +463,50 @@ fn sign_out_purges_the_crate() {
     store.crate_purge().unwrap();
     assert!(store.crate_load("acct").unwrap().is_empty());
 }
+
+fn blocked(id: Option<&str>, name: &str) -> apollo_domain::blocklist::BlockedArtist {
+    apollo_domain::blocklist::BlockedArtist {
+        id: id.map(Into::into),
+        name: name.into(),
+    }
+}
+
+#[test]
+fn blocked_artists_round_trip_newest_first_and_once_each() {
+    let mut store = Store::open_in_memory().unwrap();
+    assert!(store.blocked_load("acct").unwrap().is_empty());
+    store.blocked_add("acct", &blocked(Some("UCa"), "A"), 10).unwrap();
+    store.blocked_add("acct", &blocked(Some("UCb"), "B"), 20).unwrap();
+    store.blocked_add("acct", &blocked(None, "Nameless"), 30).unwrap();
+    // Blocking again changes nothing, not even the order.
+    store.blocked_add("acct", &blocked(Some("UCa"), "A, renamed"), 40).unwrap();
+    store.blocked_add("acct", &blocked(None, " nameless "), 50).unwrap();
+    let rows = store.blocked_load("acct").unwrap();
+    assert_eq!(
+        rows,
+        [blocked(None, "Nameless"), blocked(Some("UCb"), "B"), blocked(Some("UCa"), "A")]
+    );
+}
+
+#[test]
+fn unblocking_removes_only_that_artist() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.blocked_add("acct", &blocked(Some("UCa"), "A"), 1).unwrap();
+    store.blocked_add("acct", &blocked(Some("UCb"), "B"), 2).unwrap();
+    store.blocked_remove("acct", &blocked(Some("UCa"), "whatever the name was")).unwrap();
+    assert_eq!(store.blocked_load("acct").unwrap(), [blocked(Some("UCb"), "B")]);
+}
+
+#[test]
+fn blocked_artists_never_cross_accounts_and_sign_out_forgets_them() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.blocked_add("acct", &blocked(Some("UCa"), "A"), 1).unwrap();
+    assert!(store.blocked_load("other").unwrap().is_empty());
+    assert!(
+        store.blocked_load("acct").unwrap().is_empty(),
+        "reading for another account purged the first one's"
+    );
+    store.blocked_add("acct", &blocked(Some("UCa"), "A"), 1).unwrap();
+    store.blocked_purge().unwrap();
+    assert!(store.blocked_load("acct").unwrap().is_empty());
+}

@@ -1,5 +1,6 @@
-//! Playlist editing: create, rename and delete playlists, remove and reorder the rows of one you
-//! own, and save or unsave playlists and albums to the library.
+//! Playlist editing: create (empty, or holding a queue's songs), edit the title, description and
+//! visibility of and delete playlists, remove and reorder the rows of one you own, save or unsave
+//! playlists and albums to the library, and add one song to the library or take it out.
 //!
 //! These write to the real account, so every one follows the same rules:
 //!
@@ -10,7 +11,8 @@
 //! * **Never blind.** The transport sends each of these once. A write that fails with an unknown
 //!   outcome (a timeout, a dropped connection, an unreadable reply) is settled by reading the
 //!   service back, never by sending it again: [`create`], [`delete`], [`rename`], [`remove`],
-//!   [`move_row`] and [`set_saved`] each know what the service must hold if the write landed.
+//!   [`move_row`], [`set_saved`] and [`set_song_saved`] each know what the service must hold if
+//!   the write landed.
 //!   When the read-back cannot be made either, the write is reported as failed (unknown).
 //! * **Only what is certainly editable.** Rename, delete and row edits are refused locally for
 //!   anything but a `PL…` playlist ([`is_user_playlist_id`]); Liked Music, albums and YouTube's
@@ -23,11 +25,12 @@
 //! what the library holds (so a menu knows what is saved and what is editable), runs the
 //! functions off the UI thread, and says what happened as [`EditEvent`]s.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use apollo_domain::library::{
-    is_user_playlist_id, Collection, CollectionKind, PlaylistTarget, WriteFailure,
+    is_user_playlist_id, Collection, CollectionKind, PlaylistEdit, PlaylistTarget, Privacy,
+    WriteFailure,
 };
 use apollo_domain::listing::LoadFailure;
 use apollo_domain::model::BrowseId;
@@ -50,6 +53,8 @@ pub enum Stale {
     Library,
     /// One collection's page, and the library list that carries its title.
     Collection(String),
+    /// Library > Songs (a song was added or taken out).
+    Songs,
 }
 
 impl Stale {
@@ -60,6 +65,7 @@ impl Stale {
         match self {
             Stale::Library => cache.invalidate_library(),
             Stale::Collection(id) => cache.invalidate_collection(id),
+            Stale::Songs => cache.invalidate_songs(),
         }
     }
 }
@@ -68,7 +74,10 @@ impl Stale {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edit {
     Create,
-    Rename,
+    /// Create a playlist from the queue.
+    SaveQueue,
+    /// Change a playlist's title, description or visibility.
+    Update,
     Delete,
     RemoveSong,
     MoveSong,
@@ -83,7 +92,8 @@ pub fn failure_text(edit: Edit, failure: WriteFailure) -> &'static str {
         WriteFailure::Throttled => "Too many requests",
         _ => match edit {
             Edit::Create => "Couldn't create playlist",
-            Edit::Rename => "Couldn't rename playlist",
+            Edit::SaveQueue => "Couldn't save queue",
+            Edit::Update => "Couldn't update playlist",
             Edit::Delete => "Couldn't delete playlist",
             Edit::RemoveSong => "Couldn't remove song",
             Edit::MoveSong => "Couldn't move song",
@@ -158,16 +168,38 @@ pub fn create(
     guard(source, expect)?;
     match source.create_playlist(title) {
         Ok(id) => Ok(id),
-        Err(failure) if failure.outcome_unknown() => library(source)
-            .and_then(|list| {
-                list.into_iter()
-                    .filter(|c| c.kind == CollectionKind::Playlist)
-                    .find(|c| c.title == title && !known.contains(c.library_key()))
-                    .map(|c| c.library_key().to_owned())
-            })
-            .ok_or(failure),
+        Err(failure) if failure.outcome_unknown() => found_new(source, known, title).ok_or(failure),
         Err(failure) => Err(failure),
     }
+}
+
+/// Create a playlist that already holds `video_ids`, in order, and return its bare id. One write
+/// carries the playlist and its songs, so a playlist that is there is whole. Settled like
+/// [`create`]: by finding a playlist with this title that was not in the library before.
+pub fn create_with(
+    source: &dyn LibrarySource,
+    expect: &Option<String>,
+    known: &HashSet<String>,
+    title: &str,
+    privacy: Privacy,
+    video_ids: &[String],
+) -> Result<String, WriteFailure> {
+    guard(source, expect)?;
+    match source.create_playlist_with(title, "", privacy, video_ids) {
+        Ok(id) => Ok(id),
+        Err(failure) if failure.outcome_unknown() => found_new(source, known, title).ok_or(failure),
+        Err(failure) => Err(failure),
+    }
+}
+
+/// The id of a playlist titled `title` that the library did not hold before (`known`).
+fn found_new(source: &dyn LibrarySource, known: &HashSet<String>, title: &str) -> Option<String> {
+    library(source).and_then(|list| {
+        list.into_iter()
+            .filter(|c| c.kind == CollectionKind::Playlist)
+            .find(|c| c.title == title && !known.contains(c.library_key()))
+            .map(|c| c.library_key().to_owned())
+    })
 }
 
 /// Delete a playlist the account owns. Settled by the playlist being gone from the library.
@@ -188,29 +220,56 @@ pub fn delete(
     }
 }
 
-/// Rename a playlist the account owns. Settled by the library listing it under the new title.
-pub fn rename(
+/// Change the title, description and visibility of a playlist the account owns: only what
+/// `change` carries is sent, in one request. Settled by the service holding all of it: the
+/// library listing the new title, the playlist's page saying the new description and visibility.
+pub fn edit(
     source: &dyn LibrarySource,
     expect: &Option<String>,
-    playlist_id: &str,
-    title: &str,
+    collection: &Collection,
+    change: &PlaylistEdit,
 ) -> Result<(), WriteFailure> {
+    let playlist_id = collection.library_key();
     editable(playlist_id)?;
+    if change.is_empty() {
+        return Ok(());
+    }
     guard(source, expect)?;
-    match source.rename_playlist(playlist_id, title) {
+    match source.edit_playlist(playlist_id, change) {
         Ok(()) => Ok(()),
-        Err(failure) if failure.outcome_unknown() => match library(source) {
-            Some(list)
-                if list
-                    .iter()
-                    .any(|c| c.library_key() == playlist_id && c.title == title) =>
-            {
+        Err(failure) if failure.outcome_unknown() => {
+            if edit_applied(source, collection, change) {
                 Ok(())
+            } else {
+                Err(failure)
             }
-            _ => Err(failure),
-        },
+        }
         Err(failure) => Err(failure),
     }
+}
+
+/// Whether the service holds every part of `change` now. `false` when it does not, and also when
+/// it could not be asked: an unproven edit is a failed one.
+fn edit_applied(source: &dyn LibrarySource, collection: &Collection, change: &PlaylistEdit) -> bool {
+    let key = collection.library_key();
+    if let Some(title) = &change.title {
+        let titled = library(source)
+            .is_some_and(|list| list.iter().any(|c| c.library_key() == key && c.title == *title));
+        if !titled {
+            return false;
+        }
+    }
+    if change.description.is_none() && change.privacy.is_none() {
+        return true;
+    }
+    let Ok((_, meta)) = source.page(collection) else {
+        return false;
+    };
+    change
+        .description
+        .as_ref()
+        .is_none_or(|d| meta.description.clone().unwrap_or_default() == *d)
+        && change.privacy.is_none_or(|p| meta.privacy == Some(p))
 }
 
 /// Remove one row of a playlist the account owns. `occurrence` is the row's own token, so a song
@@ -300,6 +359,53 @@ pub fn set_saved(
     }
 }
 
+/// Every song of Library > Songs, or `None` when any page could not be read: a partial list
+/// cannot say that a song is not there.
+pub fn all_song_rows(source: &dyn LibrarySource) -> Option<Vec<TrackRow>> {
+    let first = source.library_songs().ok()?;
+    let mut rows = first.items;
+    let mut next = first.continuation;
+    let mut pages = 1;
+    while let Some(token) = next.take() {
+        if pages >= MAX_PAGES {
+            return None;
+        }
+        let page = source.more_tracks(&token).ok()?;
+        pages += 1;
+        rows.extend(page.items);
+        next = page.continuation;
+    }
+    Some(rows)
+}
+
+/// Add one song to the library (`saved`) or take it out. Settled by Library > Songs holding the
+/// song or not.
+pub fn set_song_saved(
+    source: &dyn LibrarySource,
+    expect: &Option<String>,
+    video_id: &str,
+    saved: bool,
+) -> Result<(), WriteFailure> {
+    if video_id.is_empty() {
+        return Err(WriteFailure::Rejected);
+    }
+    guard(source, expect)?;
+    match source.set_song_saved(video_id, saved) {
+        Ok(()) => Ok(()),
+        Err(failure) if failure.outcome_unknown() => {
+            let held = all_song_rows(source)
+                .map(|rows| rows.iter().any(|r| r.track.video_id.as_str() == video_id));
+            if held == Some(saved) {
+                source.note_song_saved(video_id, saved);
+                Ok(())
+            } else {
+                Err(failure)
+            }
+        }
+        Err(failure) => Err(failure),
+    }
+}
+
 // ---- the entity -------------------------------------------------------------------------------
 
 /// What the library holds, as the menus need it.
@@ -320,8 +426,14 @@ struct Membership {
 pub enum EditEvent {
     /// A playlist was created; it is in the library now.
     Created(Collection),
-    /// A playlist now has this title (the collection carries it).
+    /// A playlist now has this title (the collection carries it). Raised only when the title
+    /// changed, along with [`EditEvent::Edited`].
     Renamed(Collection),
+    /// An edit of a playlist's title, description or visibility went through (the collection
+    /// carries the new title).
+    Edited(Collection),
+    /// A song is in the library (`saved`) or no longer is.
+    SongSaved { video_id: String, saved: bool },
     Deleted(Collection),
     /// The collection is in the library (`saved`) or no longer is.
     Saved { collection: Collection, saved: bool },
@@ -339,6 +451,20 @@ pub struct LibraryEdits {
     busy: HashSet<String>,
     /// The editable list has been asked for in this generation.
     editable_asked: bool,
+    /// What the account's own playlists say about themselves, by bare id, once read (the Edit
+    /// playlist dialog prefills from it).
+    details: HashMap<String, PlaylistDetails>,
+    /// Playlists whose details are being read.
+    details_asked: HashSet<String>,
+}
+
+/// What a playlist of the account's own says about itself, beyond its title.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaylistDetails {
+    /// The blurb, empty when there is none.
+    pub description: String,
+    /// Who can see it; `None` when the page did not say (nothing is then offered to change).
+    pub privacy: Option<Privacy>,
 }
 
 impl EventEmitter<EditEvent> for LibraryEdits {}
@@ -352,6 +478,8 @@ impl LibraryEdits {
             generation: 0,
             busy: HashSet::new(),
             editable_asked: false,
+            details: HashMap::new(),
+            details_asked: HashSet::new(),
         }
     }
 
@@ -400,6 +528,59 @@ impl LibraryEdits {
     /// Every playlist id the library holds.
     pub fn known_playlists(&self) -> &HashSet<String> {
         &self.membership.playlists
+    }
+
+    /// Whether the library holds a song, with a way to change that: `None` for a song no row has
+    /// offered the change on (the menu then has no item for it).
+    pub fn song_saved(&self, video_id: &str, cx: &gpui::App) -> Option<bool> {
+        self.source(cx)?.song_saved(video_id)
+    }
+
+    /// What a playlist of the account's own says about itself, once [`Self::load_details`] has
+    /// read it (or an edit has set it).
+    pub fn details(&self, collection: &Collection) -> Option<&PlaylistDetails> {
+        self.details.get(collection.library_key())
+    }
+
+    /// Read a playlist's description and visibility off its page, for the Edit playlist dialog.
+    /// Asked once per playlist until an edit or a reset; a failed read leaves nothing known, and
+    /// the dialog then offers only the title.
+    pub fn load_details(&mut self, collection: &Collection, cx: &mut Context<Self>) {
+        let key = collection.library_key().to_owned();
+        if !self.is_editable(collection) || self.details.contains_key(&key) {
+            return;
+        }
+        if !self.details_asked.insert(key.clone()) {
+            return;
+        }
+        let Some(source) = self.source(cx) else {
+            self.details_asked.remove(&key);
+            return;
+        };
+        let (generation, asked) = (self.generation, collection.clone());
+        cx.spawn(async move |this, cx| {
+            let answer = cx
+                .background_executor()
+                .spawn(async move { source.page(&asked) })
+                .await;
+            let _ = this.update(cx, |m, cx| {
+                if m.generation != generation {
+                    return;
+                }
+                m.details_asked.remove(&key);
+                if let Ok((_, meta)) = answer {
+                    // The owner's header is what carries both: a page without one says nothing.
+                    if meta.owned {
+                        m.details.entry(key).or_insert(PlaylistDetails {
+                            description: meta.description.unwrap_or_default(),
+                            privacy: meta.privacy,
+                        });
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // ---- what the library holds ----------------------------------------------------------
@@ -452,6 +633,8 @@ impl LibraryEdits {
         self.membership = Membership::default();
         self.busy.clear();
         self.editable_asked = false;
+        self.details.clear();
+        self.details_asked.clear();
         cx.notify();
     }
 
@@ -547,25 +730,100 @@ impl LibraryEdits {
         );
     }
 
-    /// Rename a playlist the account owns to `title` (already cleaned).
-    pub fn rename(&mut self, collection: Collection, title: String, cx: &mut Context<Self>) {
+    /// Create a private playlist titled `title` (already cleaned) that holds `video_ids`, in
+    /// order: the queue saved as a playlist. One write; the playlist is whole or not there.
+    pub fn create_with_songs(
+        &mut self,
+        title: String,
+        video_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let known = self.membership.playlists.clone();
+        let asked = title.clone();
+        self.run(
+            "create".into(),
+            Stale::Library,
+            cx,
+            move |source, expect| {
+                create_with(source, expect, &known, &asked, Privacy::Private, &video_ids)
+            },
+            move |m, result, cx| match result {
+                Ok(id) => {
+                    let collection = Collection {
+                        kind: CollectionKind::Playlist,
+                        id: BrowseId::new(format!("VL{id}")),
+                        title,
+                        subtitle: Some("Playlist".into()),
+                        thumbnail: None,
+                    };
+                    m.membership.playlists.insert(id.clone());
+                    if let Some(set) = m.membership.editable.as_mut() {
+                        set.insert(id);
+                    }
+                    cx.emit(EditEvent::Created(collection));
+                }
+                Err(failure) => m.fail(Edit::SaveQueue, failure, cx),
+            },
+        );
+    }
+
+    /// Change a playlist the account owns: only what `change` carries (its title already cleaned)
+    /// is sent. A change that is nothing is not sent and is still a success.
+    pub fn edit(&mut self, collection: Collection, change: PlaylistEdit, cx: &mut Context<Self>) {
         if !self.is_editable(&collection) {
             return;
         }
         let key = collection.library_key().to_owned();
-        let (id, asked) = (key.clone(), title.clone());
+        let (id, asked, sent) = (key.clone(), collection.clone(), change.clone());
         self.run(
             format!("playlist:{key}"),
             Stale::Collection(key.clone()),
             cx,
-            move |source, expect| rename(source, expect, &id, &asked),
+            move |source, expect| edit(source, expect, &asked, &sent),
             move |m, result, cx| match result {
                 Ok(()) => {
-                    let mut renamed = collection;
-                    renamed.title = title;
-                    cx.emit(EditEvent::Renamed(renamed));
+                    if let Some(details) = m.details.get_mut(&id) {
+                        if let Some(description) = &change.description {
+                            details.description = description.clone();
+                        }
+                        if let Some(privacy) = change.privacy {
+                            details.privacy = Some(privacy);
+                        }
+                    }
+                    let mut edited = collection;
+                    if let Some(title) = change.title {
+                        edited.title = title;
+                        cx.emit(EditEvent::Renamed(edited.clone()));
+                    }
+                    cx.emit(EditEvent::Edited(edited));
                 }
-                Err(failure) => m.fail(Edit::Rename, failure, cx),
+                Err(failure) => m.fail(Edit::Update, failure, cx),
+            },
+        );
+    }
+
+    /// Rename a playlist the account owns to `title` (already cleaned).
+    pub fn rename(&mut self, collection: Collection, title: String, cx: &mut Context<Self>) {
+        let change = PlaylistEdit { title: Some(title), ..PlaylistEdit::default() };
+        self.edit(collection, change, cx);
+    }
+
+    /// Add a song to the library (`saved`) or take it out. A song nothing offers the change on is
+    /// left alone.
+    pub fn set_song_saved(&mut self, video_id: String, saved: bool, cx: &mut Context<Self>) {
+        if self.song_saved(&video_id, cx).is_none() {
+            return;
+        }
+        let edit = if saved { Edit::Save } else { Edit::Unsave };
+        let asked = video_id.clone();
+        self.run(
+            format!("song:{video_id}"),
+            Stale::Songs,
+            cx,
+            move |source, expect| set_song_saved(source, expect, &asked, saved),
+            move |m, result, cx| match result {
+                Ok(()) => cx.emit(EditEvent::SongSaved { video_id, saved }),
+                Err(failure) => m.fail(edit, failure, cx),
             },
         );
     }

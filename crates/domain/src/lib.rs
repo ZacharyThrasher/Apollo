@@ -3,6 +3,7 @@
 
 pub mod account;
 pub mod audio;
+pub mod blocklist;
 pub mod lease;
 pub mod library;
 pub mod links;

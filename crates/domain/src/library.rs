@@ -66,6 +66,78 @@ pub fn clean_playlist_title(raw: &str) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
+/// The longest playlist description YouTube Music accepts, in characters.
+pub const MAX_PLAYLIST_DESCRIPTION: usize = 5000;
+
+/// What a description field holds, as a playlist description: line breaks normalised to `\n`,
+/// trailing blanks cut from every line and from the end of the text, and cut to
+/// [`MAX_PLAYLIST_DESCRIPTION`] characters. Unlike a title, an empty description is a value (it
+/// clears the description), so this is always a string.
+pub fn clean_playlist_description(raw: &str) -> String {
+    let normalised = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = normalised.split('\n').map(str::trim_end).collect();
+    let text: String = lines.join("\n").chars().take(MAX_PLAYLIST_DESCRIPTION).collect();
+    text.trim_end().trim_start_matches('\n').to_owned()
+}
+
+/// Who can see a playlist.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Privacy {
+    /// Only the owner. What every playlist Apollo creates starts as.
+    #[default]
+    Private,
+    /// Anyone with the link, and not listed anywhere.
+    Unlisted,
+    Public,
+}
+
+impl Privacy {
+    pub const ALL: [Privacy; 3] = [Privacy::Private, Privacy::Unlisted, Privacy::Public];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Privacy::Private => "Private",
+            Privacy::Unlisted => "Unlisted",
+            Privacy::Public => "Public",
+        }
+    }
+
+    /// The service's own word for it (`privacyStatus`, `playlistPrivacy`).
+    pub fn service_word(self) -> &'static str {
+        match self {
+            Privacy::Private => "PRIVATE",
+            Privacy::Unlisted => "UNLISTED",
+            Privacy::Public => "PUBLIC",
+        }
+    }
+
+    /// What a page's `privacy` field says. Anything else is not a visibility Apollo knows, and
+    /// reads as `None` rather than as a guess.
+    pub fn from_service_word(word: &str) -> Option<Self> {
+        match word.trim().to_ascii_uppercase().as_str() {
+            "PRIVATE" => Some(Privacy::Private),
+            "UNLISTED" => Some(Privacy::Unlisted),
+            "PUBLIC" => Some(Privacy::Public),
+            _ => None,
+        }
+    }
+}
+
+/// The parts of a playlist an edit changes: only what is `Some` is sent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlaylistEdit {
+    pub title: Option<String>,
+    /// The new description, already cleaned; `Some("")` clears it.
+    pub description: Option<String>,
+    pub privacy: Option<Privacy>,
+}
+
+impl PlaylistEdit {
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.description.is_none() && self.privacy.is_none()
+    }
+}
+
 /// What a collection's page says about editing it, beyond its rows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageMeta {
@@ -78,6 +150,10 @@ pub struct PageMeta {
     /// Whether the page says the collection is already saved (an album page does; a playlist
     /// page does not, so the library's own list decides).
     pub in_library: Option<bool>,
+    /// The blurb under a playlist's title; known for a playlist of the account's own.
+    pub description: Option<String>,
+    /// Who can see the playlist; known for a playlist of the account's own.
+    pub privacy: Option<Privacy>,
 }
 
 /// Where dropping row `from` before the insertion slot `slot` (0 is above the first row, `len`
@@ -160,6 +236,25 @@ mod tests {
         let cut = clean_playlist_title(&wide).unwrap();
         assert!(cut.chars().count() <= MAX_PLAYLIST_TITLE);
         assert!(!cut.ends_with(' '));
+    }
+
+    #[test]
+    fn a_description_keeps_its_line_breaks_and_loses_trailing_blanks() {
+        assert_eq!(clean_playlist_description("  one  \r\ntwo\r\n\r\n"), "  one\ntwo");
+        assert_eq!(clean_playlist_description("a\rb"), "a\nb");
+        assert_eq!(clean_playlist_description("   \n \n"), "", "blank is empty, and empty clears");
+        let long = "x".repeat(MAX_PLAYLIST_DESCRIPTION + 10);
+        assert_eq!(clean_playlist_description(&long).chars().count(), MAX_PLAYLIST_DESCRIPTION);
+    }
+
+    #[test]
+    fn visibility_round_trips_the_services_words_and_defaults_to_private() {
+        for p in Privacy::ALL {
+            assert_eq!(Privacy::from_service_word(p.service_word()), Some(p));
+        }
+        assert_eq!(Privacy::from_service_word(" public "), Some(Privacy::Public));
+        assert_eq!(Privacy::from_service_word("COLLABORATIVE"), None);
+        assert_eq!(Privacy::default(), Privacy::Private);
     }
 
     #[test]
