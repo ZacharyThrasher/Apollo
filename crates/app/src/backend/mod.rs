@@ -96,6 +96,16 @@ impl Mode {
         }
     }
 
+    /// Where the helper tools (yt-dlp, Deno) live; `None` in the simulation. The diagnostics
+    /// report asks them for their versions.
+    pub fn tools_dir(&self) -> Option<std::path::PathBuf> {
+        match self {
+            Mode::Sim | Mode::SimSignedOut => None,
+            #[cfg(all(windows, feature = "real-services"))]
+            Mode::Real(opts) => Some(opts.tools.clone()),
+        }
+    }
+
     /// The account service and the platform's sign-in source. Cheap: nothing is read or
     /// validated until [`Mode::start_account`].
     pub fn account_ports(&self) -> AccountPorts {

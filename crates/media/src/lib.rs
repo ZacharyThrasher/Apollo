@@ -18,3 +18,12 @@ pub use config::{core_options, MediaConfig};
 pub use ramp::GainRamp;
 #[cfg(windows)]
 pub use engine::{MediaError, MpvEngine};
+
+/// The client API version of the libmpv the app loaded (`client API 2.3`), for the diagnostics
+/// report. The API version is the one number libmpv reports without an engine instance.
+#[cfg(windows)]
+pub fn client_api_version() -> String {
+    // SAFETY: takes no arguments and only returns a constant compiled into libmpv.
+    let v = unsafe { libmpv2_sys::mpv_client_api_version() };
+    format!("client API {}.{}", v >> 16, v & 0xffff)
+}

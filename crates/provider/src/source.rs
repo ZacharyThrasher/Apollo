@@ -141,6 +141,22 @@ impl InnerTubeSource {
             .collect())
     }
 
+    /// The artists the account subscribes to, in the service's order. Unlike
+    /// [`library_artists`](Self::library_artists) (the artists behind the saved songs), these
+    /// are the ones the account chose to follow. A card with no id or title is dropped.
+    pub async fn subscribed_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        let cards = self
+            .tube
+            .subscribed_artists(&self.client)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(cards
+            .iter()
+            .filter(|c| c.kind == "artist")
+            .filter_map(hit_from_item)
+            .collect())
+    }
+
     /// The play history in YouTube Music's own date buckets (the Library's History tab).
     pub async fn history(&self) -> Result<Vec<HistoryDay>, LoadFailure> {
         let groups = self

@@ -1,6 +1,6 @@
 //! Settings: one scrolling column of sections. Account first (its own page), then the sections
 //! of switches built from [`SettingsSection`] and [`SettingsRow`]: Playback, Home, Audio, Search,
-//! Window, Discord, then Keyboard.
+//! Window, Discord, Keyboard, then Data (its own page: the export and the diagnostics report).
 
 use apollo_theme::tokens::spacing;
 use gpui::{
@@ -17,6 +17,7 @@ use crate::settings::{
 };
 use crate::ui::account_page::{self, AccountPage};
 use crate::ui::audio_page::AudioPage;
+use crate::ui::data_page::DataPage;
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::settings_row::{SettingsRow, SettingsSection};
 
@@ -27,6 +28,7 @@ pub struct SettingsPage {
     account_page: Entity<AccountPage>,
     playback_page: Entity<PlaybackPage>,
     audio_page: Entity<AudioPage>,
+    data_page: Entity<DataPage>,
     settings: Entity<SettingsModel>,
     player: Entity<PlayerModel>,
     focus: Vec<FocusHandle>,
@@ -39,6 +41,7 @@ impl SettingsPage {
         account_page: Entity<AccountPage>,
         playback_page: Entity<PlaybackPage>,
         audio_page: Entity<AudioPage>,
+        data_page: Entity<DataPage>,
         settings: Entity<SettingsModel>,
         player: Entity<PlayerModel>,
         cx: &mut Context<Self>,
@@ -48,6 +51,7 @@ impl SettingsPage {
             account_page,
             playback_page,
             audio_page,
+            data_page,
             settings,
             player,
             focus: Vec::new(),
@@ -58,6 +62,11 @@ impl SettingsPage {
     /// The settings the page edits.
     pub fn settings(&self) -> &Entity<SettingsModel> {
         &self.settings
+    }
+
+    /// The Data section, which owns the export and the diagnostics report.
+    pub fn data_page(&self) -> &Entity<DataPage> {
+        &self.data_page
     }
 
     /// The first `n` focus handles, created as needed. They share the Account page's tab
@@ -222,5 +231,6 @@ impl Render for SettingsPage {
             .child(window_section)
             .child(discord_section)
             .child(keyboard_section)
+            .child(self.data_page.clone())
     }
 }
