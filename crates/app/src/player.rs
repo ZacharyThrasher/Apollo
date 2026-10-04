@@ -21,6 +21,7 @@ use crate::latency::Latency;
 use crate::library::LibrarySource;
 use crate::os_media::{MediaState, MediaTrack, OsCommand};
 use crate::persist::QueueSaver;
+use crate::reporting::{Activity, Feed, PlayReporter, Snapshot};
 use crate::settings::{AutoplayStore, GaplessStore, NormalizeStore, QueueStore, VolumeStore};
 use crate::sleep_timer::{Playhead, SleepChoice, SleepStep, SleepTimer};
 use crate::thumbs::Thumbs;
@@ -177,6 +178,12 @@ pub struct PlayerModel {
     last_checkpoint: Instant,
     /// The position is worth saving right now (a pause, a seek).
     checkpoint_now: bool,
+    /// Where plays are reported to YouTube Music; none in the simulation, tests and the headless
+    /// harness, which never report.
+    reporter: Option<Arc<dyn PlayReporter>>,
+    /// Settings > Playback > Add plays to history. Off until the app says otherwise.
+    report_plays: bool,
+    report_feed: Feed,
     radio_inflight: bool,
     /// The last track a radio was asked for. Not asked again until the queue's tail changes or
     /// [`RADIO_RETRY`] has passed, so a failure is not retried on every tick.
@@ -216,6 +223,9 @@ impl PlayerModel {
             saved_row: false,
             last_checkpoint: Instant::now(),
             checkpoint_now: false,
+            reporter: None,
+            report_plays: false,
+            report_feed: Feed::default(),
             radio_inflight: false,
             radio_tried: None,
         }
@@ -274,6 +284,62 @@ impl PlayerModel {
             self.prefetch(&track);
         }
         self.sync(cx);
+    }
+
+    /// Where plays are reported (none leaves reporting off, whatever the setting says).
+    pub fn set_play_reporter(&mut self, reporter: Option<Arc<dyn PlayReporter>>) {
+        self.reporter = reporter;
+    }
+
+    /// Settings > Playback > Add plays to history. Turning it off sends nothing more at all, not
+    /// even the closing ping of the track playing now; turning it on starts with whatever is
+    /// playing then.
+    pub fn set_report_plays(&mut self, on: bool) {
+        if self.report_plays == on {
+            return;
+        }
+        self.report_plays = on;
+        if !on {
+            self.report_feed.reset();
+            if let Some(reporter) = self.reporter.as_ref() {
+                reporter.cancel();
+            }
+        }
+    }
+
+    /// Hand the reporter what the player is doing, if reporting is on. Never blocks.
+    fn report(&mut self) {
+        let Some(reporter) = self.reporter.clone() else {
+            return;
+        };
+        if !self.report_plays {
+            return;
+        }
+        let snapshot = self.report_snapshot();
+        if self.report_feed.due(snapshot.as_ref(), Instant::now()) {
+            reporter.observe(snapshot);
+        }
+    }
+
+    fn report_snapshot(&self) -> Option<Snapshot> {
+        let c = self.driver.as_ref()?.coordinator();
+        let entry = c.queue().current()?;
+        let activity = match (c.intent(), c.phase()) {
+            (Intent::Playing, Phase::Playing) => Activity::Playing,
+            (Intent::Playing, _) => Activity::Stalled,
+            _ => Activity::Paused,
+        };
+        Some(Snapshot {
+            entry: entry.id.get(),
+            video_id: entry.track.video_id.as_str().to_owned(),
+            activity,
+            position_ms: c.position_ms(),
+            duration_ms: c
+                .duration_ms()
+                .or_else(|| entry.track.duration.map(|d| d.as_millis() as u64)),
+            volume: self.volume,
+            muted: self.muted,
+        })
     }
 
     /// Where the autoplay switch is saved between runs (none in tests and the headless harness).
@@ -988,6 +1054,7 @@ impl PlayerModel {
                 .retarget(Instant::now(), Accent::fallback(), !cx.reduce_motion());
         }
         self.persist();
+        self.report();
         self.top_up_radio(cx);
         cx.notify();
     }

@@ -1,8 +1,8 @@
 //! The one thing Apollo reads from a `player` response: how loud the track is.
 //!
-//! Streams come from yt-dlp, so everything else in the response (stream URLs and ciphers, the
-//! playback tracking URLs, `videoDetails`) is ignored here and never leaves this module. In
-//! particular `playbackTracking` is not read: Apollo does not report plays.
+//! Streams come from yt-dlp, so everything else in the response (stream URLs and ciphers,
+//! `videoDetails`) is ignored here and never leaves this module. `playbackTracking`, the URLs a
+//! play is reported to, is read by [`crate::tracking`], not here.
 
 use serde_json::Value;
 
