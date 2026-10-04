@@ -382,7 +382,11 @@ impl LibrarySource for InnerTubeLibrary {
     }
 
     fn note_song_saved(&self, video_id: &str, saved: bool) {
-        self.marks.set(video_id, saved);
+        if saved {
+            self.marks.listed(video_id);
+        } else {
+            self.marks.set(video_id, false);
+        }
     }
 
     fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {

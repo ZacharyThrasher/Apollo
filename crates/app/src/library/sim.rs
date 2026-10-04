@@ -205,6 +205,8 @@ struct SimState {
     songs: Vec<String>,
     /// Songs whose row offered no library toggle, so nothing can be done about them from here.
     no_toggle: HashSet<String>,
+    /// Songs the model told the source are in the library because Library > Songs listed them.
+    listed_saved: HashSet<String>,
     /// What playlists were last given as a description and a visibility, by bare id.
     descriptions: HashMap<String, String>,
     privacies: HashMap<String, Privacy>,
@@ -252,6 +254,7 @@ impl SimState {
                 format!("{GENERATED_PREFIX}{:05}", 2),
             ],
             no_toggle: HashSet::new(),
+            listed_saved: HashSet::new(),
             descriptions: HashMap::new(),
             privacies: HashMap::new(),
             created_with: HashMap::new(),
@@ -442,6 +445,13 @@ impl SimLibrary {
         self.state().songs = (0..LONG_SONGS)
             .map(|n| format!("{GENERATED_PREFIX}{:05}", n + 10))
             .collect();
+    }
+
+    /// The video ids the Songs tab has told the source it holds, sorted.
+    pub fn songs_noted_saved(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.state().listed_saved.iter().cloned().collect();
+        ids.sort();
+        ids
     }
 
     /// Make this song's row offer no library toggle (the menu then has no save item for it).
@@ -1177,6 +1187,15 @@ impl LibrarySource for SimLibrary {
     fn song_saved(&self, video_id: &str) -> Option<bool> {
         let state = self.state();
         (!state.no_toggle.contains(video_id)).then(|| state.songs.iter().any(|id| id == video_id))
+    }
+
+    fn note_song_saved(&self, video_id: &str, saved: bool) {
+        let mut state = self.state();
+        if saved {
+            state.listed_saved.insert(video_id.to_owned());
+        } else {
+            state.listed_saved.remove(video_id);
+        }
     }
 
     fn set_song_saved(&self, video_id: &str, saved: bool) -> Result<(), WriteFailure> {

@@ -56,6 +56,22 @@ const CARD_ART_PX: u32 = 288;
 const BANNER_ART_PX: u32 = 1600;
 
 /// What the Songs tab's stand-in collection is called; not a browse id the service knows.
+/// One page of Library > Songs, first (`None`) or by continuation token. Every row on it is in
+/// the library, which the source is told so its menus offer "Remove from library" there.
+fn read_songs(
+    source: &dyn LibrarySource,
+    token: Option<&str>,
+) -> Result<Page<TrackRow>, LoadFailure> {
+    let page = match token {
+        Some(token) => source.more_tracks(token),
+        None => source.library_songs(),
+    }?;
+    for row in &page.items {
+        source.note_song_saved(row.track.video_id.as_str(), true);
+    }
+    Ok(page)
+}
+
 const SONGS_BROWSE_ID: &str = "apollo:library-songs";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -861,7 +877,7 @@ impl LibraryModel {
             let mut result = {
                 let source = source.clone();
                 cx.background_executor()
-                    .spawn(async move { source.library_songs() })
+                    .spawn(async move { read_songs(&*source, None) })
                     .await
             };
             loop {
@@ -875,7 +891,7 @@ impl LibraryModel {
                 let source = source.clone();
                 result = cx
                     .background_executor()
-                    .spawn(async move { source.more_tracks(&token) })
+                    .spawn(async move { read_songs(&*source, Some(&token)) })
                     .await;
             }
         })
@@ -951,7 +967,7 @@ impl LibraryModel {
             let mut result = {
                 let source = source.clone();
                 cx.background_executor()
-                    .spawn(async move { source.library_songs() })
+                    .spawn(async move { read_songs(&*source, None) })
                     .await
             };
             let whole = loop {
@@ -968,7 +984,7 @@ impl LibraryModel {
                 let source = source.clone();
                 result = cx
                     .background_executor()
-                    .spawn(async move { source.more_tracks(&token) })
+                    .spawn(async move { read_songs(&*source, Some(&token)) })
                     .await;
             };
             if !whole {

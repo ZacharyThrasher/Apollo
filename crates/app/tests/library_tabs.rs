@@ -598,6 +598,24 @@ fn the_songs_tab_loads_when_it_is_opened_and_lists_the_saved_songs_most_recent_f
     assert!(vcx.debug_bounds("library-filter").is_some());
 }
 
+// Reported from the PC check: the Songs tab's menu offered "Save to library" on one row and no
+// way out on another. Every row the tab lists is in the library, and the source is told so, on
+// the first page and on every continuation page.
+#[gpui::test]
+fn every_song_the_songs_tab_lists_is_reported_to_the_source_as_in_the_library(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    page.sim.preset_long_library_songs();
+    click(vcx, "library-tab-songs");
+    vcx.run_until_parked();
+    let listed = page.sim.library_song_ids();
+    assert!(listed.len() > 50, "more than one page");
+    let mut want = listed.clone();
+    want.sort();
+    assert_eq!(page.sim.songs_noted_saved(), want);
+}
+
 #[gpui::test]
 fn clicking_a_song_plays_it_with_the_rest_of_the_list_behind_it(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);

@@ -67,6 +67,19 @@ impl LibraryMarks {
         if saved { toggle.add_token.clone() } else { toggle.remove_token.clone() }
     }
 
+    /// Library > Songs listed this song, so the library holds it whatever its row's menu said
+    /// (a liked song's row can still offer "Save to library", and a saved one's offer only a
+    /// single action: on that page the one thing on offer is the way out). Songs with no note, or
+    /// no token to act on, stay as they were.
+    pub fn listed(&self, video_id: &str) {
+        if let Some(toggle) = self.lock().get_mut(video_id) {
+            toggle.in_library = true;
+            if toggle.remove_token.is_none() {
+                toggle.remove_token = toggle.add_token.take();
+            }
+        }
+    }
+
     /// A change landed (or was confirmed by reading the library back).
     pub fn set(&self, video_id: &str, saved: bool) {
         if let Some(toggle) = self.lock().get_mut(video_id) {
@@ -106,6 +119,33 @@ mod tests {
         assert_eq!(marks.state("b"), Some(false));
         marks.set("b", true);
         assert_eq!(marks.state("b"), None, "no token to take it out again");
+    }
+
+    // Reported from the PC check: on Library > Songs a liked row offered "Save to library" and
+    // another row offered nothing to take it out. Whatever its menu says, a song that page lists
+    // is in the library, and a lone action on it is the removal.
+    #[test]
+    fn a_song_the_songs_page_lists_is_in_the_library_whatever_its_menu_said() {
+        let marks = LibraryMarks::default();
+        // A toggle that arrived "not in library": both tokens, so Remove has its token.
+        marks.note("liked", Some(&toggle(false, Some("add"), Some("rm"))));
+        assert_eq!(marks.state("liked"), Some(false));
+        marks.listed("liked");
+        assert_eq!(marks.state("liked"), Some(true));
+        assert_eq!(marks.token("liked", false).as_deref(), Some("rm"));
+        // A one-way "add" on a listed song becomes its way out.
+        marks.note("lone", Some(&toggle(false, Some("only"), None)));
+        marks.listed("lone");
+        assert_eq!(marks.state("lone"), Some(true));
+        assert_eq!(marks.token("lone", false).as_deref(), Some("only"));
+        assert_eq!(marks.token("lone", true), None);
+        // Already right: nothing changes. Never seen: nothing is invented.
+        marks.note("ok", Some(&toggle(true, Some("add"), Some("rm"))));
+        marks.listed("ok");
+        assert_eq!(marks.state("ok"), Some(true));
+        assert_eq!(marks.token("ok", false).as_deref(), Some("rm"));
+        marks.listed("unseen");
+        assert_eq!(marks.state("unseen"), None);
     }
 
     #[test]
