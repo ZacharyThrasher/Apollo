@@ -41,6 +41,10 @@ pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
 pub const START_MINIMIZED_TO_TRAY: BoolSetting = BoolSetting::new("start_minimized_to_tray", false);
 
+/// Keyboard > Global hotkeys: Ctrl+Alt shortcuts (play/pause, next, previous, volume) that work
+/// while Apollo is not focused.
+pub const GLOBAL_HOTKEYS: BoolSetting = BoolSetting::new("global_hotkeys", false);
+
 /// Where settings are kept. Blocking: the model only calls it off the UI thread for writes.
 pub trait SettingsBackend: Send + Sync {
     fn get(&self, key: &str) -> Option<String>;
