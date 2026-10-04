@@ -10,6 +10,7 @@ pub mod backend;
 pub mod explore;
 pub mod discord;
 pub mod home;
+pub mod hud;
 #[cfg(windows)]
 pub mod hotkeys_win;
 pub mod keymap;

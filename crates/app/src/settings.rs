@@ -58,6 +58,12 @@ pub const DISCORD_PRESENCE: BoolSetting = BoolSetting::new("discord_presence", f
 /// while Apollo is not focused.
 pub const GLOBAL_HOTKEYS: BoolSetting = BoolSetting::new("global_hotkeys", false);
 
+/// Window > HUD mode for mini player: the mini player becomes an always-on-top, click-through
+/// overlay that never takes the keyboard (for watching and controlling music over a game).
+pub const MINI_PLAYER_HUD: BoolSetting = BoolSetting::new("mini_player_hud", false);
+/// Window > Auto-hide HUD: the HUD dims after a few seconds without a track change.
+pub const HUD_AUTO_HIDE: BoolSetting = BoolSetting::new("hud_auto_hide", true);
+
 /// Where settings are kept. Blocking: the model only calls it off the UI thread for writes.
 pub trait SettingsBackend: Send + Sync {
     fn get(&self, key: &str) -> Option<String>;

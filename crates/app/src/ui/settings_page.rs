@@ -12,8 +12,8 @@ use crate::autostart;
 use crate::player::PlayerModel;
 use crate::search::{HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES};
 use crate::settings::{
-    BoolSetting, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS,
-    MINI_PLAYER_ON_TOP, START_MINIMIZED_TO_TRAY,
+    BoolSetting, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS, HUD_AUTO_HIDE,
+    MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP, START_MINIMIZED_TO_TRAY,
 };
 use crate::ui::account_page::{self, AccountPage};
 use crate::ui::playback_page::PlaybackPage;
@@ -90,7 +90,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(8, cx);
+        let h = self.handles(10, cx);
 
         let search_section = SettingsSection::new("Search")
             .row(self.bool_row(
@@ -156,6 +156,23 @@ impl Render for SettingsPage {
             accent,
             cx,
         ));
+        window_section = window_section
+            .row(self.bool_row(
+                "setting-mini-player-hud",
+                "HUD mode for mini player",
+                &MINI_PLAYER_HUD,
+                &h[8],
+                accent,
+                cx,
+            ))
+            .row(self.bool_row(
+                "setting-hud-auto-hide",
+                "Auto-hide HUD",
+                &HUD_AUTO_HIDE,
+                &h[9],
+                accent,
+                cx,
+            ));
 
         let discord_section = SettingsSection::new("Discord").row(self.bool_row(
             "setting-discord-presence",

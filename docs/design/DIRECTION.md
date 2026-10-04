@@ -184,5 +184,14 @@ Applied to Now Playing's right pane (`ui/pane_tabs.rs`, `ui/related_pane.rs`, `r
 4. **Content:** a shelf of songs is rows like the queue's (56px, 40px art, title over artists, the duration in caption text.tertiary swapped for More under the pointer, right-click opens the track menu; a click plays it with the shelf as the queue). Every other shelf is a heading in body-strong text.secondary over a sideways-scrolling row of compact cards (96px art in the cards' 8px inset, artists as circles; a click opens the album, artist or playlist page and leaves Now Playing). Related is a dense list, so the pane sits on bg.raised with the `border.subtle` left border like the queue panel: no ambient art behind it.
 5. **Loading:** fetched only while the Related segment is on screen, then again for every new playing track. The previous shelves stay until the new answer arrives (no skeleton flash between tracks); the first load is the shared skeleton rows. A failure is one line ("Couldn't load related", "Sign-in expired", ...) with Retry; a track with nothing related says "Nothing related".
 
+## HUD mode decisions (coordinator brief, 2026-10-04)
+Applied to the mini player (`ui/mini_player.rs`, `mini.rs`, `hud.rs`). Settings > Window: "HUD mode for mini player" (off), "Auto-hide HUD" (on).
+1. **Look:** the same 360x96 layout, painted on `bg.overlay` at 85% with the medium radius over a transparent window (no Mica). Never takes keyboard focus; always on top.
+2. **Pointer:** click-through while the pointer is away (the app polls the cursor, since a click-through window gets no mouse events); solid and clickable under it.
+3. **Snap:** after a drag it settles, then snaps to the nearest screen corner or edge, 16px from the taskbar-aware work area, when within 48px of it.
+4. **Auto-hide:** dims to 30% (300ms fade) after 4s without a track change and returns to full for 4s on each one. Off keeps it solid.
+5. **Ctrl+Alt+H** shows/hides it (registered only while Global hotkeys is on).
+6. **Limit:** topmost windows show over windowed and borderless games, not exclusive fullscreen; that would need DLL injection, which risks anti-cheat bans, so it is not done.
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

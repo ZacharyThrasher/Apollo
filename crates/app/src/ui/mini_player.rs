@@ -6,12 +6,19 @@
 //! expand button in the top-right corner that shows while the pointer is over the window.
 //! Everything that is not art or a button drags the window.
 //!
+//! **HUD mode** (Settings > Window) turns the same window into an overlay for watching and
+//! controlling music over a game: always on top, slightly translucent, never the active window
+//! (it cannot take the keyboard), and click-through until the pointer is over it. Over it, it
+//! goes solid and takes clicks. It snaps to screen edges and corners where it is dropped, and
+//! with auto-hide on it dims after a few seconds without a track change (`hud.rs`).
+//!
 //! Which window it is, where it opens and how it gives way to the main window is
 //! `crate::mini`; this file is the view.
 
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
-use apollo_theme::tokens::{layout, spacing, typography};
+use apollo_theme::tokens::{layout, radius, spacing, typography};
 use gpui::{
     actions, div, prelude::*, px, relative, App, ClickEvent, Context, Entity, FocusHandle,
     Focusable, IntoElement, KeyBinding, ParentElement, Render, Styled, Subscription, Window,
@@ -19,13 +26,15 @@ use gpui::{
 };
 
 use crate::assets::Icon;
+use crate::hud::{HudFade, SETTLE};
 use crate::player::{PlayerModel, Status};
-use crate::settings::{SettingsModel, MINI_PLAYER_ON_TOP};
+use crate::settings::{SettingsModel, HUD_AUTO_HIDE, MINI_PLAYER_ON_TOP};
 use crate::style::color;
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::IconButton;
 use crate::ui::player_bar::text_line;
 use crate::ui::shell::{NextTrack, PreviousTrack, TogglePlay};
+use crate::window_state::{self, Rect};
 
 actions!(apollo_mini, [ExpandMiniPlayer]);
 
@@ -42,6 +51,11 @@ const PLAY_BUTTON: f32 = 36.0;
 /// The expand button is a small corner glyph, not a main control.
 const EXPAND_BUTTON: f32 = 24.0;
 const PROGRESS_HEIGHT: f32 = 2.0;
+/// How often the HUD looks at where the pointer is (clicks fall through it, so it gets no
+/// mouse events to tell it).
+pub const POLL: Duration = Duration::from_millis(50);
+/// The HUD's fill: bg.overlay, a little see-through.
+const HUD_FILL_ALPHA: f32 = 0.85;
 
 /// The transport keys that work while the mini player has the keyboard, and Esc to go back.
 pub fn bind_keys(cx: &mut App) {
@@ -75,6 +89,21 @@ pub struct MiniPlayer {
     next: FocusHandle,
     expand: FocusHandle,
     hover: [bool; 4],
+    /// HUD mode (fixed for the life of the window; the setting is read when it opens).
+    hud: bool,
+    fade: HudFade,
+    /// The pointer is over the HUD (looked up by polling, since clicks pass through it).
+    pointer_inside: bool,
+    pointer: Rc<dyn Fn(&Window) -> bool>,
+    /// The time the HUD's fade and settling run on (tests move it by hand).
+    clock: Rc<dyn Fn() -> Instant>,
+    /// What click-through was last asked of the platform.
+    click_through: Option<bool>,
+    /// The title and artist last shown, to tell a new track from a changed state.
+    track: (gpui::SharedString, gpui::SharedString),
+    /// Where the window has sat still since when, and the spot it was last snapped for.
+    settle: Option<(Rect, Instant)>,
+    snapped: Option<Rect>,
     /// Window styling already asked of the platform: rounded corners once, and the last
     /// always-on-top choice applied.
     rounded: bool,
@@ -86,14 +115,36 @@ impl MiniPlayer {
     pub fn new(
         player: Entity<PlayerModel>,
         settings: Entity<SettingsModel>,
+        hud: bool,
         on_expand: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
         let subs = vec![
-            cx.observe(&player, |_, _, cx| cx.notify()),
+            cx.observe(&player, |this, player, cx| {
+                let view = player.read(cx).view();
+                let track = (view.title, view.artist);
+                if track != this.track {
+                    this.track = track;
+                    // A new song: the HUD shows itself again for a moment.
+                    let now = (this.clock)();
+                    this.fade.wake(now);
+                }
+                cx.notify();
+            }),
             cx.observe(&settings, |_, _, cx| cx.notify()),
         ];
+        let view = player.read(cx).view();
+        let auto_hide = settings.read(cx).get(&HUD_AUTO_HIDE);
         Self {
+            hud,
+            fade: HudFade::new(Instant::now(), auto_hide),
+            pointer_inside: false,
+            pointer: Rc::new(crate::platform::pointer_over),
+            clock: Rc::new(Instant::now),
+            click_through: None,
+            track: (view.title, view.artist),
+            settle: None,
+            snapped: None,
             player,
             settings,
             on_expand: Rc::new(on_expand),
@@ -121,7 +172,96 @@ impl MiniPlayer {
 
     /// Whether the expand button is showing (the pointer is over the window).
     pub fn expand_visible(&self) -> bool {
-        self.hover.iter().any(|h| *h)
+        self.pointer_inside || self.hover.iter().any(|h| *h)
+    }
+
+    pub fn is_hud(&self) -> bool {
+        self.hud
+    }
+
+    /// How visible the HUD is, 1.0 solid.
+    pub fn hud_level(&self) -> f32 {
+        self.fade.level()
+    }
+
+    /// What click-through was last asked of the platform (`None` before the HUD started).
+    pub fn click_through_requested(&self) -> Option<bool> {
+        self.click_through
+    }
+
+    /// The spot the HUD was last snapped to, if it has been.
+    pub fn last_snap(&self) -> Option<Rect> {
+        self.snapped
+    }
+
+    /// Replaces how the pointer is found (tests).
+    pub fn set_pointer_probe(&mut self, probe: impl Fn(&Window) -> bool + 'static) {
+        self.pointer = Rc::new(probe);
+    }
+
+    /// Replaces the clock the fade runs on (tests).
+    pub fn set_clock(&mut self, clock: impl Fn() -> Instant + 'static, cx: &App) {
+        self.clock = Rc::new(clock);
+        let auto_hide = self.settings.read(cx).get(&HUD_AUTO_HIDE);
+        self.fade = HudFade::new((self.clock)(), auto_hide);
+    }
+
+    /// Starts what HUD mode needs: the window never becomes the active one, clicks pass
+    /// through it, and a poll follows the pointer, the fade and where the window is dropped.
+    pub fn start_hud(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.hud {
+            return;
+        }
+        crate::platform::set_no_activate(window);
+        self.click_through = Some(true);
+        crate::platform::set_click_through(window, true);
+        cx.spawn_in(window, async move |this, cx| loop {
+            cx.background_executor().timer(POLL).await;
+            if this
+                .update_in(cx, |this, window, cx| this.tick(window, cx))
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// One look at the world: the pointer, the fade, and whether the window has been left
+    /// somewhere it should snap from.
+    fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = (self.clock)();
+        let mut changed = false;
+        let inside = (self.pointer)(window);
+        if inside != self.pointer_inside {
+            self.pointer_inside = inside;
+            self.fade.set_hovered(inside);
+            // Solid and clickable under the pointer; otherwise the game gets every click.
+            self.click_through = Some(!inside);
+            crate::platform::set_click_through(window, !inside);
+            changed = true;
+        }
+        let auto_hide = self.settings.read(cx).get(&HUD_AUTO_HIDE);
+        self.fade.set_auto_hide(auto_hide, now);
+        changed |= self.fade.step(now);
+
+        let rect = Rect::from_bounds(window.bounds());
+        match self.settle {
+            Some((at, since)) if at == rect => {
+                if now.saturating_duration_since(since) >= SETTLE && self.snapped != Some(rect) {
+                    let displays = window_state::usable_displays(cx, window.scale_factor());
+                    let target = window_state::snap(rect, &displays);
+                    self.snapped = Some(target);
+                    if target != rect {
+                        crate::platform::move_window(window, target.x, target.y);
+                    }
+                }
+            }
+            _ => self.settle = Some((rect, now)),
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// The always-on-top choice last handed to the platform; `None` before the first frame.
@@ -151,7 +291,8 @@ impl MiniPlayer {
             self.rounded = true;
             crate::platform::round_corners(window);
         }
-        let on_top = self.settings.read(cx).get(&MINI_PLAYER_ON_TOP);
+        // The HUD is always above everything; the setting is for the plain mini player.
+        let on_top = self.hud || self.settings.read(cx).get(&MINI_PLAYER_ON_TOP);
         if self.on_top != Some(on_top) {
             self.on_top = Some(on_top);
             crate::platform::set_topmost(window, on_top);
@@ -335,7 +476,12 @@ impl Render for MiniPlayer {
             .relative()
             .size_full()
             .overflow_hidden()
-            .bg(color::bg_base())
+            .when(!self.hud, |d| d.bg(color::bg_base()))
+            .when(self.hud, |d| {
+                d.bg(color::bg_overlay().opacity(HUD_FILL_ALPHA))
+                    .rounded(px(radius::MEDIUM))
+                    .opacity(self.fade.level())
+            })
             // Under everything: wherever nothing else is, the pointer drags the window.
             .child(
                 div()

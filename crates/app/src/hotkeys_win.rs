@@ -25,6 +25,7 @@ fn hotkey(key: GlobalKey) -> HotKey {
         GlobalKey::Right => Code::ArrowRight,
         GlobalKey::Up => Code::ArrowUp,
         GlobalKey::Down => Code::ArrowDown,
+        GlobalKey::H => Code::KeyH,
     };
     HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), code)
 }
@@ -99,7 +100,9 @@ pub fn install(cx: &mut App, settings: Entity<SettingsModel>, player: Entity<Pla
                 .read_with(cx, |r, _| r.active.get(&id).map(|(_, command)| *command))
                 .ok()
                 .flatten();
-            if let Some(command) = command {
+            if command == Some(GlobalCommand::ToggleHud) {
+                cx.update(|cx| crate::mini::toggle_visibility(cx));
+            } else if let Some(command) = command {
                 let _ = weak_player.update(cx, |player, cx| command.apply(player, cx));
             }
         }
