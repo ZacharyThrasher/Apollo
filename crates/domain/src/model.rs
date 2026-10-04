@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 /// Opaque source video ID. Never a display name or URL.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct VideoId(String);
 
 impl VideoId {
@@ -24,7 +24,7 @@ impl VideoId {
 }
 
 /// Opaque browse (album/artist) ID.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BrowseId(String);
 
 impl BrowseId {
@@ -69,20 +69,20 @@ impl QueueEntryId {
 
 /// Artist and album names are not identifiers; the ID is optional because
 /// not every source reports one.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArtistRef {
     pub name: String,
     pub id: Option<BrowseId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AlbumRef {
     pub title: String,
     pub id: Option<BrowseId>,
 }
 
 /// Unknown values stay `None` rather than becoming zero/empty placeholders.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Track {
     pub video_id: VideoId,
     pub title: String,

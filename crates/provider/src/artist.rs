@@ -12,14 +12,14 @@ use apollo_domain::model::BrowseId;
 use crate::map::{collection_from_card, track_from_song, ListedTrack};
 
 /// A titled row of albums, singles or playlists ("Albums", "Singles", "Featured on", ...).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArtistSection {
     pub title: String,
     pub items: Vec<Collection>,
 }
 
 /// Another artist the page links ("Fans might also like").
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RelatedArtist {
     pub id: BrowseId,
     pub name: String,
