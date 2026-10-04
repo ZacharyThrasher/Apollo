@@ -11,7 +11,7 @@ use apollo_app::library::browse::SortKey;
 use apollo_app::library::model::{LibraryModel, Load, Tab};
 use apollo_app::library::sim::{self, SimLibrary};
 use apollo_app::library::{LibraryEdits, LibraryWrites};
-use apollo_app::player::PlayerModel;
+use apollo_app::player::{PlayerModel, QueueHeading};
 use apollo_app::settings::LibrarySortStore;
 use apollo_app::style::Fonts;
 use apollo_app::ui::library::LibraryView;
@@ -671,6 +671,93 @@ fn the_songs_filter_keeps_rows_and_plays_the_right_one(cx: &mut TestAppContext) 
     assert_eq!(count(&page, vcx), titles.len());
 }
 
+/// The queue after a play: the heading's label, the titles it holds (played, current, upcoming).
+fn queue_of(page: &Page, vcx: &mut VisualTestContext) -> (Option<String>, Vec<String>, bool) {
+    page.player.read_with(vcx, |m, _| {
+        let q = m.queue_view();
+        let label = match q.heading {
+            Some(QueueHeading::Source(source)) => Some(source.label().to_owned()),
+            _ => None,
+        };
+        let titles = q
+            .history
+            .iter()
+            .chain(q.current.iter())
+            .chain(q.upcoming.iter())
+            .map(|r| r.title.to_string())
+            .collect();
+        (label, titles, m.view().shuffle)
+    })
+}
+
+#[gpui::test]
+fn the_songs_tab_has_play_and_shuffle_that_queue_the_list_as_library_songs(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    click(vcx, "library-tab-songs");
+    assert!(vcx.debug_bounds("songs-play").is_some() && vcx.debug_bounds("songs-shuffle").is_some());
+    let titles = song_titles(&page, vcx);
+
+    click(vcx, "songs-play");
+    assert_eq!(current_title(&page, vcx), titles[0], "plays from the first row");
+    let (label, queued, shuffle) = queue_of(&page, vcx);
+    assert_eq!(label.as_deref(), Some("Library songs"));
+    assert_eq!(queued.len(), titles.len());
+    assert!(!shuffle);
+
+    click(vcx, "songs-shuffle");
+    let (label, queued, shuffle) = queue_of(&page, vcx);
+    assert_eq!(label.as_deref(), Some("Library songs"));
+    assert_eq!(queued.len(), titles.len(), "the same list, shuffled");
+    assert!(shuffle);
+}
+
+#[gpui::test]
+fn play_on_the_songs_tab_follows_the_chosen_order(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    click(vcx, "library-tab-songs");
+    click(vcx, "library-sort");
+    click(vcx, "library-sort-item-1");
+    let shown = song_titles(&page, vcx);
+    click(vcx, "songs-play");
+    assert_eq!(current_title(&page, vcx), shown[0]);
+    assert_eq!(queue_of(&page, vcx).1, shown, "queued in the order shown");
+}
+
+#[gpui::test]
+fn play_and_shuffle_on_the_songs_tab_use_only_the_rows_the_filter_keeps(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    click(vcx, "library-tab-songs");
+    let titles = song_titles(&page, vcx);
+    let field = page
+        .view
+        .read_with(vcx, |v, cx| v.filter_field(cx))
+        .expect("a filter field on the Songs tab");
+    field.update(vcx, |f, cx| f.set_text(&titles[2].to_lowercase(), cx));
+    vcx.run_until_parked();
+    let kept = page.view.read_with(vcx, |v, cx| v.visible_count(cx));
+    assert!(kept >= 1 && kept < titles.len());
+
+    click(vcx, "songs-play");
+    assert_eq!(current_title(&page, vcx), titles[2]);
+    let (label, queued, _) = queue_of(&page, vcx);
+    assert_eq!(label.as_deref(), Some("Library songs"));
+    assert_eq!(queued.len(), kept, "only what the filter keeps is queued");
+    assert!(queued.contains(&titles[2]));
+
+    click(vcx, "songs-shuffle");
+    let (_, queued, shuffle) = queue_of(&page, vcx);
+    assert_eq!(queued.len(), kept);
+    assert!(shuffle);
+
+    // Clearing the filter brings every row back into the next play.
+    field.update(vcx, |f, cx| f.set_text("", cx));
+    vcx.run_until_parked();
+    click(vcx, "songs-play");
+    assert_eq!(queue_of(&page, vcx).1.len(), titles.len());
+}
+
 #[gpui::test]
 fn an_empty_library_says_so_and_a_failed_read_can_be_retried(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
@@ -678,6 +765,7 @@ fn an_empty_library_says_so_and_a_failed_read_can_be_retried(cx: &mut TestAppCon
     click(vcx, "library-tab-songs");
     assert!(page.model.read_with(vcx, |m, _| m.songs().listing.is_confirmed_empty()));
     assert!(vcx.debug_bounds("library-filter").is_none(), "nothing to filter");
+    assert!(vcx.debug_bounds("songs-play").is_none(), "nothing to play");
 
     page.sim.preset_library_songs(&["simTrack001"]);
     page.sim.set_tabs_failure(Some(LoadFailure::Network));

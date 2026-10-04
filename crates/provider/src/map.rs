@@ -201,9 +201,10 @@ pub fn meta_from_playlist(p: &PlaylistPage, browse_id: &str) -> PageMeta {
         owned: p.owned && is_user_playlist_id(bare),
         save_id: (!bare.is_empty()).then(|| bare.to_owned()),
         in_library: None,
-        // Only the owner's edit header says either; read as what the account holds, and never
+        // The blurb is on any playlist's header, so a page can show it; whether it is offered for
+        // editing is `owned`'s say. Visibility is the owner's edit header's alone, and never
         // guessed for a list the account does not own.
-        description: p.description.clone().filter(|_| p.owned),
+        description: p.description.clone().filter(|d| !d.trim().is_empty()),
         privacy: p.privacy.as_deref().and_then(Privacy::from_service_word).filter(|_| p.owned),
     }
 }
