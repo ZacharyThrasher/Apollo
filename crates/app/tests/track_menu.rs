@@ -256,6 +256,7 @@ fn right_clicking_a_song_opens_its_menu(cx: &mut TestAppContext) {
             AddToQueue,
             StartRadio,
             AddToPlaylist,
+            AddToCrate,
             ToggleLike,
             GoToArtist,
             GoToAlbum,
@@ -376,7 +377,7 @@ fn like_and_remove_from_liked_toggle_the_heart(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     open_on_first_song(&page, vcx);
     page.menu.read_with(vcx, |m, cx| {
-        assert_eq!(m.commands(cx)[4], Command::ToggleLike);
+        assert_eq!(m.commands(cx)[5], Command::ToggleLike);
     });
     choose(&page, vcx, Command::ToggleLike);
     assert_eq!(page.sim.write_log(), [("like".to_owned(), FOUND.to_owned())]);

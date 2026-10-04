@@ -896,7 +896,7 @@ mod tests {
             commands(&subject, false),
             vec![
                 vec![PlayNext, AddToQueue],
-                vec![StartRadio, AddToPlaylist],
+                vec![StartRadio, AddToPlaylist, AddToCrate],
                 vec![ToggleLike],
                 vec![GoToArtist, GoToAlbum],
                 vec![CopyLink],
