@@ -25,6 +25,7 @@ use super::browse::{
 };
 use super::edits::{self, Edit, EditEvent, LibraryEdits};
 use super::source::{ArtistContent, LibrarySource, TrackRow};
+use crate::search::local::LocalIndex;
 use super::writes::{LibraryWrites, WritesEvent};
 
 mod artist;
@@ -323,6 +324,18 @@ pub struct LibraryModel {
     sorts: HashMap<Tab, SortKey>,
     sort_store: Option<Arc<dyn LibrarySortStore>>,
     shown: Shown,
+    /// Every liked song, loaded the first time a search needs them (the Liked Music page loads
+    /// its own copy). `liked_stale`: a like since then is not in it, so the next search that
+    /// starts reads it again.
+    liked_songs: Load<Arc<Vec<TrackRow>>>,
+    liked_rev: u64,
+    liked_stale: bool,
+    /// A search wanted them before the source was there: load them as soon as it is.
+    search_wanted: bool,
+    /// What Search looks through, rebuilt whenever one of the lists above changes; `index_rev`
+    /// tells a watcher that it did.
+    index: Arc<LocalIndex>,
+    index_rev: u64,
     /// Open pages, the one on screen last. Album and playlist pages opened from an artist page
     /// stack on it, and back unwinds one at a time.
     stack: Vec<Entry>,
@@ -363,6 +376,12 @@ impl LibraryModel {
             sorts: HashMap::new(),
             sort_store: None,
             shown: Shown::default(),
+            liked_songs: Load::Idle,
+            liked_rev: 0,
+            liked_stale: false,
+            search_wanted: false,
+            index: Arc::new(LocalIndex::default()),
+            index_rev: 0,
             stack: Vec::new(),
             next_detail: 1,
             thumbs: Thumbs::default(),
@@ -468,6 +487,9 @@ impl LibraryModel {
                 self.source = Some(source);
                 self.load_collections(cx);
                 self.ensure_tab(self.tab, cx);
+                if self.search_wanted {
+                    self.ensure_searchable(cx);
+                }
             }
             None if unavailable && self.collections == Load::Idle => {
                 self.collections = Load::Failed(LoadFailure::Other);
@@ -496,7 +518,11 @@ impl LibraryModel {
         self.artists = Load::Idle;
         self.history_rev += 1;
         self.history = Load::Idle;
+        self.liked_rev += 1;
+        self.liked_songs = Load::Idle;
+        self.liked_stale = false;
         self.shown = Shown::default();
+        self.rebuild_index();
         if self.source.is_some() {
             self.load_collections(cx);
         } else {
@@ -790,6 +816,118 @@ impl LibraryModel {
             albums,
             artists,
         };
+        self.rebuild_index();
+    }
+
+    // ---- search ----------------------------------------------------------------------------
+
+    /// What Search looks through, and a counter that changes whenever it does.
+    pub fn search_index(&self) -> (u64, &Arc<LocalIndex>) {
+        (self.index_rev, &self.index)
+    }
+
+    fn rebuild_index(&mut self) {
+        let songs: &[TrackRow] = match &self.liked_songs {
+            Load::Ready(rows) => rows,
+            _ => &[],
+        };
+        self.index = Arc::new(LocalIndex::new(
+            songs,
+            &self.shown.albums,
+            &self.shown.playlists,
+            &self.shown.artists,
+        ));
+        self.index_rev += 1;
+    }
+
+    /// A search is starting: bring in what it looks through that the screens have not loaded
+    /// yet, the artists and the liked songs, with the reads those screens make. Playlists and
+    /// albums load with the app. A load that is under way, or has answered, is left alone.
+    pub fn ensure_searchable(&mut self, cx: &mut Context<Self>) {
+        if self.source.is_none() {
+            self.search_wanted = true;
+            return;
+        }
+        self.search_wanted = false;
+        if matches!(self.artists, Load::Idle | Load::Failed(_)) {
+            self.load_artists(cx);
+        }
+        let stale = self.liked_stale && matches!(self.liked_songs, Load::Ready(_));
+        if matches!(self.liked_songs, Load::Idle | Load::Failed(_)) || stale {
+            self.load_liked_songs(cx);
+        }
+    }
+
+    /// Every liked song, page after page. Rows already held stay until a complete new list
+    /// replaces them, and stay for good if it fails.
+    fn load_liked_songs(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        if !matches!(self.liked_songs, Load::Ready(_)) {
+            self.liked_songs = Load::Loading;
+        }
+        self.liked_stale = false;
+        self.liked_rev += 1;
+        let rev = self.liked_rev;
+        cx.spawn(async move |this, cx| {
+            let mut rows: Vec<TrackRow> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            let mut listing = Listing::<TrackRow>::new();
+            let list_rev = listing.begin();
+            let liked = liked_music();
+            let mut result = {
+                let source = source.clone();
+                cx.background_executor()
+                    .spawn(async move { source.tracks(&liked) })
+                    .await
+            };
+            let outcome = loop {
+                let page = match result {
+                    Ok(page) => page,
+                    Err(f) => break Err(f),
+                };
+                if listing.apply(list_rev, page) != Applied::Yes {
+                    break Ok(());
+                }
+                let Some((_, token)) = listing.continuation() else {
+                    break Ok(());
+                };
+                let token = token.to_owned();
+                let source = source.clone();
+                result = cx
+                    .background_executor()
+                    .spawn(async move { source.more_tracks(&token) })
+                    .await;
+            };
+            if outcome.is_ok() {
+                for row in listing.items() {
+                    // The same song twice in the list is one library song.
+                    if seen.insert(row.track.video_id.as_str().to_owned()) {
+                        rows.push(row.clone());
+                    }
+                }
+            }
+            let _ = this.update(cx, |m, cx| {
+                if m.liked_rev != rev {
+                    return;
+                }
+                match outcome {
+                    Ok(()) => {
+                        let seeds = like_seeds(&rows, true);
+                        m.liked_songs = Load::Ready(Arc::new(rows));
+                        m.writes.update(cx, |w, cx| w.seed(seeds, cx));
+                    }
+                    Err(f) if !matches!(m.liked_songs, Load::Ready(_)) => {
+                        m.liked_songs = Load::Failed(f)
+                    }
+                    Err(_) => {}
+                }
+                m.rebuild_index();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // ---- pages --------------------------------------------------------------------------
@@ -1008,6 +1146,22 @@ impl LibraryModel {
     /// and swaps it in when it is whole (a page that is still loading already brings the
     /// current list). A page that is not open needs nothing: opening one always loads it fresh.
     fn liked_changed(&mut self, video_id: &str, liked: bool, cx: &mut Context<Self>) {
+        match &mut self.liked_songs {
+            Load::Ready(rows) => {
+                let listed = rows.iter().any(|r| r.track.video_id.as_str() == video_id);
+                if !liked && listed {
+                    Arc::make_mut(rows).retain(|r| r.track.video_id.as_str() != video_id);
+                    self.rebuild_index();
+                    cx.notify();
+                } else if liked && !listed {
+                    // Only the id is known here: the next search reads the list again.
+                    self.liked_stale = true;
+                }
+            }
+            // A load under way may have read the list before this change.
+            Load::Loading => self.liked_stale = true,
+            _ => {}
+        }
         let mut refresh = Vec::new();
         let mut dropped = false;
         for entry in &mut self.stack {
