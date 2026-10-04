@@ -13,7 +13,7 @@ use crate::player::PlayerModel;
 use crate::search::{HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES};
 use crate::settings::{
     BoolSetting, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS,
-    START_MINIMIZED_TO_TRAY,
+    MINI_PLAYER_ON_TOP, START_MINIMIZED_TO_TRAY,
 };
 use crate::ui::account_page::{self, AccountPage};
 use crate::ui::playback_page::PlaybackPage;
@@ -90,7 +90,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(7, cx);
+        let h = self.handles(8, cx);
 
         let search_section = SettingsSection::new("Search")
             .row(self.bool_row(
@@ -147,6 +147,15 @@ impl Render for SettingsPage {
                 }),
             );
         }
+
+        window_section = window_section.row(self.bool_row(
+            "setting-mini-player-on-top",
+            "Keep mini player on top",
+            &MINI_PLAYER_ON_TOP,
+            &h[7],
+            accent,
+            cx,
+        ));
 
         let discord_section = SettingsSection::new("Discord").row(self.bool_row(
             "setting-discord-presence",

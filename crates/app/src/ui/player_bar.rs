@@ -1,6 +1,6 @@
 //! Bottom player bar (80px, bg.raised). Left: art and title/artist. Centre: shuffle, previous,
-//! play/pause, next, repeat over the progress bar. Right: volume, the lyrics toggle and the queue
-//! toggle.
+//! play/pause, next, repeat over the progress bar. Right: volume, the mini player button, the
+//! lyrics toggle and the queue toggle.
 
 use std::rc::Rc;
 
@@ -22,8 +22,8 @@ use crate::ui::transport::{self, TransportFocus};
 
 const VOLUME_WIDTH: f32 = 96.0;
 /// The slider narrows to this when the right block is at its minimum width and holds four
-/// buttons beside it (volume, lyrics, queue, heart and mute at 32px, with their gaps).
-const VOLUME_MIN_WIDTH: f32 = 64.0;
+/// buttons beside it (mini player, lyrics, queue, heart and mute at 32px, with their gaps).
+const VOLUME_MIN_WIDTH: f32 = 40.0;
 /// The centre column takes what the side blocks leave, between these bounds. (A fixed 40% plus
 /// two 30% sides plus the gaps overflowed the bar by the gaps' width.)
 const CENTER_MAX: f32 = 640.0;
@@ -43,6 +43,7 @@ pub struct BarFocus {
     pub mute: FocusHandle,
     pub queue: FocusHandle,
     pub lyrics: FocusHandle,
+    pub mini: FocusHandle,
     pub like: FocusHandle,
     pub progress: FocusHandle,
     pub volume: FocusHandle,
@@ -77,6 +78,8 @@ pub struct PlayerBar {
     /// Lyrics are on screen (Now Playing is open with lyrics chosen).
     pub lyrics_open: bool,
     pub on_lyrics_toggle: Rc<Handler>,
+    /// Opens the mini player window.
+    pub on_mini_player: Rc<Handler>,
     pub now_playing_open: bool,
     pub on_now_playing_toggle: Rc<Handler>,
     /// The playing track is liked (what the heart shows).
@@ -321,6 +324,19 @@ impl RenderOnce for PlayerBar {
                             }
                         }),
                 ),
+            )
+            .child(
+                button(
+                    "mini-player",
+                    &self.focus.mini,
+                    Icon::PictureInPicture,
+                    "Mini player",
+                    ready,
+                )
+                .on_click({
+                    let f = self.on_mini_player.clone();
+                    move |w, cx| f(w, cx)
+                }),
             )
             .child(
                 button(
