@@ -50,6 +50,44 @@ fn busy_queue() -> Queue {
 }
 
 #[test]
+fn the_source_and_where_autoplay_began_round_trip() {
+    use apollo_domain::queue::{QueueSource, SourceKind};
+    let mut store = Store::open_in_memory().unwrap();
+    let mut q = busy_queue();
+    q.set_source(Some(
+        QueueSource::new(SourceKind::Playlist, "Gym")
+            .with_target("VLPL1")
+            .with_thumbnail(Some("https://img/1".into())),
+    ));
+    q.append_autoplay(vec![Track::new("r9", "auto")], "seed");
+    store.save_queue("acct", &q.snapshot(), 3).unwrap();
+    let (back, _) = store.load_queue("acct").unwrap().unwrap();
+    assert_eq!(back.snapshot(), q.snapshot());
+    assert_eq!(back.source().unwrap().label(), "Gym");
+
+    // No source saves and loads as no source.
+    let plain = busy_queue();
+    store.save_queue("acct", &plain.snapshot(), 3).unwrap();
+    let (back, _) = store.load_queue("acct").unwrap().unwrap();
+    assert_eq!(back.source(), None);
+}
+
+#[test]
+fn a_source_kind_from_a_newer_build_is_dropped_not_fatal() {
+    use apollo_domain::queue::{QueueSource, SourceKind};
+    let mut store = Store::open_in_memory().unwrap();
+    let mut q = busy_queue();
+    q.set_source(Some(QueueSource::new(SourceKind::Album, "Blue")));
+    store.save_queue("acct", &q.snapshot(), 0).unwrap();
+    store
+        .conn
+        .execute("UPDATE queue_state SET source_kind = 'podcast'", [])
+        .unwrap();
+    let (back, _) = store.load_queue("acct").unwrap().unwrap();
+    assert_eq!(back.source(), None);
+}
+
+#[test]
 fn queue_round_trips_exactly() {
     let mut store = Store::open_in_memory().unwrap();
     let q = busy_queue();

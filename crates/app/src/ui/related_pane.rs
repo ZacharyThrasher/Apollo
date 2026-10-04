@@ -21,6 +21,7 @@ use gpui::{
 };
 
 use crate::library::model::{ArtistTarget, Target};
+use crate::queue_source;
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::related::{Phase, RelatedModel};
@@ -387,13 +388,14 @@ impl RelatedPane {
 /// Plays song `start` of `shelf` with the shelf's songs as the queue. `start` counts the shelf's
 /// songs only (the cards of a mixed shelf do not take a place in it).
 fn play_from(player: &Entity<PlayerModel>, shelf: &HomeShelf, start: usize, cx: &mut App) {
+    let source = queue_source::named(shelf.title.clone());
     let songs = shelf.songs();
     let tracks: Vec<Track> = songs.iter().map(|s| s.track.clone()).collect();
     player.update(cx, |p, cx| {
         for song in &songs {
             p.hint_art(song.track.video_id.as_str(), song.thumbnail.as_deref());
         }
-        p.play_tracks(tracks, Some(start), None, cx);
+        p.play_tracks_from(tracks, Some(start), None, Some(source), cx);
     });
 }
 

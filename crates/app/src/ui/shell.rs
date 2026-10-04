@@ -279,23 +279,30 @@ impl Shell {
         let sleep_menu = cx.new(|cx| SleepMenu::new(player.clone(), cx));
         cx.observe(&sleep_menu, |_, _, cx| cx.notify()).detach();
         cx.set_global(SleepMenuHandle(sleep_menu.clone()));
+        let thumbs = cx.new(|_| ThumbStore::new());
         let queue_panel = cx.new(|cx| {
             QueuePanel::new(
                 player.clone(),
                 writes.clone(),
+                thumbs.clone(),
                 {
                     let weak = weak.clone();
                     move |window, cx| {
                         let _ = weak.update(cx, |s, cx| s.open_search(window, cx));
                     }
                 },
+                Rc::new({
+                    let weak = weak.clone();
+                    move |target, window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.open_target(target, window, cx));
+                    }
+                }),
                 cx,
             )
         });
         let lyrics = cx.new(|cx| LyricsModel::new(player.clone(), cx));
         let lyrics_pane = cx.new(|cx| LyricsPane::new(player.clone(), lyrics.clone(), cx));
         cx.observe(&lyrics_pane, |_, _, cx| cx.notify()).detach();
-        let thumbs = cx.new(|_| ThumbStore::new());
         let related = cx.new(|cx| RelatedModel::new(player.clone(), cx));
         let related_pane = cx.new(|cx| {
             RelatedPane::new(

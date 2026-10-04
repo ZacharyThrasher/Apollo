@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use apollo_app::art::{ArtSource, DecodedArt};
 use apollo_app::backend::{LibraryTrack, Ports, Prepared};
 use apollo_app::library::sim::SimLibrary;
-use apollo_app::player::PlayerModel;
+use apollo_app::player::{PlayerModel, QueueHeading};
+use apollo_app::queue_source;
 use apollo_app::search::SearchSource;
 use apollo_app::settings::{QueueStore, SqliteSettings};
 use apollo_app::url_thumbs::ThumbSource;
@@ -181,6 +182,32 @@ fn the_queue_comes_back_paused_at_the_saved_position(cx: &mut TestAppContext) {
     // Pressing Play resolves a fresh stream and resumes where it was left.
     player.update(cx, |m, cx| m.toggle_play(cx));
     assert_eq!(log.lines().last().unwrap(), &format!("start:{}@95000", id(2)));
+}
+
+#[gpui::test]
+fn where_the_queue_came_from_comes_back_with_it(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir);
+    {
+        let (player, _log) = launch(cx, &store, Some("acct"), &["default0001"]);
+        player.update(cx, |m, cx| {
+            m.play_tracks_from(
+                tracks(4),
+                Some(0),
+                Some(false),
+                Some(queue_source::named("Quick picks")),
+                cx,
+            )
+        });
+        // Quit: the last write lands before the process goes.
+        player.update(cx, |m, _| m.shutdown());
+    }
+    let (player, _log) = launch(cx, &store, Some("acct"), &["default0001"]);
+    let heading = player.read_with(cx, |m, _| m.queue_view().heading);
+    match heading {
+        Some(QueueHeading::Source(source)) => assert_eq!(source.label(), "Quick picks"),
+        other => panic!("expected the saved source, got {other:?}"),
+    }
 }
 
 #[gpui::test]
