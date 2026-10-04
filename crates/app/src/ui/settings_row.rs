@@ -307,7 +307,6 @@ impl RenderOnce for SettingsRow {
                     .text_color(color::text_primary())
                     .child(self.label),
             )
-            .children(control_slot(beside_switch))
             .when_some(fact, |d, fact| {
                 d.child(
                     div()
@@ -324,11 +323,25 @@ impl RenderOnce for SettingsRow {
                         .children(control_slot(beside_fact)),
                 )
             })
-            .when(!is_select && !plain, |d| {
+            .when(!is_select, |d| {
+                // The control sits beside the switch, both at the row's right end: with the row
+                // spreading three children apart, the control landed in the middle of the row
+                // (and the row's own click, aimed at its centre, landed on the control).
                 d.child(
                     div()
-                        .debug_selector(|| format!("{}-switch", id))
-                        .child(switch::pill(on, true, self.accent)),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .flex_none()
+                        .gap(px(spacing::S4))
+                        .children(control_slot(beside_switch))
+                        .when(!plain, |d| {
+                            d.child(
+                                div()
+                                    .debug_selector(|| format!("{}-switch", id))
+                                    .child(switch::pill(on, true, self.accent)),
+                            )
+                        }),
                 )
             })
             .when_some(value, |d, value| {

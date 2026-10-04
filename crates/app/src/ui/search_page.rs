@@ -1304,10 +1304,7 @@ impl SearchPage {
             "playlist" => "Playlist",
             _ => "Artist",
         };
-        let detail: SharedString = match hit.subtitle.as_deref().filter(|s| !s.trim().is_empty()) {
-            Some(rest) => format!("{label} \u{2022} {rest}").into(),
-            None => label.into(),
-        };
+        let detail = library_detail(label, hit.subtitle.as_deref());
         let (target, on_open) = (target_of(kind, hit), self.on_open.clone());
         LibraryRow::new(
             format!("library-row-{index}"),
@@ -1934,5 +1931,51 @@ impl RenderOnce for SongRow {
             .child(add)
             .child(more);
         track_menu::on_context_menu(row, menu)
+    }
+}
+
+
+/// The second line of a library row: its kind, then what the library says about it. The
+/// library's own albums already start with their kind ("Album \u{2022} Daft Punk \u{2022} 2005",
+/// "EP \u{2022} ..."), which must not be put in front a second time.
+fn library_detail(label: &str, subtitle: Option<&str>) -> SharedString {
+    const KINDS: [&str; 6] = ["Album", "EP", "Single", "Playlist", "Artist", "Song"];
+    match subtitle.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(rest) => {
+            let first = rest.split('\u{2022}').next().unwrap_or("").trim();
+            if KINDS.contains(&first) {
+                rest.to_owned().into()
+            } else {
+                format!("{label} \u{2022} {rest}").into()
+            }
+        }
+        None => label.to_owned().into(),
+    }
+}
+
+#[cfg(test)]
+mod library_detail_tests {
+    use super::library_detail;
+
+    #[test]
+    fn a_kind_is_never_said_twice() {
+        assert_eq!(
+            library_detail("Album", Some("Album \u{2022} Daft Punk \u{2022} 2005")),
+            "Album \u{2022} Daft Punk \u{2022} 2005"
+        );
+        assert_eq!(
+            library_detail("Album", Some("EP \u{2022} Ludo \u{2022} 2005")),
+            "EP \u{2022} Ludo \u{2022} 2005"
+        );
+        assert_eq!(
+            library_detail("Album", Some("Daft Punk \u{2022} 2013")),
+            "Album \u{2022} Daft Punk \u{2022} 2013"
+        );
+        assert_eq!(
+            library_detail("Playlist", Some("Zach \u{2022} 23 tracks")),
+            "Playlist \u{2022} Zach \u{2022} 23 tracks"
+        );
+        assert_eq!(library_detail("Artist", Some("  ")), "Artist");
+        assert_eq!(library_detail("Artist", None), "Artist");
     }
 }
