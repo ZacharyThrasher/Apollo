@@ -15,7 +15,8 @@ pub use explore::{explore_page, mood_playlists, worst, ExplorePage, MoodTile};
 pub use home::{home_page, HomeItem, HomePage, HomeShelf};
 pub use map::{
     account_validation, classify, classify_write, collection_from_card, collections_from_grid,
-    history_days, liked_from_rating, HistoryDay, page_from_album, page_from_continuation, page_from_playlist,
+    history_days, liked_from_rating, meta_from_album, meta_from_playlist, page_from_album,
+    page_from_continuation, page_from_playlist, HistoryDay,
     target_from_option, track_from_song, ListedTrack,
 };
 pub use search::{
