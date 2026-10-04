@@ -589,6 +589,11 @@ impl PlayerModel {
         }
     }
 
+    /// The https URL of a track's artwork, for surfaces that cannot take pixels.
+    pub fn art_url(&self, video_id: &str) -> Option<String> {
+        self.art_source.as_ref()?.url(video_id)
+    }
+
     /// Replace the queue with `tracks` and start playing. `start` is the first track's index
     /// (default: the first, or a random one when shuffling); `shuffle` sets the queue's shuffle
     /// on or off, `None` keeping the current setting.

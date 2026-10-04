@@ -219,6 +219,7 @@ dependencies = [
  "gpui_platform",
  "image",
  "raw-window-handle",
+ "serde_json",
  "souvlaki",
  "tempfile",
  "tokio",
