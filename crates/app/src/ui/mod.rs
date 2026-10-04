@@ -7,6 +7,7 @@ pub mod explore_page;
 pub mod home_page;
 pub mod library;
 pub mod lyrics_pane;
+pub mod mini_player;
 pub mod nav;
 pub mod now_playing;
 pub mod pane_tabs;
