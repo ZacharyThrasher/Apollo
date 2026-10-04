@@ -219,6 +219,8 @@ dependencies = [
  "gpui_platform",
  "image",
  "raw-window-handle",
+ "serde",
+ "serde_json",
  "souvlaki",
  "tempfile",
  "tokio",
@@ -231,6 +233,7 @@ dependencies = [
 name = "apollo-domain"
 version = "0.0.0"
 dependencies = [
+ "serde",
  "url",
 ]
 
@@ -340,6 +343,7 @@ version = "0.0.0"
 dependencies = [
  "apollo-domain",
  "apollo-innertube",
+ "serde",
  "serde_json",
  "tokio",
 ]

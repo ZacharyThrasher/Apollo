@@ -10,7 +10,7 @@ use crate::map::{parse_duration, ListedTrack};
 
 /// An album, artist or playlist result. The id is the service's browse id; nothing here can be
 /// played directly (the pages that open these come later).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Hit {
     pub id: BrowseId,
     pub title: String,

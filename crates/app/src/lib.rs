@@ -14,6 +14,7 @@ pub mod lyrics;
 pub mod loudness;
 pub mod motion;
 pub mod os_media;
+pub mod page_cache;
 pub mod persist;
 pub mod platform;
 pub mod player;

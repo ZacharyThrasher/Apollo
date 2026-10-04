@@ -109,7 +109,7 @@ Applied to the Home route (`ui/home_page.rs`, `home.rs`); the feed is YouTube Mu
 3. **Song shelves** (such as "Quick picks"): a grid of compact song rows (art, title, artist), four rows tall, paging sideways by column; no cards. Clicking a song plays it with that shelf as the queue. A shelf that mixes songs and cards is a card shelf; its songs queue together.
 4. **Scrolling:** a row scrolls sideways with the wheel or a swipe. Previous and next chevrons (32px circles on bg.overlay, border.strong) appear on hover at the row edges, only when there is somewhere to go, and page by a screenful, 200 ms ease-out (at once under reduced motion). The chevrons are not tab stops. Each shelf is a single Tab stop (roving focus): Tab goes shelf to shelf and returns to the item you left; Left and Right move between items inside the shelf and the row follows focus.
 5. **Loading:** the shared skeleton pulse (a song grid, then a card row). More shelves load by continuation as the page runs out, and a failed continuation leaves a "Couldn't load more" line with Retry at the foot. Errors are the Library's error row ("Couldn't load Home", or "Sign-in expired") with Retry; an empty feed says "Nothing to show" with Retry; signed out offers a primary Sign in button.
-6. **Freshness:** shelves are kept in memory for the session and reload in the background when Home is reopened after 10 minutes. A failed refresh keeps what is shown. A different account drops them.
+6. **Freshness:** shelves are kept in memory for the session and reload in the background when Home is reopened after 10 minutes. A failed refresh keeps what is shown. A different account drops them. The first batch is also saved on disk (see Instant pages), so launch draws the last feed at once.
 7. **Keyboard:** one Tab stop per shelf at the page's tab index, so Tab reaches the player bar quickly. Each shelf is still a list named by its title. Nothing more is planned for accessibility on this personal app (Zach, 2026-10-03).
 8. **Approved as built:** the primary Sign in button when signed out, "Nothing to show" with Retry, "Couldn't load more" with Retry, and the 32px circle chevrons on bg.overlay with border.strong.
 
@@ -132,6 +132,13 @@ Applied to the lyrics pane (`ui/lyrics_pane.rs`, `lyrics.rs`) and the Lyrics but
 4. **Plain lyrics:** static, scrollable text in the same type, all text.secondary; no clicking, no following.
 5. **States:** no lyrics is a single centred "No lyrics" in text.secondary (same type as the lines); loading is the shared skeleton pulse (six bars the height of a line, starting at the third). Nothing else is explained.
 6. **Data:** LRCLIB only (`/api/get`, then `/api/search` within 2 s of the track's length), synced preferred, plain as the fallback. Looked up when a track becomes current and for the track after it; answers, including "not found", are cached in SQLite by video id (a "not found" is believed for a week).
+
+## Instant pages (invisible speed work, 2026-10-04)
+No visible change: no "refreshing" indicator, no Settings row. A page that was opened before draws from the cache at once and is fetched again behind it; the fresh answer replaces it in place only if it differs (no scroll jump, no flicker). A page opened for the first time keeps the shared skeleton pulse.
+1. **What is cached:** Home's first batch, the Library lists, and every album, artist and playlist page's whole track list, in the `page_cache` table (`crates/app/src/page_cache.rs`), also held in memory for the session. Home is drawn at launch as soon as the account is known, before the session is confirmed.
+2. **Account:** pages are filed under the chosen channel. Another account purges the old one's pages; signing out by choice purges everything.
+3. **Writes:** a like drops Liked Music's page and an add to a playlist drops that playlist's page and the Library list, at the moment of the write and again when it settles. A fetch that began before a drop cannot put its older answer back. Playlist editing calls `PageCache::invalidate_collection(id)` (browse id or bare `PL...` id); `invalidate_library()` after a playlist or album is created, deleted or saved.
+4. **Failures:** a failed refresh behind cached content is silent, except a dead session ("Sign-in expired"), which always replaces the cached page.
 
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

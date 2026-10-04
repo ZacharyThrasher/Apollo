@@ -13,7 +13,7 @@ use crate::map::{collection_from_card, ListedTrack};
 use crate::search::{hit_from_item, track_from_item, Hit};
 
 /// One thing on a shelf.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HomeItem {
     /// Plays.
     Song(ListedTrack),
@@ -44,7 +44,7 @@ impl HomeItem {
 }
 
 /// A titled row ("Quick picks", "Listen again", "Albums for you").
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HomeShelf {
     pub title: String,
     pub items: Vec<HomeItem>,
@@ -69,7 +69,7 @@ impl HomeShelf {
 }
 
 /// One answer of the home feed: a batch of shelves and the way to the next batch.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HomePage {
     pub shelves: Vec<HomeShelf>,
     pub continuation: Option<String>,

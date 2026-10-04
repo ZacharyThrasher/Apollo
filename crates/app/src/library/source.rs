@@ -10,7 +10,7 @@ use crate::art::DecodedArt;
 
 /// One row of a collection's track list. `occurrence` is the row's own token: the same video
 /// may sit in a playlist twice, so paging dedups on it and never on the video id.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TrackRow {
     pub track: Track,
     pub occurrence: Option<String>,
@@ -27,7 +27,7 @@ impl ListItem for TrackRow {
 }
 
 /// What an artist page shows: the top songs and the rows of albums, singles and playlists.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArtistContent {
     pub name: String,
     /// The service's header picture (often wide); the card the page was opened from usually
