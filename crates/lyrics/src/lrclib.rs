@@ -1,19 +1,33 @@
 //! LRCLIB (https://lrclib.net): free, no key. It asks for a User-Agent that says who is calling.
 //!
-//! Lookup order: `/api/get` with the track's artist, title, album and duration (an exact
-//! match); then `/api/search` keeping only results within [`DURATION_SLACK_SECS`] of the
-//! track's length. Synced lyrics are preferred over plain at every step.
+//! Lookup order, stopping at the first synced answer (plain text is kept as the fallback):
+//!
+//! 1. `/api/get` (an exact match on artist, title, album and length) for the title as listed,
+//!    then with the decorations cleaned off (`(feat. …)`, `- Remastered`, a trailing `!`), the
+//!    first artist only, and with and without the album (a wrong album is a 404).
+//! 2. `/api/search` on the cleaned title with the first artist, then as free text
+//!    (`artist title`), then on the title alone.
+//!
+//! A search result is used only when its title and artist are the track's (see
+//! [`crate::normalize`]) and its length is within [`DURATION_SLACK_SECS`] of the track's, so a
+//! looser search never lands on another song or another cut.
 
 use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::normalize::{clean_title, key, same_artist, strip_artist_prefix};
 use crate::{parse_lrc, FetchError, Lyrics, LyricsQuery, LyricsSource};
 
 pub const USER_AGENT: &str = "Apollo/0.1 (https://github.com/ZacharyThrasher/Apollo)";
 const BASE: &str = "https://lrclib.net";
 /// A search result's length may differ from the track's by this much (different masters).
 pub const DURATION_SLACK_SECS: f64 = 2.0;
+/// A result whose artist is spelled too differently to compare (another script) is still taken
+/// when its title is the same and its length is this close.
+const STRONG_DURATION_SECS: f64 = 1.0;
+/// ...and the title is at least this long once reduced to letters and digits.
+const STRONG_TITLE_LEN: usize = 5;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct HttpReply {
@@ -84,6 +98,10 @@ impl Default for Lrclib<UreqHttp> {
 #[serde(rename_all = "camelCase")]
 struct Record {
     #[serde(default)]
+    track_name: String,
+    #[serde(default)]
+    artist_name: String,
+    #[serde(default)]
     duration: Option<f64>,
     #[serde(default)]
     instrumental: bool,
@@ -133,16 +151,14 @@ impl<H: Http> Lrclib<H> {
         }
     }
 
-    fn exact(&self, q: &LyricsQuery) -> Result<Option<Record>, FetchError> {
-        let Some(duration) = q.duration_secs else {
-            return Ok(None);
-        };
+    /// `/api/get` for one spelling of the track. `None` when LRCLIB has no such entry.
+    fn exact(&self, attempt: &GetAttempt, duration: u32) -> Result<Option<Record>, FetchError> {
         let reply = self.call(
             "/api/get",
             &[
-                ("artist_name", q.artist.clone()),
-                ("track_name", q.title.clone()),
-                ("album_name", q.album.clone().unwrap_or_default()),
+                ("artist_name", attempt.artist.clone()),
+                ("track_name", attempt.title.clone()),
+                ("album_name", attempt.album.clone().unwrap_or_default()),
                 ("duration", duration.to_string()),
             ],
         )?;
@@ -154,29 +170,16 @@ impl<H: Http> Lrclib<H> {
             .map_err(|e| FetchError(e.to_string()))
     }
 
-    /// Search results for the track, best candidate first: nearest length among those within
-    /// the slack, synced ahead of plain at equal distance.
-    fn search(&self, q: &LyricsQuery, with_artist: bool) -> Result<Vec<Record>, FetchError> {
-        let mut params = vec![("track_name", q.title.clone())];
-        if with_artist && !q.first_artist.is_empty() {
-            params.push(("artist_name", q.first_artist.clone()));
-        }
-        let reply = self.call("/api/search", &params)?;
+    /// Search results that are the track itself, best first: synced ahead of plain, then the
+    /// nearest length.
+    fn search(&self, plan: &SearchPlan, q: &LyricsQuery) -> Result<Vec<Record>, FetchError> {
+        let reply = self.call("/api/search", &plan.params)?;
         if reply.status == 404 {
             return Ok(Vec::new());
         }
         let mut found: Vec<Record> =
             serde_json::from_str(&reply.body).map_err(|e| FetchError(e.to_string()))?;
-        found.retain(|r| {
-            r.lyrics().is_some()
-                && match (q.duration_secs, r.duration) {
-                    (Some(want), Some(have)) => {
-                        (have - f64::from(want)).abs() <= DURATION_SLACK_SECS
-                    }
-                    // Nothing to compare: only a search with the artist is trusted.
-                    _ => with_artist,
-                }
-        });
+        found.retain(|r| r.lyrics().is_some() && is_the_track(r, q));
         let distance = |r: &Record| match (q.duration_secs, r.duration) {
             (Some(want), Some(have)) => (have - f64::from(want)).abs(),
             _ => 0.0,
@@ -191,28 +194,123 @@ impl<H: Http> Lrclib<H> {
     }
 }
 
+/// One `/api/get` spelling of the track.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GetAttempt {
+    title: String,
+    artist: String,
+    album: Option<String>,
+}
+
+/// The `/api/get` requests to try, most specific first, without repeats.
+fn get_attempts(q: &LyricsQuery) -> Vec<GetAttempt> {
+    let cleaned = clean_title(&q.title);
+    let first = if q.first_artist.is_empty() {
+        q.artist.clone()
+    } else {
+        q.first_artist.clone()
+    };
+    let mut albums = vec![q.album.clone()];
+    if q.album.is_some() {
+        albums.push(None);
+    }
+    let mut out: Vec<GetAttempt> = Vec::new();
+    for album in albums {
+        for (title, artist) in [
+            (q.title.clone(), q.artist.clone()),
+            (cleaned.clone(), first.clone()),
+        ] {
+            let attempt = GetAttempt {
+                title,
+                artist,
+                album: album.clone(),
+            };
+            if !out.contains(&attempt) {
+                out.push(attempt);
+            }
+        }
+    }
+    out
+}
+
+struct SearchPlan {
+    params: Vec<(&'static str, String)>,
+}
+
+/// The searches to try, in order: the cleaned title with the first artist; free text (finds
+/// entries whose artist field is spelled differently, or that are named `Artist - Title`); the
+/// title alone.
+fn search_plans(q: &LyricsQuery) -> Vec<SearchPlan> {
+    let title = clean_title(&q.title);
+    let artist = if q.first_artist.is_empty() {
+        q.artist.split(',').next().unwrap_or("").trim().to_owned()
+    } else {
+        q.first_artist.clone()
+    };
+    let mut plans = Vec::new();
+    if !artist.is_empty() {
+        plans.push(SearchPlan {
+            params: vec![
+                ("track_name", title.clone()),
+                ("artist_name", artist.clone()),
+            ],
+        });
+        plans.push(SearchPlan {
+            params: vec![("q", format!("{artist} {title}"))],
+        });
+    }
+    plans.push(SearchPlan {
+        params: vec![("track_name", title)],
+    });
+    plans
+}
+
+/// Whether a search result is this track: the same title and artist, and a length within
+/// [`DURATION_SLACK_SECS`] when both are known.
+fn is_the_track(r: &Record, q: &LyricsQuery) -> bool {
+    let want_title = key(&clean_title(&q.title));
+    if want_title.is_empty() {
+        return false;
+    }
+    let candidate = strip_artist_prefix(&r.track_name, &q.artist);
+    let title_ok = key(&candidate) == want_title || key(&clean_title(&candidate)) == want_title;
+    if !title_ok {
+        return false;
+    }
+    let apart = match (q.duration_secs, r.duration) {
+        (Some(want), Some(have)) => Some((have - f64::from(want)).abs()),
+        _ => None,
+    };
+    if apart.is_some_and(|d| d > DURATION_SLACK_SECS) {
+        return false;
+    }
+    let artist_ok = same_artist(&r.artist_name, &q.artist)
+        || (!q.first_artist.is_empty() && same_artist(&r.artist_name, &q.first_artist));
+    artist_ok
+        || (want_title.chars().count() >= STRONG_TITLE_LEN
+            && apart.is_some_and(|d| d <= STRONG_DURATION_SECS))
+}
+
 impl<H: Http> LyricsSource for Lrclib<H> {
     fn fetch(&self, q: &LyricsQuery) -> Result<Option<Lyrics>, FetchError> {
         let mut fallback = None;
-        if let Some(lyrics) = self.exact(q)?.and_then(|r| r.lyrics()) {
-            if lyrics.is_synced() {
-                return Ok(Some(lyrics));
-            }
-            fallback = Some(lyrics);
-        }
-        // Not an exact match, or only plain text: look for a synced version of a near match.
-        for with_artist in [true, false] {
-            if let Some(best) = self
-                .search(q, with_artist)?
-                .first()
-                .and_then(|r| r.lyrics())
-            {
-                if best.is_synced() || fallback.is_none() {
-                    return Ok(Some(best));
+        if let Some(duration) = q.duration_secs {
+            for attempt in get_attempts(q) {
+                if let Some(lyrics) = self.exact(&attempt, duration)?.and_then(|r| r.lyrics()) {
+                    if lyrics.is_synced() {
+                        return Ok(Some(lyrics));
+                    }
+                    fallback.get_or_insert(lyrics);
                 }
             }
-            if fallback.is_some() && with_artist {
-                break;
+        }
+        // No exact match, or only plain text: look for a synced version among near matches.
+        for plan in search_plans(q) {
+            if let Some(best) = self.search(&plan, q)?.first().and_then(|r| r.lyrics()) {
+                if best.is_synced() {
+                    return Ok(Some(best));
+                }
+                fallback.get_or_insert(best);
             }
         }
         Ok(fallback)
@@ -312,12 +410,15 @@ mod tests {
         let lyrics = Lrclib::with_http(&script).fetch(&query(Some(200))).unwrap();
         assert!(lyrics.unwrap().is_synced());
         let asked = script.asked.lock().unwrap();
-        assert_eq!(asked.len(), 2);
+        // Four exact lookups (as listed and cleaned, with and without the album), then the search.
+        assert_eq!(asked.len(), 5);
+        assert!(asked[0].contains("album_name=After%20Hours"));
+        assert!(asked[2].contains("album_name=&"), "{}", asked[2]);
         assert!(
-            asked[1].contains("/api/search?track_name=Blinding%20Lights&artist_name=The%20Weeknd")
+            asked[4].contains("/api/search?track_name=Blinding%20Lights&artist_name=The%20Weeknd")
         );
         assert!(
-            !asked[1].contains("Someone"),
+            !asked[4].contains("Someone"),
             "search names the first artist only"
         );
     }
@@ -331,8 +432,8 @@ mod tests {
         // 230 s is more than 2 s from every record (202, 248, 201).
         let lyrics = Lrclib::with_http(&script).fetch(&query(Some(230))).unwrap();
         assert_eq!(lyrics, None);
-        // Both searches (with and without the artist) were tried before giving up.
-        assert_eq!(script.asked.lock().unwrap().len(), 3);
+        // All four exact lookups and all three searches were tried before giving up.
+        assert_eq!(script.asked.lock().unwrap().len(), 7);
     }
 
     #[test]
@@ -363,6 +464,137 @@ mod tests {
         let lyrics = Lrclib::with_http(&script).fetch(&query(None)).unwrap();
         assert!(lyrics.unwrap().is_synced());
         assert_eq!(script.asked.lock().unwrap().len(), 1);
+    }
+
+    fn record(title: &str, artist: &str, duration: f64) -> String {
+        format!(
+            r#"{{"trackName":"{title}","artistName":"{artist}","duration":{duration},"instrumental":false,"plainLyrics":"words","syncedLyrics":"[00:01.00]hello"}}"#
+        )
+    }
+
+    fn found_for(q: LyricsQuery, search_body: &'static str) -> Option<Lyrics> {
+        let script = Script::new(vec![
+            ("/api/get", Ok((404, GET_404))),
+            ("/api/search", Ok((200, search_body))),
+        ]);
+        Lrclib::with_http(&script).fetch(&q).unwrap()
+    }
+
+    fn track(title: &str, artist: &str, secs: u32) -> LyricsQuery {
+        LyricsQuery {
+            video_id: "vid".into(),
+            title: title.into(),
+            artist: artist.into(),
+            first_artist: artist.split(", ").next().unwrap().into(),
+            album: None,
+            duration_secs: Some(secs),
+        }
+    }
+
+    #[test]
+    fn the_exact_lookup_is_retried_with_a_cleaned_title_and_without_the_album() {
+        let script = Script::new(vec![
+            ("/api/get", Ok((404, GET_404))),
+            ("/api/search", Ok((200, "[]"))),
+        ]);
+        let mut q = track(
+            "Halo - Remastered 2009 (feat. Someone)",
+            "Beyoncé, Someone",
+            261,
+        );
+        q.album = Some("I AM... SASHA FIERCE (Deluxe)".into());
+        let _ = Lrclib::with_http(&script).fetch(&q);
+        let asked = script.asked.lock().unwrap();
+        let gets: Vec<&String> = asked.iter().filter(|u| u.contains("/api/get")).collect();
+        assert_eq!(gets.len(), 4);
+        // As listed, with the album; cleaned and first artist, with the album; then both again
+        // without it.
+        assert!(gets[0]
+            .contains("artist_name=Beyonc%C3%A9%2C%20Someone&track_name=Halo%20-%20Remastered"));
+        assert!(gets[1].contains("artist_name=Beyonc%C3%A9&track_name=Halo&album_name=I%20AM"));
+        assert!(gets[2].contains("Remastered") && gets[2].contains("album_name=&"));
+        assert!(gets[3].contains("artist_name=Beyonc%C3%A9&track_name=Halo&album_name=&"));
+    }
+
+    #[test]
+    fn a_wrong_album_does_not_stop_a_match_without_it() {
+        // 404 with the album, found without it.
+        struct AlbumStrict;
+        impl Http for AlbumStrict {
+            fn get(&self, url: &str) -> Result<HttpReply, String> {
+                let has_album = !url.contains("album_name=&") && url.contains("album_name=");
+                Ok(if url.contains("/api/get") && !has_album {
+                    HttpReply {
+                        status: 200,
+                        body: GET_OK.to_owned(),
+                    }
+                } else {
+                    HttpReply {
+                        status: 404,
+                        body: GET_404.to_owned(),
+                    }
+                })
+            }
+        }
+        let mut q = query(Some(200));
+        q.album = Some("Some Deluxe Edition".into());
+        assert!(Lrclib::with_http(AlbumStrict)
+            .fetch(&q)
+            .unwrap()
+            .unwrap()
+            .is_synced());
+    }
+
+    #[test]
+    fn a_search_hit_is_used_when_the_title_and_artist_are_spelled_differently() {
+        let body: &'static str = Box::leak(
+            format!("[{}]", record("Worlds Greatest", "BIG KRIT", 200.0)).into_boxed_str(),
+        );
+        assert!(
+            found_for(track("World's Greatest!", "Big K.R.I.T.", 200), body)
+                .unwrap()
+                .is_synced()
+        );
+        // `Artist - Title` entries (named like a video) and a feat. credit in the title.
+        let body: &'static str = Box::leak(
+            format!(
+                "[{}]",
+                record("Lil Nas X - Montero (feat. Someone)", "Lil Nas X", 137.0)
+            )
+            .into_boxed_str(),
+        );
+        assert!(found_for(track("Montero", "Lil Nas X", 137), body)
+            .unwrap()
+            .is_synced());
+    }
+
+    #[test]
+    fn another_song_or_artist_or_cut_is_never_used() {
+        // Same title, other artist, same length.
+        let body: &'static str =
+            Box::leak(format!("[{}]", record("Halo", "Texas", 261.0)).into_boxed_str());
+        assert_eq!(found_for(track("Halo", "Beyoncé", 261), body), None);
+        // Same artist, other title, same length.
+        let body: &'static str =
+            Box::leak(format!("[{}]", record("Halo 2", "Beyoncé", 261.0)).into_boxed_str());
+        assert_eq!(found_for(track("Halo", "Beyoncé", 261), body), None);
+        // Right song, a cut 5 s longer.
+        let body: &'static str =
+            Box::leak(format!("[{}]", record("Halo", "Beyoncé", 266.0)).into_boxed_str());
+        assert_eq!(found_for(track("Halo", "Beyoncé", 261), body), None);
+    }
+
+    #[test]
+    fn a_differently_scripted_artist_matches_only_with_a_near_exact_length() {
+        let body: &'static str =
+            Box::leak(format!("[{}]", record("Lemon", "Kenshi Yonezu", 255.4)).into_boxed_str());
+        assert!(found_for(track("Lemon", "米津玄師", 255), body)
+            .unwrap()
+            .is_synced());
+        // 2 s apart is not enough when the artist cannot be compared.
+        let body: &'static str =
+            Box::leak(format!("[{}]", record("Lemon", "Kenshi Yonezu", 257.4)).into_boxed_str());
+        assert_eq!(found_for(track("Lemon", "米津玄師", 255), body), None);
     }
 
     #[test]

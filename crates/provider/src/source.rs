@@ -257,6 +257,15 @@ impl InnerTubeSource {
             .map_err(|e| classify_write(&e))
     }
 
+    /// YouTube Music's own lyrics for a track, as plain text. `Ok(None)` is an answer: the track
+    /// has no lyrics tab, or the tab is empty.
+    pub async fn lyrics_text(&self, video_id: &str) -> Result<Option<String>, LoadFailure> {
+        self.tube
+            .lyrics(&self.client, video_id)
+            .await
+            .map_err(|e| classify(&e))
+    }
+
     /// How loud YouTube measured a track (`loudnessDb`, dB against its reference level), from one
     /// metadata-only `player` request. `Ok(None)` is an answer: the service had no measurement for
     /// the track. Nothing else in the response is read, and it carries no plays or history.
