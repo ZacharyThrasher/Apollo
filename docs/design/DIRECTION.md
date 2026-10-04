@@ -210,6 +210,13 @@ Applied to the Library's Stats tab (`ui/library/stats.rs`, `library/model/stats.
 4. **Settings:** a "Home" section right after Playback with one row, "Personal shelves" (switch, on). Off hides the two shelves; the log keeps recording either way.
 5. **Not covered by the brief, chosen by the thread:** the plays count on the right of each row; "On repeat" counts a track only after 2 plays in the 30 days (once is not a repeat); "Forgotten favourites" needs 5 plays in all.
 
+## Crate and queue undo decisions (coordinator brief, 2026-10-04)
+Applied to the Crate (`crate_list.rs`, `ui/crate_page.rs`, the nav rail and the song menu) and to Ctrl+Z / Ctrl+Shift+Z on the queue (`player.rs`, domain `undo.rs`).
+1. **Nav:** the Crate is an item under Library with the Fluent box icon (filled when selected). Its song count sits at the right of the label in caption text.tertiary (tabular numerals) and is hidden at zero and in the collapsed rail.
+2. **Page:** the "Crate" page title, a text.tertiary "N songs" line, then Play (the primary button), Shuffle, Add all to queue and Clear as text buttons. Clear asks first: the button turns into "Clear N songs?" with Clear and Cancel. Rows are the shared 56px song rows, newest first, with the heart, More and a remove button (Fluent dismiss) shown on hover or under the cursor. Empty: "Nothing set aside yet" with Search.
+3. **Adding:** C sets the playing song aside (in the queue, Library and Search lists, the song under the cursor); "Add to Crate" in a song's menu does the same and becomes "Remove from Crate" once it is in. A song is in the crate once, and adding is silent (the count changes, no toast).
+4. **Undo:** Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y too). The only success feedback in the app is a small pill, bottom-centre above the player bar, on bg.overlay in text.secondary: "Queue restored" (or "Queue redone") for 2 seconds, fading in and out over 150 ms. Nothing is shown when there is nothing to undo.
+
 ## Playlist editing decisions (coordinator brief, 2026-10-04; built choices flagged)
 Applied to the dialog, menus, popover and Library page (`ui/playlist_dialog.rs`, `ui/track_menu.rs`, `ui/playlist_picker.rs`, `ui/library.rs`). Edits and their safety rules are in `library/edits.rs`.
 1. **Create:** a "New playlist" text button at the right of the Library tab row on the Playlists tab (next to the sort control; it shows once the library has loaded), and a fixed first row "New playlist…" (Fluent add icon) in the add-to-playlist popover. Both open the dialog. New playlists are Private; there is no privacy picker. Built choice: from the popover, the new playlist also receives the song the popover was opened for.

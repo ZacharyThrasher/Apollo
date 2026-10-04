@@ -11,6 +11,7 @@ pub mod loudness;
 pub mod model;
 pub mod playback;
 pub mod queue;
+pub mod undo;
 
 #[cfg(test)]
 mod fuzz_tests;

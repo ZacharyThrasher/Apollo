@@ -108,6 +108,32 @@ Migration {
 }, Migration {
     version: 6,
     sql: "
+        -- The Crate: songs set aside to remember, per account. Track fields only.
+        CREATE TABLE crate_items (
+            account_key TEXT    NOT NULL,
+            video_id    TEXT    NOT NULL,
+            title       TEXT    NOT NULL,
+            album_title TEXT,
+            album_id    TEXT,
+            duration_ms INTEGER,
+            thumbnail   TEXT,
+            added_ms    INTEGER NOT NULL,
+            PRIMARY KEY (account_key, video_id)
+        );
+        CREATE TABLE crate_artists (
+            account_key TEXT    NOT NULL,
+            video_id    TEXT    NOT NULL,
+            pos         INTEGER NOT NULL,
+            name        TEXT    NOT NULL,
+            browse_id   TEXT,
+            PRIMARY KEY (account_key, video_id, pos),
+            FOREIGN KEY (account_key, video_id)
+                REFERENCES crate_items (account_key, video_id) ON DELETE CASCADE
+        );
+    ",
+}, Migration {
+    version: 7,
+    sql: "
         -- One row per play that counted (the app decides when: about half a track or 30 s),
         -- for the local stats and Home's personal shelves. Nothing here leaves the machine.
         -- `artists` is the credited artists as JSON the app reads and writes; the store only

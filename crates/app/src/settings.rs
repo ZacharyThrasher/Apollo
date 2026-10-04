@@ -303,7 +303,7 @@ impl SqliteSettings {
         &self.path
     }
 
-    fn open(&self) -> Option<Store> {
+    pub(crate) fn open(&self) -> Option<Store> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).ok()?;
         }

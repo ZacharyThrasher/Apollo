@@ -1,0 +1,718 @@
+//! The Crate page: the songs set aside with C or "Add to Crate", newest first, in the same song
+//! rows as the other lists. A header row plays, shuffles, adds the whole crate to the queue or
+//! empties it (Clear asks first). Rows play from there with the crate as the queue; More opens
+//! the usual song menu (add to the queue or a playlist, start a radio, remove from the crate).
+//!
+//! The list is virtual and keyboard-first like the queue panel's: one tab stop, an arrow-key
+//! cursor, Enter plays, L likes, Delete removes.
+
+use std::ops::Range;
+use std::rc::Rc;
+
+use apollo_store::CrateRow;
+use apollo_theme::tokens::{layout, radius, spacing, typography};
+use apollo_theme::Accent;
+use gpui::{
+    actions, div, prelude::*, px, uniform_list, AnyElement, App, ClickEvent, Context, Entity,
+    FocusHandle, Focusable, IntoElement, KeyBinding, KeyboardButton, ParentElement, Render,
+    ScrollStrategy, SharedString, Styled, UniformListScrollHandle, Window,
+};
+
+use crate::assets::Icon;
+use crate::crate_list::CrateModel;
+use crate::library::LibraryWrites;
+use crate::player::{format_time, PlayerModel};
+use crate::style::{self, color};
+use crate::ui::art_tile::art_tile;
+use crate::ui::button::{focus_ring, keyboard_focused, Handler};
+use crate::ui::player_bar::text_line;
+use crate::ui::playing_row;
+use crate::ui::row_actions::{heart_action, more_slot, row_action, ACTION_SIZE};
+use crate::ui::text_button::TextButton;
+use crate::ui::track_menu::{self, Subject};
+
+actions!(
+    apollo_crate,
+    [CursorUp, CursorDown, PlayCursor, RemoveCursor, LikeCursor]
+);
+
+/// Key context of the list's focus handle.
+pub const KEY_CONTEXT: &str = "CrateList";
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("up", CursorUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("down", CursorDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("enter", PlayCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("delete", RemoveCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("backspace", RemoveCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
+    ]);
+}
+
+/// Same 56px rows as every other song list, with the focus ring's room around the content.
+const ROW_HEIGHT: f32 = 56.0;
+const ROW_INSET: f32 = spacing::S1;
+const ART: f32 = 40.0;
+const DURATION_WIDTH: f32 = spacing::S12;
+
+/// Tab order: after the nav rail (1-5), in the slots the Library page uses.
+const TAB_PLAY: isize = 6;
+const TAB_SHUFFLE: isize = 7;
+const TAB_ADD_ALL: isize = 8;
+const TAB_CLEAR: isize = 9;
+const TAB_LIST: isize = 10;
+const TAB_SEARCH: isize = 11;
+
+struct Focus {
+    play: FocusHandle,
+    shuffle: FocusHandle,
+    add_all: FocusHandle,
+    clear: FocusHandle,
+    confirm: FocusHandle,
+    cancel: FocusHandle,
+    list: FocusHandle,
+    search: FocusHandle,
+}
+
+/// Where the cursor lands after a removal: the next row, else the previous one.
+fn cursor_after_removal(ids: &[String], removed: &str) -> Option<String> {
+    let pos = ids.iter().position(|id| id == removed)?;
+    ids.get(pos + 1)
+        .or_else(|| pos.checked_sub(1).and_then(|p| ids.get(p)))
+        .cloned()
+}
+
+/// A header button wrapped so tests (and the layout) can find it by name.
+fn named(name: &'static str, button: TextButton) -> gpui::Div {
+    div().debug_selector(move || name.into()).child(button)
+}
+
+/// "1 song" / "12 songs".
+fn count_text(n: usize) -> SharedString {
+    if n == 1 {
+        "1 song".into()
+    } else {
+        format!("{n} songs").into()
+    }
+}
+
+pub struct CratePage {
+    crate_: Entity<CrateModel>,
+    player: Entity<PlayerModel>,
+    writes: Entity<LibraryWrites>,
+    focus: Focus,
+    scroll: UniformListScrollHandle,
+    /// The row the keyboard acts on (by video id), shown only while the list has focus.
+    cursor: Option<String>,
+    /// Clear was pressed and waits for a yes.
+    confirming: bool,
+    /// Copied at each render for the list's row callback.
+    rows: Vec<CrateRow>,
+    accent: Accent,
+    on_search: Rc<Handler>,
+}
+
+impl CratePage {
+    pub fn new(
+        crate_: Entity<CrateModel>,
+        player: Entity<PlayerModel>,
+        writes: Entity<LibraryWrites>,
+        on_search: impl Fn(&mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let stop = |cx: &mut Context<Self>, index: isize| {
+            cx.focus_handle().tab_index(index).tab_stop(true)
+        };
+        cx.observe(&crate_, |this, _, cx| {
+            if this.crate_.read(cx).is_empty() {
+                this.confirming = false;
+            }
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&player, |_, _, cx| cx.notify()).detach();
+        cx.observe(&writes, |_, _, cx| cx.notify()).detach();
+        let focus = Focus {
+            play: stop(cx, TAB_PLAY),
+            shuffle: stop(cx, TAB_SHUFFLE),
+            add_all: stop(cx, TAB_ADD_ALL),
+            clear: stop(cx, TAB_CLEAR),
+            // The confirmation takes the Clear button's place in the tab order.
+            confirm: stop(cx, TAB_CLEAR),
+            cancel: stop(cx, TAB_CLEAR),
+            list: stop(cx, TAB_LIST),
+            search: stop(cx, TAB_SEARCH),
+        };
+        Self {
+            crate_,
+            player,
+            writes,
+            focus,
+            scroll: UniformListScrollHandle::new(),
+            cursor: None,
+            confirming: false,
+            rows: Vec::new(),
+            accent: Accent::fallback(),
+            on_search: Rc::new(Box::new(on_search)),
+        }
+    }
+
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
+    }
+
+    pub fn confirming(&self) -> bool {
+        self.confirming
+    }
+
+    /// The page was left: a half-answered Clear is forgotten.
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.confirming = false;
+        self.cursor = None;
+        cx.notify();
+    }
+
+    // ---- commands ----------------------------------------------------------------------
+
+    /// Hand the player the covers the crate knows, so queued songs have art.
+    fn hint_covers(&self, cx: &mut Context<Self>) {
+        let rows: Vec<(String, Option<String>)> = self
+            .crate_
+            .read(cx)
+            .items()
+            .iter()
+            .map(|r| (r.track.video_id.as_str().to_owned(), r.thumbnail.clone()))
+            .collect();
+        self.player.update(cx, |p, _| {
+            for (video, thumbnail) in &rows {
+                p.hint_art(video, thumbnail.as_deref());
+            }
+        });
+    }
+
+    /// Play the crate from row `start`; the rest of it is the queue.
+    pub fn play_from(&mut self, start: usize, shuffle: Option<bool>, cx: &mut Context<Self>) {
+        let tracks = self.crate_.read(cx).tracks();
+        if tracks.is_empty() {
+            return;
+        }
+        self.hint_covers(cx);
+        let start = if shuffle == Some(true) { None } else { Some(start) };
+        self.player
+            .update(cx, |p, cx| p.play_tracks(tracks, start, shuffle, cx));
+    }
+
+    pub fn add_all_to_queue(&mut self, cx: &mut Context<Self>) {
+        let tracks = self.crate_.read(cx).tracks();
+        if tracks.is_empty() {
+            return;
+        }
+        self.hint_covers(cx);
+        self.player
+            .update(cx, |p, cx| p.add_tracks_to_queue(tracks, cx));
+    }
+
+    /// Clear was pressed: ask first.
+    pub fn ask_to_clear(&mut self, cx: &mut Context<Self>) {
+        if !self.crate_.read(cx).is_empty() {
+            self.confirming = true;
+            cx.notify();
+        }
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.confirming = false;
+        self.cursor = None;
+        self.crate_.update(cx, |m, cx| m.clear(cx));
+        cx.notify();
+    }
+
+    pub fn cancel_clear(&mut self, cx: &mut Context<Self>) {
+        self.confirming = false;
+        cx.notify();
+    }
+
+    fn ids(&self, cx: &App) -> Vec<String> {
+        self.crate_
+            .read(cx)
+            .items()
+            .iter()
+            .map(|r| r.track.video_id.as_str().to_owned())
+            .collect()
+    }
+
+    pub fn remove(&mut self, video: &str, cx: &mut Context<Self>) {
+        if self.cursor.as_deref() == Some(video) {
+            self.cursor = cursor_after_removal(&self.ids(cx), video);
+        }
+        self.crate_.update(cx, |m, cx| {
+            m.remove(video, cx);
+        });
+        cx.notify();
+    }
+
+    // ---- keyboard ----------------------------------------------------------------------
+
+    /// The cursor, or the row that is playing when the keyboard has not chosen one yet.
+    fn cursor_or_playing(&self, ids: &[String], cx: &App) -> Option<String> {
+        let playing = self.player.read(cx).current_video();
+        self.cursor
+            .clone()
+            .filter(|c| ids.contains(c))
+            .or_else(|| playing.filter(|p| ids.contains(p)))
+            .or_else(|| ids.first().cloned())
+    }
+
+    fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let ids = self.ids(cx);
+        if ids.is_empty() {
+            return;
+        }
+        let at = self
+            .cursor_or_playing(&ids, cx)
+            .and_then(|c| ids.iter().position(|id| *id == c))
+            .unwrap_or(0);
+        // The first press only shows the cursor.
+        let first = self.cursor.is_none();
+        let to = if first {
+            at
+        } else {
+            (at as isize + delta).clamp(0, ids.len() as isize - 1) as usize
+        };
+        self.cursor = Some(ids[to].clone());
+        self.scroll.scroll_to_item(to, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    fn cursor_index(&self, cx: &App) -> Option<usize> {
+        let cursor = self.cursor.as_deref()?;
+        self.ids(cx).iter().position(|id| id == cursor)
+    }
+
+    fn play_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(ix) = self.cursor_index(cx) else {
+            return;
+        };
+        self.activate(ix, cx);
+    }
+
+    /// A row was chosen: play it with the crate as the queue, or pause it if it is the one playing.
+    fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let playing = self.player.read(cx).current_video();
+        let Some(video) = self
+            .crate_
+            .read(cx)
+            .items()
+            .get(ix)
+            .map(|r| r.track.video_id.as_str().to_owned())
+        else {
+            return;
+        };
+        if playing.as_deref() == Some(video.as_str()) {
+            self.player.update(cx, |m, cx| m.toggle_play(cx));
+        } else {
+            self.play_from(ix, None, cx);
+        }
+    }
+
+    fn remove_cursor(&mut self, cx: &mut Context<Self>) {
+        if let Some(video) = self.cursor.clone() {
+            self.remove(&video, cx);
+        }
+    }
+
+    fn like_cursor(&mut self, cx: &mut Context<Self>) {
+        if let Some(video) = self.cursor.clone() {
+            self.writes.update(cx, |w, cx| w.toggle_like(&video, cx));
+        }
+    }
+
+    // ---- rows --------------------------------------------------------------------------
+
+    fn rows(
+        &mut self,
+        range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        // Artwork loads only for what is on screen.
+        let ids: Vec<String> = range
+            .clone()
+            .filter_map(|ix| self.rows.get(ix))
+            .map(|r| r.track.video_id.as_str().to_owned())
+            .collect();
+        if !ids.is_empty() {
+            self.player.update(cx, |m, cx| m.request_thumbs(ids, cx));
+        }
+        range.map(|ix| self.row(ix, window, cx)).collect()
+    }
+
+    fn row(&self, ix: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(row) = self.rows.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        let video: String = row.track.video_id.as_str().to_owned();
+        let playing = self.player.read(cx).current_video().as_deref() == Some(video.as_str());
+        let list_focused = self.focus.list.is_focused(window);
+        let at_cursor = list_focused && self.cursor.as_deref() == Some(video.as_str());
+        let ring = at_cursor && keyboard_focused(&self.focus.list, window);
+        let accent = color::accent(self.accent);
+        let selected = playing || at_cursor;
+        let group: SharedString = format!("crate-row-{ix}").into();
+        let thumb = self.player.read(cx).thumb(&video);
+        let liked = self.writes.read(cx).is_liked(&video);
+        let title: SharedString = row.track.title.clone().into();
+        let artists: SharedString = row
+            .track
+            .artists
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .into();
+        let duration: SharedString = row
+            .track
+            .duration
+            .map(|d| format_time(d.as_millis() as u64))
+            .unwrap_or_default()
+            .into();
+
+        // Room for every action is always reserved; they show on hover or under the cursor,
+        // and the heart stays once the song is liked.
+        let heart = div()
+            .debug_selector(move || format!("crate-like-{ix}"))
+            .flex_none()
+            .size(px(ACTION_SIZE))
+            .when(!(liked || at_cursor), |d| {
+                d.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
+            })
+            .child(heart_action(("crate-like", ix), liked, {
+                let (writes, video) = (self.writes.clone(), video.clone());
+                move |_, cx| writes.update(cx, |w, cx| w.toggle_like(&video, cx))
+            }));
+        let subject = Subject::track(row.track.clone(), row.thumbnail.clone());
+        let more = more_slot(format!("crate-more-{ix}"), true, subject.clone())
+            .when(!at_cursor, |d| {
+                d.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
+            });
+        let remove = div()
+            .debug_selector(move || format!("crate-remove-{ix}"))
+            .flex_none()
+            .size(px(ACTION_SIZE))
+            .when(!at_cursor, |d| {
+                d.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
+            })
+            .child(row_action(
+                ("crate-remove", ix),
+                Icon::Dismiss,
+                "Remove from Crate",
+                color::text_secondary(),
+                {
+                    let (page, video) = (cx.entity(), video.clone());
+                    move |window, cx| {
+                        page.update(cx, |p, cx| {
+                            window.focus(&p.focus.list, cx);
+                            p.remove(&video, cx);
+                        })
+                    }
+                },
+            ));
+
+        let surface = div()
+            .id(("crate-row", ix))
+            .debug_selector(move || format!("crate-row-{ix}"))
+            .group(group.clone())
+            .relative()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(spacing::S3))
+            .h(px(ROW_HEIGHT - 2.0 * ROW_INSET))
+            .px(px(spacing::S2))
+            .rounded(px(radius::SMALL))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(playing_row::tint()))
+            .hover(move |s| {
+                s.bg(if selected {
+                    playing_row::tint()
+                } else {
+                    color::state_hover()
+                })
+            })
+            .role(gpui::Role::ListItem)
+            .aria_label(title.clone())
+            .aria_selected(playing)
+            .on_click(cx.listener({
+                let video = video.clone();
+                move |this, event: &ClickEvent, window, cx| {
+                    // Space is the global play/pause key.
+                    if let ClickEvent::Keyboard(k) = event {
+                        if k.button == KeyboardButton::Space {
+                            return;
+                        }
+                    }
+                    window.focus(&this.focus.list, cx);
+                    this.cursor = Some(video.clone());
+                    this.activate(ix, cx);
+                    cx.notify();
+                }
+            }))
+            .when(playing, |d| d.child(playing_row::marker(accent)))
+            .child(art_tile(ART, thumb))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(text_line(
+                        "title",
+                        title.clone(),
+                        playing_row::title_style(typography::LIST_TITLE, playing),
+                        color::text_primary(),
+                        cx,
+                    ))
+                    .child(text_line(
+                        "artist",
+                        artists,
+                        typography::BODY,
+                        color::text_secondary(),
+                        cx,
+                    )),
+            )
+            .child(heart)
+            .child(
+                div()
+                    .w(px(DURATION_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .child(text_line(
+                        "duration",
+                        duration,
+                        typography::CAPTION,
+                        color::text_tertiary(),
+                        cx,
+                    )),
+            )
+            .child(more)
+            .child(remove)
+            .when(ring, |d| d.child(focus_ring(accent, radius::SMALL)));
+
+        let surface = track_menu::on_context_menu(surface, subject);
+        div()
+            .relative()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .flex_none()
+            .py(px(ROW_INSET))
+            .child(surface)
+            .into_any_element()
+    }
+
+    // ---- page --------------------------------------------------------------------------
+
+    fn header(&self, count: usize, accent: Accent, cx: &mut Context<Self>) -> AnyElement {
+        let page = cx.entity();
+        let has_rows = count > 0;
+        let buttons = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(spacing::S2))
+            .mt(px(spacing::S3))
+            .child(named(
+                "crate-play",
+                TextButton::new("crate-play", &self.focus.play, "Play", accent)
+                    .primary()
+                    .enabled(has_rows)
+                    .on_click({
+                        let page = page.clone();
+                        move |_, cx| page.update(cx, |p, cx| p.play_from(0, None, cx))
+                    }),
+            ))
+            .child(named(
+                "crate-shuffle",
+                TextButton::new("crate-shuffle", &self.focus.shuffle, "Shuffle", accent)
+                    .enabled(has_rows)
+                    .on_click({
+                        let page = page.clone();
+                        move |_, cx| page.update(cx, |p, cx| p.play_from(0, Some(true), cx))
+                    }),
+            ))
+            .child(named(
+                "crate-add-all",
+                TextButton::new(
+                    "crate-add-all",
+                    &self.focus.add_all,
+                    "Add all to queue",
+                    accent,
+                )
+                .enabled(has_rows)
+                .on_click({
+                    let page = page.clone();
+                    move |_, cx| page.update(cx, |p, cx| p.add_all_to_queue(cx))
+                }),
+            ))
+            .map(|row| {
+                if self.confirming {
+                    // Clear asks first: the button turns into the question and its two answers.
+                    row.child(
+                        style::text_style(div(), typography::BODY, cx)
+                            .ml(px(spacing::S2))
+                            .text_color(color::text_secondary())
+                            .child(format!("Clear {}?", count_text(count))),
+                    )
+                    .child(named(
+                        "crate-clear-yes",
+                        TextButton::new("crate-clear-yes", &self.focus.confirm, "Clear", accent)
+                            .strong()
+                            .on_click({
+                                let page = page.clone();
+                                move |_, cx| page.update(cx, |p, cx| p.clear(cx))
+                            }),
+                    ))
+                    .child(named(
+                        "crate-clear-no",
+                        TextButton::new("crate-clear-no", &self.focus.cancel, "Cancel", accent)
+                            .on_click({
+                                let page = page.clone();
+                                move |_, cx| page.update(cx, |p, cx| p.cancel_clear(cx))
+                            }),
+                    ))
+                } else {
+                    row.child(named(
+                        "crate-clear",
+                        TextButton::new("crate-clear", &self.focus.clear, "Clear", accent)
+                            .enabled(has_rows)
+                            .on_click({
+                                let page = page.clone();
+                                move |_, cx| page.update(cx, |p, cx| p.ask_to_clear(cx))
+                            }),
+                    ))
+                }
+            });
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .child(
+                style::text_style(div(), typography::PAGE_TITLE, cx)
+                    .text_color(color::text_primary())
+                    .child("Crate"),
+            )
+            .child(
+                style::text_style(div(), typography::BODY, cx)
+                    .id("crate-count")
+                    // A non-breaking space keeps the line's height while the crate is empty.
+                    .text_color(color::text_tertiary())
+                    .child(if has_rows {
+                        count_text(count)
+                    } else {
+                        "\u{a0}".into()
+                    }),
+            )
+            .child(buttons)
+            .into_any_element()
+    }
+
+    fn empty(&self, accent: Accent, cx: &mut Context<Self>) -> AnyElement {
+        let on_search = self.on_search.clone();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(spacing::S2))
+            .h(px(layout::MIN_HIT_TARGET))
+            .child(
+                style::text_style(div(), typography::BODY, cx)
+                    .text_color(color::text_secondary())
+                    .child("Nothing set aside yet"),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "crate-search".into())
+                    .child(
+                        TextButton::new("crate-search", &self.focus.search, "Search", accent)
+                            .on_click(move |window, cx| on_search(window, cx)),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+impl Focusable for CratePage {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.list.clone()
+    }
+}
+
+impl Render for CratePage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.accent = self.player.read(cx).view().accent;
+        self.rows = self.crate_.read(cx).items().to_vec();
+        let accent = self.accent;
+        let count = self.rows.len();
+
+        let header = self.header(count, accent, cx);
+        let body: AnyElement = if count == 0 {
+            self.empty(accent, cx)
+        } else {
+            div()
+                .id("crate-list")
+                .key_context(KEY_CONTEXT)
+                .track_focus(&self.focus.list)
+                .role(gpui::Role::List)
+                .aria_label("Crate")
+                .on_action(cx.listener(|this, _: &CursorUp, _, cx| this.step(-1, cx)))
+                .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.step(1, cx)))
+                .on_action(cx.listener(|this, _: &PlayCursor, _, cx| this.play_cursor(cx)))
+                .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
+                .on_action(cx.listener(|this, _: &LikeCursor, _, cx| this.like_cursor(cx)))
+                .size_full()
+                .child(
+                    uniform_list(
+                        "crate-rows",
+                        count,
+                        cx.processor(|this, range: Range<usize>, window, cx| {
+                            this.rows(range, window, cx)
+                        }),
+                    )
+                    .track_scroll(&self.scroll)
+                    .size_full(),
+                )
+                .into_any_element()
+        };
+
+        div()
+            .id("crate-page")
+            .debug_selector(|| "crate-page".into())
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_h_0()
+            .child(header)
+            .child(div().flex_1().min_h_0().mt(px(spacing::S4)).child(body))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn after_a_removal_the_cursor_takes_the_next_row_else_the_previous() {
+        let ids: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        assert_eq!(cursor_after_removal(&ids, "b").as_deref(), Some("c"));
+        assert_eq!(cursor_after_removal(&ids, "c").as_deref(), Some("b"));
+        assert_eq!(cursor_after_removal(&["a".to_owned()], "a"), None);
+        assert_eq!(cursor_after_removal(&ids, "z"), None);
+    }
+
+    #[test]
+    fn the_count_reads_naturally() {
+        assert_eq!(count_text(1), "1 song");
+        assert_eq!(count_text(12), "12 songs");
+    }
+}

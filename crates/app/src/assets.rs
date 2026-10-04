@@ -81,6 +81,8 @@ icons! {
     ArrowMaximize => "arrow-maximize-regular",
     MoonRegular => "weather-moon-regular",
     MoonFilled => "weather-moon-filled",
+    BoxRegular => "box-regular",
+    BoxFilled => "box-filled",
 }
 
 pub struct Assets;

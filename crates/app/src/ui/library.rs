@@ -70,6 +70,7 @@ actions!(
         ListLast,
         ListActivate,
         LikeRow,
+        CrateRow,
         AddRowToPlaylist,
         Back
     ]
@@ -90,6 +91,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", ListLast, Some(LIST_CONTEXT)),
         KeyBinding::new("enter", ListActivate, Some(LIST_CONTEXT)),
         KeyBinding::new("l", LikeRow, Some(LIST_CONTEXT)),
+        KeyBinding::new("c", CrateRow, Some(LIST_CONTEXT)),
         KeyBinding::new("p", AddRowToPlaylist, Some(LIST_CONTEXT)),
         KeyBinding::new("alt-left", Back, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Back, Some(KEY_CONTEXT)),
@@ -1038,6 +1040,11 @@ impl LibraryView {
                 this.writes.update(cx, |w, cx| w.toggle_like(&video, cx));
             }
         }))
+        .on_action(cx.listener(|this, _: &CrateRow, _, cx| {
+            if let Some((track, thumbnail)) = this.selected_full_track(cx) {
+                crate::crate_list::add_track(&this.player, track, thumbnail, cx);
+            }
+        }))
         .on_action(cx.listener(|this, _: &AddRowToPlaylist, window, cx| {
             if let Some((video, title)) = this.selected_track(cx) {
                 let at = playlist_anchor(this.selected);
@@ -1045,6 +1052,20 @@ impl LibraryView {
                     .update(cx, |p, cx| p.open_at(&video, title, &at, window, cx));
             }
         }))
+    }
+
+    /// The track row the keyboard is on, whole (none in the lists of playlists and albums).
+    fn selected_full_track(&self, cx: &App) -> Option<(Track, Option<String>)> {
+        let model = self.model.read(cx);
+        let row = if let Some(artist) = model.artist() {
+            artist.content()?.top_songs.get(self.selected)?.clone()
+        } else if self.history_open(cx) {
+            model.history_at(self.selected)?
+        } else {
+            let real = self.visible(cx).get(self.selected)?;
+            model.detail()?.listing.items().get(real)?.clone()
+        };
+        Some((row.track, row.thumbnail))
     }
 
     /// The video id and title of the track row the keyboard is on (none in the lists of

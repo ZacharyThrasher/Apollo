@@ -156,6 +156,8 @@ pub enum Command {
     GoToAlbum,
     CopyLink,
     RemoveFromQueue,
+    AddToCrate,
+    RemoveFromCrate,
     SaveToLibrary,
     RemoveFromLibrary,
     Rename,
@@ -195,6 +197,8 @@ pub struct Facts {
     pub own_playlist: bool,
     /// Whether the library holds the album or playlist; `None` where saving does not apply.
     pub saved: Option<bool>,
+    /// Whether the song is in the Crate (its item then takes it out).
+    pub in_crate: bool,
 }
 
 /// The menu's items in groups (a separator sits between groups). `liked` is the song's heart.
@@ -247,6 +251,11 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                 vec![
                     item(Command::StartRadio, Icon::Radio, "Start radio"),
                     item(Command::AddToPlaylist, Icon::PlaylistAdd, "Add to playlist\u{2026}"),
+                    if facts.in_crate {
+                        item(Command::RemoveFromCrate, Icon::BoxFilled, "Remove from Crate")
+                    } else {
+                        item(Command::AddToCrate, Icon::BoxRegular, "Add to Crate")
+                    },
                 ],
                 vec![if liked {
                     item(Command::ToggleLike, Icon::HeartFilled, "Remove from Liked")
@@ -510,7 +519,11 @@ impl TrackMenu {
         let (liked, facts) = match &open.subject {
             Subject::Track(t) => (
                 self.writes.read(cx).is_liked(t.track.video_id.as_str()),
-                Facts::default(),
+                Facts {
+                    in_crate: crate::crate_list::handle(cx)
+                        .is_some_and(|c| c.read(cx).contains(t.track.video_id.as_str())),
+                    ..Facts::default()
+                },
             ),
             Subject::Collection(c) => {
                 let edits = self.edits.read(cx);
@@ -519,6 +532,7 @@ impl TrackMenu {
                     Facts {
                         own_playlist: edits.is_editable(c),
                         saved: edits.saved_state(c),
+                        ..Facts::default()
                     },
                 )
             }
@@ -728,6 +742,16 @@ impl TrackMenu {
             }
             (Command::CopyLink, subject) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(link_of(&subject)));
+            }
+            (Command::AddToCrate, Subject::Track(t)) => {
+                crate::crate_list::add_track(&self.player, t.track, t.thumbnail, cx);
+            }
+            (Command::RemoveFromCrate, Subject::Track(t)) => {
+                if let Some(model) = crate::crate_list::handle(cx) {
+                    model.update(cx, |m, cx| {
+                        m.remove(t.track.video_id.as_str(), cx);
+                    });
+                }
             }
             (Command::RemoveFromQueue, Subject::Track(t)) => {
                 if let Some(entry) = t.entry {
@@ -1000,7 +1024,7 @@ mod tests {
             commands(&subject, false),
             vec![
                 vec![PlayNext, AddToQueue],
-                vec![StartRadio, AddToPlaylist],
+                vec![StartRadio, AddToPlaylist, AddToCrate],
                 vec![ToggleLike],
                 vec![GoToArtist, GoToAlbum],
                 vec![CopyLink],
@@ -1088,6 +1112,7 @@ mod tests {
         let own = Facts {
             own_playlist: true,
             saved: None,
+            ..Facts::default()
         };
         assert_eq!(
             commands_with(&card(), own),
@@ -1106,6 +1131,7 @@ mod tests {
         let saved = |saved| Facts {
             own_playlist: false,
             saved: Some(saved),
+            ..Facts::default()
         };
         assert_eq!(
             commands_with(&card(), saved(false))[2],

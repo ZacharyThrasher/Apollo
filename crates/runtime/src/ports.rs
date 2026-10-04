@@ -186,6 +186,12 @@ impl<R: Resolver, M: MediaEngine> Driver<R, M> {
         self.run(effects);
     }
 
+    /// Swap in another queue (undo/redo); see `Coordinator::replace_queue`.
+    pub fn replace_queue(&mut self, queue: Queue, position_ms: u64) {
+        let effects = self.coordinator.replace_queue(queue, position_ms);
+        self.run(effects);
+    }
+
     fn run(&mut self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {

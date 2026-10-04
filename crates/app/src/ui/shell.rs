@@ -11,10 +11,12 @@ use gpui::{
 };
 
 use crate::account::AccountModel;
+use crate::crate_list::{CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
-    LikeCurrent, SeekBack, SeekForward, ToggleFullscreen, ToggleLyrics, ToggleMute, VolumeDown,
+    CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward, ToggleFullscreen, ToggleLyrics,
+    ToggleMute, UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
 };
 use crate::library::{LibraryEdits, LibraryWrites, Notice, Target};
@@ -29,6 +31,7 @@ use crate::settings::{SettingsModel, PERSONAL_SHELVES};
 use crate::settings::{LibrarySortStore, LyricsOpenStore, RelatedOpenStore};
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
+use crate::ui::crate_page::{self, CratePage};
 use crate::ui::explore_page::{self, ExploreView};
 use crate::ui::home_page::{self, HomeView};
 use crate::ui::library::{self, LibraryView};
@@ -92,6 +95,7 @@ pub fn bind_keys(cx: &mut App) {
     library::bind_keys(cx);
     home_page::bind_keys(cx);
     explore_page::bind_keys(cx);
+    crate_page::bind_keys(cx);
     playlist_picker::bind_keys(cx);
     track_menu::bind_keys(cx);
     playlist_dialog::bind_keys(cx);
@@ -104,6 +108,14 @@ pub fn bind_keys(cx: &mut App) {
 #[derive(Clone)]
 struct ToastShown {
     notice: Notice,
+    leaving: bool,
+}
+
+/// The undo pill on screen, possibly on its way out.
+#[derive(Clone)]
+struct PillShown {
+    id: u64,
+    text: gpui::SharedString,
     leaving: bool,
 }
 
@@ -144,6 +156,12 @@ pub struct Shell {
     library_usable: bool,
     /// An account was signed in since the shell started: signing out then forgets its recents.
     search_account_live: bool,
+    /// The Crate: songs set aside, and the page that lists them.
+    crate_model: Entity<CrateModel>,
+    crate_page: Entity<CratePage>,
+    /// "Queue restored", after Ctrl+Z / Ctrl+Shift+Z.
+    pill: Option<PillShown>,
+    pill_seq: u64,
     /// The first time the account turns out to be signed out, the window opens on Settings.
     routed_to_sign_in: bool,
     /// Keeps the window-activation hook that dismisses tooltips alive.
@@ -168,7 +186,7 @@ pub struct Shell {
     search_model: Entity<SearchModel>,
     thumbs: Entity<ThumbStore>,
     nav_toggle: FocusHandle,
-    nav_items: [FocusHandle; 5],
+    nav_items: [FocusHandle; 6],
     bar: BarFocus,
     progress: Entity<SliderState>,
     volume: Entity<SliderState>,
@@ -213,6 +231,8 @@ impl Shell {
             stop(cx, 3),
             stop(cx, 3),
             stop(cx, 4),
+            // The Crate sits under Library and shares its index.
+            stop(cx, 4),
             stop(cx, 5),
         ];
         // Nav 1-5, Now Playing 6-12, queue panel 13-17, then the player bar.
@@ -245,6 +265,23 @@ impl Shell {
         cx.set_global(DialogHandle(dialog.clone()));
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         cx.observe(&picker, |_, _, cx| cx.notify()).detach();
+        let crate_model = cx.new(|_| CrateModel::new());
+        cx.observe(&crate_model, |_, _, cx| cx.notify()).detach();
+        cx.set_global(CrateHandle(crate_model.clone()));
+        let crate_page = cx.new(|cx| {
+            CratePage::new(
+                crate_model.clone(),
+                player.clone(),
+                writes.clone(),
+                {
+                    let weak = weak.clone();
+                    move |window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.open_search(window, cx));
+                    }
+                },
+                cx,
+            )
+        });
         let menu = cx.new(|cx| {
             TrackMenu::new(
                 player.clone(),
@@ -492,6 +529,10 @@ impl Shell {
             library_epoch: 0,
             library_usable: false,
             search_account_live: false,
+            crate_model,
+            crate_page,
+            pill: None,
+            pill_seq: 0,
             routed_to_sign_in: false,
             _activation: None,
             _remembered: None,
@@ -542,6 +583,9 @@ impl Shell {
         if epoch != self.library_epoch || became_usable {
             self.library_epoch = epoch;
             self.detail_origin = None;
+            // What the old account could undo does not carry over.
+            self.player.update(cx, |p, _| p.clear_queue_history());
+            self.crate_page.update(cx, |p, cx| p.reset(cx));
             self.library.update(cx, |l, cx| l.reset(cx));
             // Likes and the open picker belong to the old account.
             self.writes.update(cx, |w, cx| w.reset(cx));
@@ -550,6 +594,11 @@ impl Shell {
             self.edits.update(cx, |e, cx| e.reset(cx));
             self.dialog.update(cx, |d, cx| d.reset(cx));
             self.sleep_menu.update(cx, |m, cx| m.reset(cx));
+        }
+        // The Crate belongs to the chosen account (a moment without one keeps what shows).
+        if let Some(key) = self.account_key(cx) {
+            self.crate_model
+                .update(cx, |m, cx| m.set_account(Some(key), cx));
         }
         let model = self.account.read(cx);
         let (signed_out, by_choice) = (model.is_signed_out(), model.is_signed_out_by_choice());
@@ -598,6 +647,7 @@ impl Shell {
             "nav-explore",
             "nav-search",
             "nav-library",
+            "nav-crate",
             "nav-settings",
         ]
         .into_iter()
@@ -925,6 +975,99 @@ impl Shell {
         }
     }
 
+    /// The C key: set the playing song aside in the Crate (a song already there stays).
+    fn crate_current(&mut self, cx: &mut Context<Self>) {
+        let track = self
+            .player
+            .read(cx)
+            .coordinator()
+            .and_then(|c| c.queue().current().map(|e| e.track.clone()));
+        if let Some(track) = track {
+            crate::crate_list::add_track(&self.player, track, None, cx);
+        }
+    }
+
+    pub fn crate_model(&self) -> &Entity<CrateModel> {
+        &self.crate_model
+    }
+
+    pub fn crate_page(&self) -> &Entity<CratePage> {
+        &self.crate_page
+    }
+
+    /// Where the Crate is kept between runs.
+    pub fn install_crate_store(
+        &mut self,
+        store: Option<Arc<dyn crate::crate_list::CrateStore>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.crate_model.update(cx, |m, cx| m.install(store, cx));
+    }
+
+    /// The opaque id of the signed-in account, once it is chosen.
+    fn account_key(&self, cx: &App) -> Option<String> {
+        match self.account.read(cx).service().view().identity {
+            apollo_account::service::IdentityState::Selected(identity) => Some(identity.key()),
+            _ => None,
+        }
+    }
+
+    /// Ctrl+Z: take back the last queue change.
+    pub fn undo_queue(&mut self, cx: &mut Context<Self>) {
+        if self.player.update(cx, |p, cx| p.undo_queue(cx)) {
+            self.show_pill("Queue restored", cx);
+        }
+    }
+
+    /// Ctrl+Shift+Z: do again what Ctrl+Z took back.
+    pub fn redo_queue(&mut self, cx: &mut Context<Self>) {
+        if self.player.update(cx, |p, cx| p.redo_queue(cx)) {
+            self.show_pill("Queue redone", cx);
+        }
+    }
+
+    /// The text of the undo pill while it shows.
+    pub fn pill_text(&self) -> Option<String> {
+        self.pill.as_ref().map(|p| p.text.to_string())
+    }
+
+    /// Show `text` in the pill for [`toast::PILL_FOR`], fading out over the last bit (not at
+    /// all under reduced motion).
+    fn show_pill(&mut self, text: &'static str, cx: &mut Context<Self>) {
+        self.pill_seq += 1;
+        let id = self.pill_seq;
+        self.pill = Some(PillShown {
+            id,
+            text: text.into(),
+            leaving: false,
+        });
+        let animate = !cx.reduce_motion();
+        cx.spawn(async move |this, cx| {
+            if animate {
+                cx.background_executor()
+                    .timer(toast::PILL_FOR.saturating_sub(toast::FADE))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(p) = this.pill.as_mut().filter(|p| p.id == id) {
+                        p.leaving = true;
+                        cx.notify();
+                    }
+                });
+                cx.background_executor().timer(toast::FADE).await;
+            } else {
+                cx.background_executor().timer(toast::PILL_FOR).await;
+            }
+            let _ = this.update(cx, |this, cx| {
+                if this.pill.as_ref().is_some_and(|p| p.id == id) {
+                    this.pill = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub fn toggle_queue(&mut self, cx: &mut Context<Self>) {
         if self.lyrics_showing(cx) || self.related_showing(cx) {
             // The queue asked for the side the lyrics or related songs are on: they give way.
@@ -1157,6 +1300,7 @@ impl Render for Shell {
                 });
             }
         })
+        .crate_count(self.crate_model.read(cx).len())
         .attention(self.account.read(cx).attention())
         .on_route({
             let shell = shell.clone();
@@ -1168,6 +1312,10 @@ impl Render for Shell {
         let page = div().id("page").flex_1().min_w_0().h_full();
         let page = if self.now_playing_open {
             page.child(self.now_playing.clone())
+        } else if self.route == Route::Crate {
+            page.px(px(spacing::S8))
+                .pt(px(spacing::S6))
+                .child(self.crate_page.clone())
         } else if self.route == Route::Library {
             // The library's lists scroll themselves (virtualized), so the page does not.
             page.px(px(spacing::S8))
@@ -1293,6 +1441,15 @@ impl Render for Shell {
                 cx,
             )
         });
+        let pill = self.pill.clone().map(|p| {
+            toast::pill(
+                p.id,
+                p.text,
+                if p.leaving { Fade::Out } else { Fade::In },
+                animate,
+                cx,
+            )
+        });
         let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
         let menu = self.menu.read(cx).is_open().then(|| self.menu.clone());
         let dialog = self.dialog.read(cx).is_open().then(|| self.dialog.clone());
@@ -1352,6 +1509,9 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_lyrics(cx)))
             .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| this.like_current(cx)))
+            .on_action(cx.listener(|this, _: &CrateCurrent, _, cx| this.crate_current(cx)))
+            .on_action(cx.listener(|this, _: &UndoQueue, _, cx| this.undo_queue(cx)))
+            .on_action(cx.listener(|this, _: &RedoQueue, _, cx| this.redo_queue(cx)))
             .on_action(cx.listener(|_, _: &FocusNextControl, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &FocusPreviousControl, window, cx| window.focus_prev(cx)))
             .on_action(
@@ -1379,6 +1539,7 @@ impl Render for Shell {
             )
             .child(bar)
             .children(toast)
+            .children(pill)
             .children(picker)
             .children(menu)
             .children(dialog)
