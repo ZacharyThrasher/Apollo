@@ -39,7 +39,7 @@ use crate::style::{self, color};
 use crate::ui::anchor;
 use crate::ui::art_tile::art_tile_shaped;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
-use crate::ui::card::{grid, heading, Card};
+use crate::ui::card::{heading, Card};
 use crate::ui::playing_row;
 use crate::ui::playlist_dialog::{self, Mode};
 use crate::ui::playlist_picker::PlaylistPicker;
@@ -50,6 +50,8 @@ use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{TextField, TextFieldEvent};
 use crate::ui::tooltip::Tooltip;
 use filter::Visible;
+
+mod artist;
 
 /// Where the add-to-playlist popover of track row `ix` is anchored.
 fn playlist_anchor(ix: usize) -> String {
@@ -134,6 +136,11 @@ struct Focus {
     retry: FocusHandle,
     /// The Playlists tab's New playlist button.
     new_playlist: FocusHandle,
+    /// The artist page's Radio and Subscribe buttons, "Show all" and the bio.
+    radio: FocusHandle,
+    subscribe: FocusHandle,
+    show_all: FocusHandle,
+    bio: FocusHandle,
 }
 
 /// 120 ms hover fades for list rows: only rows that are hovered or still fading keep an entry.
@@ -179,6 +186,10 @@ struct PageScroll {
     list: UniformListScrollHandle,
     /// An artist page's scrolling column.
     column: ScrollHandle,
+    /// One per card shelf of an artist page, scrolling sideways.
+    shelves: Vec<ScrollHandle>,
+    /// The card that last took keyboard focus and was scrolled into view.
+    scrolled_to: Option<usize>,
     /// A playlist or album's filter field, made when the page first has rows to filter.
     filter: Option<Entity<TextField>>,
 }
@@ -188,6 +199,8 @@ impl PageScroll {
         Self {
             list: UniformListScrollHandle::new(),
             column: ScrollHandle::new(),
+            shelves: Vec::new(),
+            scrolled_to: None,
             filter: None,
         }
     }
@@ -299,6 +312,11 @@ impl LibraryView {
             list: stop(cx, 9),
             retry: stop(cx, 10),
             new_playlist: stop(cx, 8),
+            // Same slot as Shuffle (they follow it in the tree), then the list's, then the cards'.
+            radio: stop(cx, 8),
+            subscribe: stop(cx, 8),
+            show_all: stop(cx, 9),
+            bio: stop(cx, 10),
         };
         let model = cx.new(|cx| LibraryModel::new(player.clone(), writes.clone(), edits.clone(), cx));
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
@@ -590,9 +608,9 @@ impl LibraryView {
         }
         self.selected = target.clamp(0, rows as isize - 1) as usize;
         if self.model.read(cx).artist().is_some() {
-            // The top songs follow the artist page's "Top songs" heading (child 0).
+            // The top songs follow the banner, the buttons and the "Top songs" heading.
             if let Some(page) = self.pages.last() {
-                page.column.scroll_to_item(self.selected + 1);
+                page.column.scroll_to_item(self.selected + artist::SONGS_OFFSET);
             }
         } else if self.history_open(cx) {
             let child = match self.model.read(cx).history() {
@@ -1396,270 +1414,6 @@ impl LibraryView {
             .min_h_0()
             .child(header)
             .child(div().flex_1().min_h_0().mt(px(spacing::S4)).child(body))
-            .into_any_element()
-    }
-
-    // ---- artist --------------------------------------------------------------------------
-
-    fn render_artist(
-        &mut self,
-        accent: Accent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let animations = !cx.reduce_motion();
-        let (name, thumbnail, state, pending) = {
-            let a: &ArtistDetail = self.model.read(cx).artist().expect("artist page is open");
-            (
-                SharedString::from(a.name().to_owned()),
-                a.thumbnail().map(str::to_owned),
-                a.state.clone(),
-                a.pending,
-            )
-        };
-        let (can_play, loading) = match &state {
-            Load::Idle | Load::Loading => (false, true),
-            Load::Ready(c) => (!c.top_songs.is_empty(), false),
-            Load::Failed(_) => (false, false),
-        };
-        let art = self.art_tile_shaped(
-            thumbnail.as_deref(),
-            ArtSize::Header,
-            HEADER_ART,
-            Icon::MusicNote,
-            color::text_tertiary(),
-            true,
-            cx,
-        );
-        let play_busy = pending.is_some_and(|p| p.shuffle != Some(true));
-        let shuffle_busy = pending.is_some_and(|p| p.shuffle == Some(true));
-        let model = self.model.clone();
-        let model2 = self.model.clone();
-        let this = cx.entity();
-
-        let header = div()
-            .flex()
-            .flex_row()
-            .flex_none()
-            .items_center()
-            .gap(px(spacing::S4))
-            .child(
-                IconButton::new(
-                    "library-back",
-                    &self.focus.back,
-                    Icon::ArrowLeft,
-                    "Back",
-                    accent,
-                )
-                .on_click({
-                    let this = this.clone();
-                    move |window, cx| this.update(cx, |t, cx| t.back(window, cx))
-                }),
-            )
-            .child(art)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(spacing::S1))
-                    .child(Self::line(
-                        "artist-name",
-                        name,
-                        typography::PAGE_TITLE,
-                        color::text_primary(),
-                        false,
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(spacing::S2))
-                            .mt(px(spacing::S2))
-                            .child(
-                                TextButton::new("library-play", &self.focus.play, "Play", accent)
-                                    .primary()
-                                    .enabled(can_play || loading)
-                                    .busy(play_busy)
-                                    .on_click(move |_, cx| {
-                                        model.update(cx, |m, cx| {
-                                            m.request_play(PlayRequest::PLAY_ALL, cx)
-                                        })
-                                    }),
-                            )
-                            .child(
-                                TextButton::new(
-                                    "library-shuffle",
-                                    &self.focus.shuffle,
-                                    "Shuffle",
-                                    accent,
-                                )
-                                .enabled(can_play || loading)
-                                .busy(shuffle_busy)
-                                .on_click(move |_, cx| {
-                                    model2.update(cx, |m, cx| {
-                                        m.request_play(PlayRequest::SHUFFLE, cx)
-                                    })
-                                }),
-                            ),
-                    ),
-            );
-
-        let body: AnyElement = match state {
-            Load::Idle | Load::Loading => {
-                Self::skeleton_rows(ARTIST_SKELETON_ROWS, TRACK_ROW, TRACK_ART, animations)
-            }
-            Load::Failed(failure) => {
-                let model = self.model.clone();
-                self.notice(
-                    Self::failure_line(failure, "this artist"),
-                    true,
-                    "Retry",
-                    accent,
-                    move |_, cx| model.update(cx, |m, cx| m.reload_artist(cx)),
-                    cx,
-                )
-            }
-            Load::Ready(content) if content.is_empty() => self.notice(
-                "Nothing to show",
-                false,
-                "Back",
-                accent,
-                move |window, cx| this.update(cx, |t, cx| t.back(window, cx)),
-                cx,
-            ),
-            Load::Ready(content) => self.artist_columns(&content, accent, window, cx),
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .min_h_0()
-            .child(header)
-            .child(div().flex_1().min_h_0().mt(px(spacing::S4)).child(body))
-            .into_any_element()
-    }
-
-    /// The artist's scrolling body: top songs as rows, then each album/single/playlist section
-    /// as a wrapping grid of cards.
-    fn artist_columns(
-        &mut self,
-        content: &ArtistContent,
-        accent: Accent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let animations = !cx.reduce_motion();
-        let cards: usize = content.sections.iter().map(|s| s.items.len()).sum();
-        while self.card_focus.len() < cards {
-            self.card_focus
-                .push(cx.focus_handle().tab_index(10).tab_stop(true));
-        }
-        let column = self
-            .pages
-            .last()
-            .map(|p| p.column.clone())
-            .unwrap_or_default();
-
-        // Direct children of the scroll container are what keyboard selection scrolls to: the
-        // "Top songs" heading is child 0, then one child per song.
-        let mut children: Vec<AnyElement> = Vec::new();
-        let songs = content.top_songs.len();
-        if songs > 0 {
-            children.push(heading("Top songs", false, cx));
-            let list_focused = keyboard_focused(&self.focus.list, window);
-            self.hover.prune();
-            let mut moving = false;
-            for ix in 0..songs {
-                let frame = RowFrame {
-                    ix,
-                    real: ix,
-                    level: self.hover.level(ix, &mut moving),
-                    selected: list_focused && ix == self.selected,
-                    accent,
-                    animations,
-                };
-                children.push(self.track_row(frame, window, cx));
-            }
-            if moving {
-                window.request_animation_frame();
-            }
-            self.rendered = 0..songs;
-        }
-
-        let this = cx.entity();
-        let mut stop = 0;
-        for (section_ix, section) in content.sections.iter().enumerate() {
-            children.push(heading(section.title.clone(), !children.is_empty(), cx));
-            let mut cards = Vec::with_capacity(section.items.len());
-            for (ix, item) in section.items.iter().enumerate() {
-                if let Some(url) = item.thumbnail.as_deref() {
-                    if !self.model.read(cx).art_requested(url, ArtSize::Card) {
-                        let url = url.to_owned();
-                        self.model
-                            .update(cx, |m, cx| m.want_art(&url, ArtSize::Card, cx));
-                    }
-                }
-                let thumb = self
-                    .model
-                    .read(cx)
-                    .thumb(item.thumbnail.as_deref(), ArtSize::Card);
-                let (this, item_open) = (this.clone(), item.clone());
-                cards.push(
-                    Card::new(
-                        format!("artist-card-{section_ix}-{ix}"),
-                        item.title.clone(),
-                        item.subtitle.clone().map(Into::into),
-                        thumb,
-                        &self.card_focus[stop],
-                        accent,
-                        move |window, cx| {
-                            this.update(cx, |t, cx| t.open(item_open.clone(), window, cx))
-                        },
-                    )
-                    .menu(Subject::Collection(item.clone())),
-                );
-                stop += 1;
-            }
-            children.push(grid().children(cards).into_any_element());
-        }
-        if content.skipped > 0 {
-            children.push(
-                style::text_style(div(), typography::BODY, cx)
-                    .mt(px(spacing::S4))
-                    .text_color(color::text_secondary())
-                    .child(if content.skipped == 1 {
-                        SharedString::from("1 item can't be shown")
-                    } else {
-                        format!("{} items can't be shown", content.skipped).into()
-                    })
-                    .into_any_element(),
-            );
-        }
-
-        let list = div()
-            .id("artist-page")
-            .key_context(LIST_CONTEXT)
-            .track_focus(&self.focus.list)
-            .role(gpui::Role::List)
-            .aria_label("Artist")
-            .size_full()
-            .min_h_0();
-        Self::list_actions(list, cx)
-            .child(
-                div()
-                    .id("artist-scroll")
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .track_scroll(&column)
-                    .pb(px(spacing::S6))
-                    .children(children),
-            )
             .into_any_element()
     }
 

@@ -2,8 +2,9 @@
 //!
 //! Vendored from Limusic and trimmed (see NOTICE.md). Differences that matter:
 //! no session "healer" (a 401/403 is surfaced as [`Error::SessionExpired`] and the account layer
-//! decides what it means), no blocklist or hide-video filters, no playback-tracking or upload
-//! calls, and `Session` never prints its cookie.
+//! decides what it means), no blocklist or hide-video filters, no upload calls, play reporting only through
+//! [`InnerTube::send_tracking_ping`] (https YouTube hosts only, one attempt), and `Session`
+//! never prints its cookie.
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -20,12 +21,6 @@ pub const BASE_URL: &str = "https://music.youtube.com/youtubei/v1/";
 pub const ORIGIN: &str = "https://music.youtube.com";
 pub const REFERER: &str = "https://music.youtube.com/";
 pub const SW_JS_DATA_URL: &str = "https://music.youtube.com/sw.js_data";
-
-/// Whether a failed attempt is sent again: only a transient error, and only while attempts remain.
-/// A write that must not repeat has one attempt in all, so it is never sent again.
-fn may_retry(attempt: u32, max_attempts: u32, transient: bool) -> bool {
-    transient && attempt < max_attempts
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -300,13 +295,12 @@ impl InnerTube {
         body: &B,
         set_login: bool,
     ) -> Result<serde_json::Value, Error> {
-        self.post_attempts(path, client, body, set_login, 3).await
+        self.send(path, client, body, set_login, true).await
     }
 
-    /// [`Self::post`] with exactly one attempt. For a write that is not idempotent (creating a
-    /// playlist, removing or moving a row): a timeout leaves its outcome unknown, and sending it
-    /// again could do it twice. The caller reads the state back instead (Apollo addition, see
-    /// NOTICE.md).
+    /// [`Self::post`] that sends the request exactly once. For a write whose outcome the caller
+    /// reads back itself: a timeout or a dropped connection may mean the service applied it, and a
+    /// silent second attempt would hide that.
     pub async fn post_once<B: Serialize>(
         &self,
         path: &str,
@@ -314,16 +308,16 @@ impl InnerTube {
         body: &B,
         set_login: bool,
     ) -> Result<serde_json::Value, Error> {
-        self.post_attempts(path, client, body, set_login, 1).await
+        self.send(path, client, body, set_login, false).await
     }
 
-    async fn post_attempts<B: Serialize>(
+    async fn send<B: Serialize>(
         &self,
         path: &str,
         client: &YouTubeClient,
         body: &B,
         set_login: bool,
-        max_attempts: u32,
+        retry: bool,
     ) -> Result<serde_json::Value, Error> {
         // `path` may already carry query params (e.g. browse continuations); chain accordingly.
         let sep = if path.contains('?') { '&' } else { '?' };
@@ -352,7 +346,7 @@ impl InnerTube {
                     return Ok(resp.json().await?);
                 }
                 // Retry only on connect/timeout (transient).
-                Err(e) if may_retry(attempt, max_attempts, e.is_timeout() || e.is_connect() || e.is_request()) => {
+                Err(e) if retry && attempt < 3 && (e.is_timeout() || e.is_connect() || e.is_request()) => {
                     tracing::warn!(attempt, error = %e.without_url(), "retrying InnerTube POST {path}");
                     tokio::time::sleep(delay).await;
                     delay *= 2;
@@ -413,6 +407,34 @@ impl InnerTube {
         }
         h
     }
+    /// Send one play-reporting ping (a GET to a `playbackTracking` URL) as the signed-in account.
+    ///
+    /// The URL must be an https YouTube URL ([`crate::tracking::checked_url`]) because the
+    /// request carries the cookie. Unlike [`post`](Self::post): one attempt (a ping is never
+    /// retried), a short timeout so a hung host cannot hold the caller, and the response is
+    /// neither a verdict on the session (a refused ping does not sign anyone out) nor a source
+    /// of cookies (`s.youtube.com` sets its own, which do not belong in the account's jar).
+    pub(crate) async fn send_tracking_ping(
+        &self,
+        client: &YouTubeClient,
+        url: &str,
+    ) -> Result<(), Error> {
+        let url = crate::tracking::checked_url(url)?;
+        let mut headers = self.headers(client, true);
+        headers.remove("content-type");
+        headers.remove("x-goog-api-format-version");
+        headers.insert(HeaderName::from_static("accept"), HeaderValue::from_static("*/*"));
+        self.http
+            .get(url)
+            .headers(headers)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| Error::Http(e.without_url()))?;
+        Ok(())
+    }
+
     /// Bootstrap `visitorData` anonymously by scraping `sw.js_data`. context/04 §A.
     pub async fn fetch_visitor_data(&self) -> Result<String, Error> {
         let text = self.http.get(SW_JS_DATA_URL).send().await?.error_for_status()?.text().await?;
@@ -455,16 +477,6 @@ fn parse_visitor_data(body: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_single_attempt_write_is_never_sent_again() {
-        // `post` allows three attempts; `post_once` one, so even a timeout is not repeated.
-        assert!(may_retry(1, 3, true));
-        assert!(may_retry(2, 3, true));
-        assert!(!may_retry(3, 3, true));
-        assert!(!may_retry(1, 1, true));
-        assert!(!may_retry(1, 3, false));
-    }
 
     #[test]
     fn sha1_known_vector() {
