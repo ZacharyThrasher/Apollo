@@ -18,6 +18,7 @@ use gpui::Context;
 
 use super::{LibraryModel, Load, PlayRequest};
 use crate::library::source::TrackRow;
+use crate::page_cache::PageCache;
 
 /// What a mix (a playlist with no seed song) is being fetched for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,6 +238,12 @@ impl LibraryModel {
         let channel = content.channel_id.clone();
         let page = detail.target.id.clone();
         detail.subscribing = Some(want);
+        // The page (its button) and the Artists tab are about to change: a cached copy must not
+        // be drawn meanwhile, and again once the write settles.
+        let changed = page.clone();
+        if let Some(cache) = PageCache::try_global(cx) {
+            cache.invalidate_subscription(&changed);
+        }
         cx.notify();
         cx.spawn(async move |this, cx| {
             let sent = {
@@ -259,7 +266,12 @@ impl LibraryModel {
                 }
                 other => other,
             };
-            let _ = this.update(cx, |m, cx| m.subscription_settled(id, want, result, cx));
+            let _ = this.update(cx, |m, cx| {
+                if let Some(cache) = PageCache::try_global(cx) {
+                    cache.invalidate_subscription(&changed);
+                }
+                m.subscription_settled(id, want, result, cx)
+            });
         })
         .detach();
     }

@@ -7,6 +7,10 @@
 //!   is on screen stays until the new one arrives, and a failed refresh leaves it alone.
 //! * A different account (or a sign-out) drops everything, and answers still in flight for the
 //!   old one are discarded (`rev`).
+//! * The first batch is also kept in the page cache ([`crate::page_cache`]). At launch it is drawn
+//!   as soon as the account is known, before the session is confirmed, and the feed is fetched
+//!   behind it and swapped in when it arrives (`from_cache`). A failure leaves the cached shelves
+//!   alone, except a dead session, which is always shown.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -17,6 +21,7 @@ use apollo_provider::{HomeItem, HomePage, HomeShelf};
 use gpui::{Context, Entity};
 
 use crate::library::LibrarySource;
+use crate::page_cache::{keys, Cached, PageCache, Ticket};
 use crate::player::{PlayerModel, Status};
 
 /// Home reopened after this long refreshes.
@@ -77,6 +82,15 @@ pub struct HomeModel {
     rev: u64,
     /// Home asks the source this many times (tests and diagnostics).
     requests: u32,
+    /// The shelves on screen came from the page cache and no answer has replaced them yet.
+    from_cache: bool,
+    /// The account key those cached shelves belong to.
+    cached_for: Option<String>,
+    /// An answer (first batch or refresh) has landed since the last `clear`: the cache must not
+    /// be drawn over it.
+    fresh_seen: bool,
+    /// The account whose cached feed was asked for since the last `clear`.
+    restoring: Option<String>,
 }
 
 impl HomeModel {
@@ -97,6 +111,10 @@ impl HomeModel {
             refreshing: false,
             rev: 0,
             requests: 0,
+            from_cache: false,
+            cached_for: None,
+            fresh_seen: false,
+            restoring: None,
         };
         model.try_start(cx);
         model
@@ -108,9 +126,12 @@ impl HomeModel {
         match self.access {
             Access::SignedOut => Phase::SignedOut,
             Access::Expired => Phase::Failed(LoadFailure::Session),
+            // Cached shelves are drawn while the account is still being checked.
+            Access::Waiting if self.shows_cache() => Phase::Ready,
             Access::Waiting => Phase::Loading,
             Access::Open => match (self.failure, self.asked && !self.loading) {
                 (Some(f), _) => Phase::Failed(f),
+                (None, _) if self.shows_cache() => Phase::Ready,
                 (None, true) => Phase::Ready,
                 (None, false) => Phase::Loading,
             },
@@ -119,6 +140,18 @@ impl HomeModel {
 
     pub fn shelves(&self) -> &[Arc<HomeShelf>] {
         &self.shelves
+    }
+
+    /// The shelves on screen are the page cache's, not yet replaced by the service's.
+    pub fn shows_cache(&self) -> bool {
+        self.from_cache && !self.shelves.is_empty() && self.failure.is_none()
+    }
+
+    /// Cached shelves are on screen for the account the cache serves now.
+    fn keeps_cache(&self, cx: &Context<Self>) -> bool {
+        self.shows_cache()
+            && self.cached_for.is_some()
+            && PageCache::try_global(cx).and_then(|c| c.account()) == self.cached_for
     }
 
     pub fn more(&self) -> More {
@@ -188,7 +221,10 @@ impl HomeModel {
         let changed_account = epoch != self.epoch;
         self.access = access;
         self.epoch = epoch;
-        if access != Access::Open || changed_account || !was_open {
+        // Cached shelves of the account that is still the one chosen survive the account being
+        // checked again: the feed is fetched behind them.
+        let keep = matches!(access, Access::Waiting | Access::Open) && self.keeps_cache(cx);
+        if !keep && (access != Access::Open || changed_account || !was_open) {
             self.clear();
         }
         if access == Access::Open {
@@ -227,9 +263,92 @@ impl HomeModel {
         self.continuation = None;
         self.more = More::Idle;
         self.loaded_at = None;
+        self.from_cache = false;
+        self.cached_for = None;
+        self.fresh_seen = false;
+        self.restoring = None;
     }
 
-    /// The first batch, with the skeleton showing meanwhile.
+    // ---- the page cache ---------------------------------------------------------------------
+
+    /// Draws the account's last feed from the page cache, if there is one and nothing newer is
+    /// on screen: asked for again whenever the account is (re)chosen, a no-op after the first.
+    /// The shell calls it once the cache knows the account, which is before the session has
+    /// been confirmed, so launch shows Home at once.
+    pub fn restore_cached(&mut self, cx: &mut Context<Self>) {
+        let Some(cache) = PageCache::try_global(cx) else {
+            return;
+        };
+        let Some(account) = cache.account() else {
+            return;
+        };
+        if self.restoring.as_deref() == Some(account.as_str()) || !self.cache_wanted() {
+            return;
+        }
+        self.restoring = Some(account.clone());
+        cx.spawn(async move |this, cx| {
+            let asked = account.clone();
+            let cached = cx
+                .background_executor()
+                .spawn(async move { cache.read_saved::<HomePage>(&asked, keys::HOME) })
+                .await;
+            let _ = this.update(cx, |m, cx| m.apply_cached(account, cached, cx));
+        })
+        .detach();
+    }
+
+    /// Nothing the cache could replace is on screen, and the account may see a feed.
+    fn cache_wanted(&self) -> bool {
+        !matches!(self.access, Access::SignedOut | Access::Expired)
+            && self.shelves.is_empty()
+            && self.failure.is_none()
+            && !self.fresh_seen
+    }
+
+    fn apply_cached(
+        &mut self,
+        account: String,
+        cached: Option<Cached<HomePage>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(cached) = cached.filter(|c| !c.value.shelves.is_empty()) else {
+            return;
+        };
+        let still_ours = PageCache::try_global(cx).and_then(|c| c.account()).as_deref()
+            == Some(account.as_str())
+            && self.restoring.as_deref() == Some(account.as_str());
+        if !still_ours || !self.cache_wanted() {
+            return;
+        }
+        let age = cached.age();
+        self.shelves = cached.value.shelves.into_iter().map(Arc::new).collect();
+        // A saved continuation token is not believed: the next batch comes after the refresh.
+        self.continuation = None;
+        self.from_cache = true;
+        self.cached_for = Some(account);
+        // Its age counts, so an old feed is refreshed at the next reopening if the fetch behind
+        // it fails.
+        self.loaded_at = Instant::now().checked_sub(age);
+        cx.notify();
+    }
+
+    /// Keeps a fresh first batch for the next launch.
+    fn remember(&self, ticket: Option<&Ticket>, shelves: &[HomeShelf], cx: &Context<Self>) {
+        if let (Some(cache), Some(ticket)) = (PageCache::try_global(cx), ticket) {
+            cache.put(
+                ticket,
+                keys::HOME.to_owned(),
+                HomePage {
+                    shelves: shelves.to_vec(),
+                    continuation: None,
+                    skipped: 0,
+                },
+            );
+        }
+    }
+
+    /// The first batch, with the skeleton showing meanwhile (or, when cached shelves are on
+    /// screen, behind them).
     fn load(&mut self, cx: &mut Context<Self>) {
         let Some(source) = self.source.clone() else {
             return;
@@ -237,17 +356,24 @@ impl HomeModel {
         if self.access != Access::Open {
             return;
         }
+        if self.keeps_cache(cx) {
+            self.asked = true;
+            self.loading = false;
+            self.refresh(cx);
+            return;
+        }
         self.clear();
         self.asked = true;
         self.loading = true;
         self.requests += 1;
         let rev = self.rev;
+        let ticket = PageCache::try_global(cx).map(|c| c.ticket());
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { source.home() })
                 .await;
-            let _ = this.update(cx, |m, cx| m.finish_first(rev, result, cx));
+            let _ = this.update(cx, |m, cx| m.finish_first(rev, result, ticket, cx));
         })
         .detach();
         cx.notify();
@@ -257,6 +383,7 @@ impl HomeModel {
         &mut self,
         rev: u64,
         result: Result<HomePage, LoadFailure>,
+        ticket: Option<Ticket>,
         cx: &mut Context<Self>,
     ) {
         if rev != self.rev {
@@ -265,12 +392,22 @@ impl HomeModel {
         self.loading = false;
         match result {
             Ok(page) => {
+                self.remember(ticket.as_ref(), &page.shelves, cx);
                 self.failure = None;
                 self.shelves = page.shelves.into_iter().map(Arc::new).collect();
                 self.continuation = page.continuation;
                 self.loaded_at = Some(Instant::now());
+                self.from_cache = false;
+                self.fresh_seen = true;
             }
-            Err(failure) => self.failure = Some(failure),
+            // Cached shelves are already on screen: only a dead session takes them away.
+            Err(failure) if self.shows_cache() && failure != LoadFailure::Session => {}
+            Err(failure) => {
+                self.shelves.clear();
+                self.continuation = None;
+                self.from_cache = false;
+                self.failure = Some(failure);
+            }
         }
         cx.notify();
     }
@@ -287,12 +424,13 @@ impl HomeModel {
         // A batch being appended belongs to the feed that is about to be replaced.
         self.more = More::Idle;
         self.requests += 1;
+        let ticket = PageCache::try_global(cx).map(|c| c.ticket());
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { source.home() })
                 .await;
-            let _ = this.update(cx, |m, cx| m.finish_refresh(rev, result, cx));
+            let _ = this.update(cx, |m, cx| m.finish_refresh(rev, result, ticket, cx));
         })
         .detach();
         cx.notify();
@@ -302,6 +440,7 @@ impl HomeModel {
         &mut self,
         rev: u64,
         result: Result<HomePage, LoadFailure>,
+        ticket: Option<Ticket>,
         cx: &mut Context<Self>,
     ) {
         if rev != self.rev {
@@ -309,12 +448,23 @@ impl HomeModel {
         }
         self.refreshing = false;
         // Failed or empty: keep the feed that is shown, and try again at the next reopening.
-        if let Ok(page) = result {
-            if !page.shelves.is_empty() {
+        // The exception is a dead session behind cached shelves: that is said out loud.
+        match result {
+            Ok(page) if !page.shelves.is_empty() => {
+                self.remember(ticket.as_ref(), &page.shelves, cx);
                 self.shelves = page.shelves.into_iter().map(Arc::new).collect();
                 self.continuation = page.continuation;
                 self.loaded_at = Some(Instant::now());
+                self.from_cache = false;
+                self.fresh_seen = true;
             }
+            Err(LoadFailure::Session) if self.shows_cache() => {
+                self.shelves.clear();
+                self.continuation = None;
+                self.from_cache = false;
+                self.failure = Some(LoadFailure::Session);
+            }
+            _ => {}
         }
         cx.notify();
     }

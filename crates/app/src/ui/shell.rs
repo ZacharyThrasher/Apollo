@@ -13,6 +13,7 @@ use gpui::{
 use crate::account::AccountModel;
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
+use crate::page_cache::PageCache;
 use crate::library::{LibraryWrites, Notice, Target};
 use crate::lyrics::LyricsModel;
 use crate::keymap::{
@@ -90,6 +91,7 @@ pub fn bind_keys(cx: &mut App) {
     explore_page::bind_keys(cx);
     playlist_picker::bind_keys(cx);
     track_menu::bind_keys(cx);
+    crate::ui::mini_player::bind_keys(cx);
 }
 
 /// A toast on screen, possibly on its way out.
@@ -134,6 +136,8 @@ pub struct Shell {
     routed_to_sign_in: bool,
     /// Keeps the window-activation hook that dismisses tooltips alive.
     _activation: Option<gpui::Subscription>,
+    /// Keeps the recorder of the window's size and position alive.
+    _remembered: Option<gpui::Subscription>,
     route: Route,
     nav_expanded: bool,
     nav_toggled: bool,
@@ -212,7 +216,8 @@ impl Shell {
             like: stop(cx, 26),
             mute: stop(cx, 27),
             volume: stop(cx, 28),
-            // Beside the queue button, ahead of it.
+            // Beside the queue button, ahead of it: mini player, then lyrics, then queue.
+            mini: stop(cx, 29),
             lyrics: stop(cx, 29),
             queue: stop(cx, 29),
         };
@@ -434,6 +439,7 @@ impl Shell {
             search_account_live: false,
             routed_to_sign_in: false,
             _activation: None,
+            _remembered: None,
             route: Route::Home,
             nav_expanded: false,
             nav_toggled: false,
@@ -465,6 +471,15 @@ impl Shell {
         let view = self.account.read(cx).service().view();
         let epoch = view.epoch;
         let usable = account_usable(&view, self.library_usable);
+        // The page cache serves one account at a time: before anything below asks it for a page.
+        let signed_out_by_choice = self.account.read(cx).is_signed_out_by_choice();
+        if let Some(cache) = PageCache::try_global(cx) {
+            if signed_out_by_choice {
+                cache.sign_out();
+            } else {
+                cache.set_account(cache_account(&view));
+            }
+        }
         // A new login imports before the service has confirmed it, so what the library loaded
         // then failed with "sign-in expired": it loads again once the session is confirmed.
         let became_usable = usable && !self.library_usable;
@@ -501,6 +516,8 @@ impl Shell {
             self.explore
                 .update(cx, |e, cx| e.set_access(access, epoch, cx));
         }
+        // Last session's feed is on screen at once, before the session is confirmed.
+        self.home.update(cx, |h, cx| h.restore_cached(cx));
         self.library
             .update(cx, |l, cx| l.set_signed_out(by_choice, cx));
         if !self.routed_to_sign_in && signed_out {
@@ -543,6 +560,7 @@ impl Shell {
             ("bar-like", bar.like.clone()),
             ("bar-mute", bar.mute.clone()),
             ("bar-volume", bar.volume.clone()),
+            ("bar-mini", bar.mini.clone()),
             ("bar-lyrics", bar.lyrics.clone()),
             ("bar-queue", bar.queue.clone()),
         ]);
@@ -888,6 +906,11 @@ impl Shell {
     }
 
     /// Hooks that need the window: tooltips go away when it loses focus.
+    /// Keeps `subscription` (the window's position recorder) alive as long as the shell.
+    pub fn keep(&mut self, subscription: Option<gpui::Subscription>) {
+        self._remembered = subscription;
+    }
+
     pub fn install_window_hooks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._activation = Some(cx.observe_window_activation(window, |_, window, cx| {
             if !window.is_window_active() {
@@ -949,6 +972,15 @@ fn account_usable(view: &apollo_account::service::AccountView, previous: bool) -
         SessionState::Valid => matches!(view.identity, IdentityState::Selected(_)),
         SessionState::Absent | SessionState::Expired => false,
         SessionState::Validating | SessionState::Unreachable => previous,
+    }
+}
+
+/// The key the page cache files an account's pages under: the chosen channel, the same
+/// identity the saved queue is bound to. `None` while none is chosen.
+fn cache_account(view: &apollo_account::service::AccountView) -> Option<String> {
+    match &view.identity {
+        apollo_account::service::IdentityState::Selected(identity) => Some(identity.key()),
+        _ => None,
     }
 }
 
@@ -1148,6 +1180,7 @@ impl Render for Shell {
                 let shell = shell.clone();
                 move |_, cx| shell.update(cx, |s, cx| s.toggle_lyrics(cx))
             })),
+            on_mini_player: Rc::new(Box::new(|_, cx| crate::mini::open(cx))),
             on_queue_toggle: Rc::new(Box::new({
                 let shell = shell.clone();
                 move |_, cx| shell.update(cx, |s, cx| s.toggle_queue(cx))

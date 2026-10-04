@@ -18,8 +18,10 @@ pub mod library;
 pub mod lyrics;
 pub mod related;
 pub mod loudness;
+pub mod mini;
 pub mod motion;
 pub mod os_media;
+pub mod page_cache;
 pub mod pc_watch;
 #[cfg(windows)]
 pub mod pc_watch_win;
@@ -41,3 +43,4 @@ pub mod tray;
 pub mod tray_win;
 pub mod ui;
 pub mod url_thumbs;
+pub mod window_state;

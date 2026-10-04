@@ -76,6 +76,8 @@ icons! {
     Radio => "live-regular",
     QueueAdd => "queue-add-regular",
     PlayNext => "play-next-regular",
+    PictureInPicture => "picture-in-picture-regular",
+    ArrowMaximize => "arrow-maximize-regular",
     MoonRegular => "weather-moon-regular",
     MoonFilled => "weather-moon-filled",
 }
