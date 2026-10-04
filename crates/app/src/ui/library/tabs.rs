@@ -663,7 +663,33 @@ impl LibraryView {
 
     /// The songs saved to the library: the shared track rows in a virtualized list, in the tab's
     /// chosen order, with the tab row's filter. A row's menu says Remove from library.
+    /// The Songs tab: Play and Shuffle over the rows, then the rows.
     pub(super) fn render_songs_tab(
+        &mut self,
+        accent: Accent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (items, loading, pending) = {
+            let page = self.model.read(cx).songs();
+            (page.listing.items().len(), page.is_loading(), page.pending)
+        };
+        // Once there are rows, or they are on their way; a failure or an empty library has
+        // nothing to play.
+        let buttons = (items > 0 || loading)
+            .then(|| self.play_buttons(true, pending, "songs", accent));
+        let body = self.songs_body(accent, window, cx);
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_h_0()
+            .children(buttons.map(|b| div().flex_none().mb(px(spacing::S3)).child(b)))
+            .child(div().flex_1().min_h_0().child(body))
+            .into_any_element()
+    }
+
+    fn songs_body(
         &mut self,
         accent: Accent,
         window: &mut Window,

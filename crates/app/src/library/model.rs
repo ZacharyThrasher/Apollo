@@ -26,6 +26,7 @@ use super::browse::{
     HistoryGroup, SortKey,
 };
 use super::edits::{self, Edit, EditEvent, LibraryEdits};
+use super::filter::Visible;
 use super::source::{ArtistContent, LibrarySource, TrackRow};
 use crate::search::local::LocalIndex;
 use super::writes::{LibraryWrites, WritesEvent};
@@ -364,6 +365,9 @@ pub struct LibraryModel {
     songs_shown: Vec<TrackRow>,
     songs_rev: u64,
     songs_stale: bool,
+    /// What the Songs tab's filter box says (lowercased, trimmed; empty for none): Play and
+    /// Shuffle on the tab queue only the rows it keeps.
+    songs_query: String,
     /// The Stats tab: the report for the chosen period, worked out from the local play log.
     stats: Load<Arc<StatsReport>>,
     stats_period: Period,
@@ -424,6 +428,7 @@ impl LibraryModel {
             songs_shown: Vec::new(),
             songs_rev: 0,
             songs_stale: false,
+            songs_query: String::new(),
             stats: Load::Idle,
             stats_period: Period::default(),
             stats_rev: 0,
@@ -1563,8 +1568,21 @@ impl LibraryModel {
                     });
                 }
             }
-            // The dialog's own business: what the lists show did not change.
-            EditEvent::Edited(_) => {}
+            // The lists did not change, but an open page shows the description the dialog saved.
+            EditEvent::Edited(c) => {
+                let saved = self.edits.read(cx).details(c).map(|d| d.description.clone());
+                if let Some(description) = saved {
+                    let key = c.library_key();
+                    for entry in &mut self.stack {
+                        if let Entry::Collection(d) = entry {
+                            if d.collection.kind == c.kind && d.collection.library_key() == key {
+                                d.meta.description =
+                                    Some(description.clone()).filter(|t| !t.is_empty());
+                            }
+                        }
+                    }
+                }
+            }
             EditEvent::SongSaved { video_id, saved } => self.song_saved(video_id, *saved, cx),
             EditEvent::Failed(_) => {}
         }
@@ -1915,11 +1933,17 @@ impl LibraryModel {
         }
     }
 
-    /// Plays the Songs tab's rows in the order they are shown.
+    /// The Songs tab's filter text changed (already lowercased and trimmed).
+    pub fn set_songs_query(&mut self, text: &str) {
+        self.songs_query = text.to_owned();
+    }
+
+    /// Plays the Songs tab's rows in the order they are shown, filter included.
     fn play_songs(&mut self, request: PlayRequest, cx: &mut Context<Self>) {
-        let rows: Vec<(Track, Option<String>)> = self
-            .songs_shown
-            .iter()
+        let kept = Visible::of(&self.songs_shown, &self.songs_query);
+        let rows: Vec<(Track, Option<String>)> = (0..kept.len())
+            .filter_map(|n| kept.get(n))
+            .filter_map(|i| self.songs_shown.get(i))
             .map(|row| (row.track.clone(), row.thumbnail.clone()))
             .collect();
         let source = queue_source::named("Library songs");
