@@ -433,6 +433,58 @@ pub fn parse_moods(root: &Value) -> Vec<MoodSection> {
         .collect()
 }
 
+/// Parse a `FEmusic_explore` or `FEmusic_charts` response into titled shelves: the carousels the
+/// home parser reads, then the plain list shelves (`musicShelfRenderer`, a chart's ranked songs)
+/// as shelves of song rows. Both pages are a column of such shelves and a few navigation buttons
+/// this parser ignores; a shelf it cannot read is counted in `skipped_shelves`.
+pub fn parse_explore(root: &Value) -> HomePage {
+    let list_shelves = find_all(root, "musicShelfRenderer");
+    let mut page = parse_home(root);
+    // The home parser counts every list shelf as one it does not read; they are read here.
+    page.skipped_shelves = page.skipped_shelves.saturating_sub(list_shelves.len() as u32);
+    for shelf in list_shelves {
+        let nodes = shelf.get("contents").and_then(Value::as_array);
+        let items: Vec<BrowseItem> =
+            nodes.map(|c| c.iter().filter_map(parse_carousel_item).collect()).unwrap_or_default();
+        let unread = nodes.map_or(0, Vec::len).saturating_sub(items.len()) as u32;
+        let title = runs_text(shelf.get("title")).unwrap_or_default();
+        if items.is_empty() {
+            // The country picker is a shelf with a menu and no rows: nothing was lost.
+            if unread > 0 {
+                page.skipped_shelves += 1;
+            }
+            continue;
+        }
+        let more = shelf
+            .get("bottomEndpoint")
+            .or_else(|| {
+                shelf
+                    .get("title")
+                    .and_then(|t| t.get("runs"))
+                    .and_then(|r| r.get(0))
+                    .and_then(|r| r.get("navigationEndpoint"))
+            })
+            .and_then(|e| e.get("browseEndpoint"));
+        let more_browse_id =
+            more.and_then(|e| e.get("browseId")).and_then(Value::as_str).map(str::to_owned);
+        let more_params =
+            more.and_then(|e| e.get("params")).and_then(Value::as_str).map(str::to_owned);
+        page.sections.push(Section { title, items, more_browse_id, more_params, skipped: unread });
+    }
+    page
+}
+
+/// Parse a `FEmusic_new_releases_albums` response: every card on it, album or single, in the
+/// service's order, whether it comes as a grid or as a shelf. A card seen twice is kept once.
+pub fn parse_cards(root: &Value) -> Vec<BrowseItem> {
+    let mut seen = std::collections::HashSet::new();
+    find_all(root, "musicTwoRowItemRenderer")
+        .into_iter()
+        .filter_map(parse_two_row_item)
+        .filter(|card| seen.insert(card.id.clone()))
+        .collect()
+}
+
 /// One date bucket of the play history ("Today", "Yesterday", "This week"). context/08.
 #[derive(Debug, Clone, Serialize)]
 pub struct HistoryGroup {

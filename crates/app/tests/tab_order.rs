@@ -145,9 +145,10 @@ fn cycle(shell: &Entity<Shell>, vcx: &mut VisualTestContext, key: &str) -> Vec<S
     panic!("Tab never came back to a stop it had already visited: {order:?}");
 }
 
-const NAV: [&str; 5] = [
+const NAV: [&str; 6] = [
     "nav-toggle",
     "nav-home",
+    "nav-explore",
     "nav-search",
     "nav-library",
     "nav-settings",
@@ -194,7 +195,7 @@ fn assert_sane_with(
 ) -> Vec<String> {
     let forward = cycle(shell, vcx, "tab");
     assert_eq!(
-        &forward[..5],
+        &forward[..NAV.len()],
         NAV,
         "{what}: the nav rail comes first: {forward:?}"
     );
@@ -204,7 +205,7 @@ fn assert_sane_with(
         "{what}: the player bar comes last, left to right: {forward:?}"
     );
     assert!(
-        forward[5..forward.len() - bar.len()]
+        forward[NAV.len()..forward.len() - bar.len()]
             .iter()
             .all(|n| n == "page"),
         "{what}: only page stops sit between: {forward:?}"
@@ -250,7 +251,7 @@ fn the_seek_slider_joins_the_bar_once_a_track_is_playing(cx: &mut TestAppContext
 #[gpui::test]
 fn every_page_keeps_the_nav_first_and_the_bar_last(cx: &mut TestAppContext) {
     let (_player, shell, vcx) = setup(cx);
-    for route in [Route::Search, Route::Library, Route::Settings] {
+    for route in [Route::Explore, Route::Search, Route::Library, Route::Settings] {
         shell.update_in(vcx, |s, window, cx| s.choose_route(route, window, cx));
         vcx.run_until_parked();
         assert_sane(&shell, vcx, &format!("{route:?}"));
