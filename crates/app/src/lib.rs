@@ -7,6 +7,7 @@ pub mod art;
 pub mod assets;
 pub mod autostart;
 pub mod backend;
+pub mod discord;
 pub mod home;
 #[cfg(windows)]
 pub mod hotkeys_win;

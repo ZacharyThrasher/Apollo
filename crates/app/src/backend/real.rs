@@ -417,6 +417,14 @@ impl ArtSource for HttpArt {
             .entry(video_id.to_owned())
             .or_insert_with(|| url.to_owned());
     }
+
+    fn url(&self, video_id: &str) -> Option<String> {
+        let listed = self.thumbs.lock().unwrap().get(video_id).cloned();
+        Some(match listed {
+            Some(url) => sized_thumbnail(&url, PLAYER_ART_PX),
+            None => format!("https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"),
+        })
+    }
 }
 
 /// List rows ask by URL alone; the same plain GET serves them.

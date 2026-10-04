@@ -638,7 +638,9 @@ fn the_attention_dot_names_its_reason(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn settings_shows_the_window_switches_and_a_click_flips_one(cx: &mut TestAppContext) {
-    use apollo_app::settings::{SettingsBackend, SettingsModel, CLOSE_TO_TRAY, GLOBAL_HOTKEYS};
+    use apollo_app::settings::{
+        SettingsBackend, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS,
+    };
 
     #[derive(Default)]
     struct Memory(Mutex<std::collections::HashMap<String, String>>);
@@ -676,13 +678,17 @@ fn settings_shows_the_window_switches_and_a_click_flips_one(cx: &mut TestAppCont
     for id in [
         "setting-close-to-tray",
         "setting-start-minimized",
+        "setting-discord-presence",
         "setting-global-hotkeys",
     ] {
         assert!(vcx.debug_bounds(id).is_some(), "{id} is on the page");
     }
-    // Keyboard is the last section, and its switch starts off.
+    // Discord comes after Window and before Keyboard, the last section; both switches start off.
+    let discord = vcx.debug_bounds("setting-discord-presence").unwrap();
     let hotkeys = vcx.debug_bounds("setting-global-hotkeys").unwrap();
-    assert!(hotkeys.origin.y > vcx.debug_bounds("setting-start-minimized").unwrap().origin.y);
+    assert!(discord.origin.y > vcx.debug_bounds("setting-start-minimized").unwrap().origin.y);
+    assert!(hotkeys.origin.y > discord.origin.y);
+    assert!(!settings.read_with(vcx, |m, _| m.get(&DISCORD_PRESENCE)));
     assert!(!settings.read_with(vcx, |m, _| m.get(&GLOBAL_HOTKEYS)));
     assert!(
         settings.read_with(vcx, |m, _| m.get(&CLOSE_TO_TRAY)),
