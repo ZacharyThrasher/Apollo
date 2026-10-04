@@ -1,3 +1,4 @@
+use apollo_domain::audio::{AudioDevice, Equalizer};
 use apollo_domain::model::{QueueEntryId, Track};
 use apollo_domain::playback::{Coordinator, Effect, Event, LeaseId, LoadId};
 use apollo_domain::queue::Queue;
@@ -52,6 +53,23 @@ pub trait MediaEngine {
     /// coordinator. Off drops a track that was lined up and means the next one opens at the end
     /// of the current one, as before. Engines that cannot do it may ignore it.
     fn set_gapless(&mut self, _on: bool) {}
+    /// Play on this output device (`None` = the system default). A user setting like the volume,
+    /// so it never goes through the coordinator, and the track playing moves over without losing
+    /// its place. The engine falls back to the system default by itself while the chosen device
+    /// is not plugged in and switches back when it returns. Engines without outputs may ignore it.
+    fn set_audio_device(&mut self, _device: Option<String>) {}
+    /// The outputs the system offers right now (without the "system default" entry), as last
+    /// seen by the engine; empty when it cannot say. Never blocks.
+    fn audio_devices(&self) -> Vec<AudioDevice> {
+        Vec::new()
+    }
+    /// The equalizer, with the clip guard that goes with it. A user setting like the volume, and
+    /// it applies to the track already playing, without a click. Engines that cannot do it may
+    /// ignore it.
+    fn set_equalizer(&mut self, _eq: Equalizer) {}
+    /// Playback speed, with pitch kept. Not saved by anyone: it starts at normal speed on each
+    /// launch. Engines that cannot do it may ignore it.
+    fn set_speed(&mut self, _speed: f32) {}
 }
 
 impl<T: Resolver + ?Sized> Resolver for Box<T> {
@@ -96,6 +114,18 @@ impl<T: MediaEngine + ?Sized> MediaEngine for Box<T> {
     }
     fn set_gapless(&mut self, on: bool) {
         (**self).set_gapless(on)
+    }
+    fn set_audio_device(&mut self, device: Option<String>) {
+        (**self).set_audio_device(device)
+    }
+    fn audio_devices(&self) -> Vec<AudioDevice> {
+        (**self).audio_devices()
+    }
+    fn set_equalizer(&mut self, eq: Equalizer) {
+        (**self).set_equalizer(eq)
+    }
+    fn set_speed(&mut self, speed: f32) {
+        (**self).set_speed(speed)
     }
 }
 

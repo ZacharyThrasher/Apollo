@@ -4,9 +4,11 @@
 use std::collections::VecDeque;
 use std::ffi::{c_void, CString};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use apollo_domain::audio::{resolve_device, AudioDevice, Equalizer, SYSTEM_DEFAULT};
 use apollo_domain::playback::{EngineEvent, Event, Failure, LeaseId, LoadId};
 use apollo_runtime::MediaEngine;
 use apollo_services_common::{unix_now, EventSink, LeaseLookup, LeaseStore};
@@ -18,6 +20,8 @@ use apollo_services_common::LoudnessTable;
 use crate::classify::{classify_end_file_error, classify_log};
 use crate::coalesce::PositionCoalescer;
 use crate::config::{core_options, MediaConfig};
+use crate::device::{self, DEVICE_POLL};
+use crate::eq::{self, EqBands, EQ_GLIDE};
 use crate::ramp::GainRamp;
 
 /// Headers a media request may carry. `UrlPolicy` already drops everything else; this is the
@@ -30,6 +34,11 @@ const SEEK_WATCHDOG: Duration = Duration::from_secs(15);
 /// How long a change of normalization gain on a track that is already playing takes: the switch
 /// flipped, or the track's loudness arriving after it started.
 const GAIN_GLIDE: Duration = Duration::from_millis(400);
+/// How long to wait for mpv to say it rebuilt its audio filters after the equalizer's chain was
+/// installed under a playing track, before sending the gains anyway.
+const EQ_READY_WAIT: Duration = Duration::from_millis(300);
+/// Reinstalls of the equalizer's chain (a band refusing its gain) before it is given up for the run.
+const MAX_EQ_REINSTALLS: u32 = 3;
 
 #[derive(Debug)]
 pub enum MediaError {
@@ -72,6 +81,9 @@ enum Cmd {
         lease: LeaseId,
     },
     SetGapless(bool),
+    SetAudioDevice(Option<String>),
+    SetEqualizer(Equalizer),
+    SetSpeed(f32),
     /// Test/diagnostic hook: current value of mpv options (names are fixed by the caller).
     Query(Vec<String>, Sender<Vec<(String, String)>>),
     /// Test/diagnostic hook: current value of mpv properties (live state, not options).
@@ -82,6 +94,8 @@ enum Cmd {
 pub struct MpvEngine {
     tx: Sender<Cmd>,
     thread: Option<JoinHandle<()>>,
+    /// The output devices as the pump last read them (see `Pump::refresh_devices`).
+    devices: Arc<Mutex<Vec<AudioDevice>>>,
 }
 
 impl MpvEngine {
@@ -102,13 +116,16 @@ impl MpvEngine {
             libmpv2_sys::mpv_request_log_messages(mpv.ctx.as_ptr(), level.as_ptr());
         }
         let (tx, rx) = mpsc::channel();
+        let devices = Arc::new(Mutex::new(Vec::new()));
+        let pump_devices = devices.clone();
         let thread = thread::Builder::new()
             .name("apollo-media".into())
-            .spawn(move || Pump::new(mpv, cfg, leases, sink).run(rx))
+            .spawn(move || Pump::new(mpv, cfg, leases, sink, pump_devices).run(rx))
             .map_err(|e| MediaError::ThreadSpawn(e.to_string()))?;
         Ok(Self {
             tx,
             thread: Some(thread),
+            devices,
         })
     }
 
@@ -178,6 +195,18 @@ impl MediaEngine for MpvEngine {
     fn set_gapless(&mut self, on: bool) {
         self.send(Cmd::SetGapless(on));
     }
+    fn set_audio_device(&mut self, device: Option<String>) {
+        self.send(Cmd::SetAudioDevice(device));
+    }
+    fn audio_devices(&self) -> Vec<AudioDevice> {
+        self.devices.lock().map(|d| d.clone()).unwrap_or_default()
+    }
+    fn set_equalizer(&mut self, eq: Equalizer) {
+        self.send(Cmd::SetEqualizer(eq));
+    }
+    fn set_speed(&mut self, speed: f32) {
+        self.send(Cmd::SetSpeed(speed));
+    }
 }
 
 impl Drop for MpvEngine {
@@ -216,6 +245,8 @@ enum OwnedEvent {
     FileLoaded,
     Seek,
     PlaybackRestart,
+    /// mpv rebuilt its audio output or filters (a new file, another device).
+    AudioReconfig,
     EndFile { reason: u32, error: i32 },
     Other,
 }
@@ -247,6 +278,7 @@ fn next_event(mpv: &Mpv, timeout: f64) -> Option<OwnedEvent> {
             sys::mpv_event_id_MPV_EVENT_FILE_LOADED => OwnedEvent::FileLoaded,
             sys::mpv_event_id_MPV_EVENT_SEEK => OwnedEvent::Seek,
             sys::mpv_event_id_MPV_EVENT_PLAYBACK_RESTART => OwnedEvent::PlaybackRestart,
+            sys::mpv_event_id_MPV_EVENT_AUDIO_RECONFIG => OwnedEvent::AudioReconfig,
             sys::mpv_event_id_MPV_EVENT_END_FILE => {
                 let e = &*(ev.data as *const sys::mpv_event_end_file);
                 OwnedEvent::EndFile {
@@ -321,13 +353,42 @@ struct Pump {
     /// Gapless playback: the switch, and the track lined up behind the one playing.
     gapless: bool,
     queued: Option<Queued>,
+    /// The equalizer: what the owner set, how far each band has glided, and whether the filter
+    /// chain is in mpv (installed once, before the first boost; see `eq`).
+    eq: Equalizer,
+    eq_bands: EqBands,
+    eq_installed: bool,
+    /// The chain could not be installed: the equalizer does nothing this run, and its clip
+    /// guard is not applied either.
+    eq_failed: bool,
+    /// mpv has configured audio for the file now playing, so `af-command` has a graph to reach.
+    audio_ready: bool,
+    /// After the chain was installed under a playing track: when to stop waiting for mpv's
+    /// "audio reconfigured" and send the gains anyway.
+    eq_ready_at: Option<Instant>,
+    /// Times the chain had to be installed again because a band would not take its gain.
+    eq_reinstalls: u32,
+    /// Output device: the owner's choice, what mpv was last told, and the devices the system
+    /// lists (shared with the engine handle, which hands them to the UI).
+    device_chosen: Option<String>,
+    device_applied: Option<String>,
+    devices: Arc<Mutex<Vec<AudioDevice>>>,
+    device_polled: Instant,
+    device_poll_due: bool,
 }
 
 impl Pump {
-    fn new(mpv: Mpv, cfg: MediaConfig, leases: LeaseStore, sink: EventSink) -> Self {
+    fn new(
+        mpv: Mpv,
+        cfg: MediaConfig,
+        leases: LeaseStore,
+        sink: EventSink,
+        devices: Arc<Mutex<Vec<AudioDevice>>>,
+    ) -> Self {
         let position = PositionCoalescer::new(cfg.position_interval);
         let loudness = cfg.loudness.clone();
-        Self {
+        let now = Instant::now();
+        let mut pump = Self {
             mpv,
             cfg,
             leases,
@@ -336,11 +397,25 @@ impl Pump {
             position,
             normalize: true,
             loudness,
-            gain: GainRamp::new(Instant::now()),
+            gain: GainRamp::new(now),
             gapless: true,
             queued: None,
+            eq: Equalizer::flat(),
+            eq_bands: EqBands::new(now),
+            eq_installed: false,
+            eq_failed: false,
+            audio_ready: false,
+            eq_ready_at: None,
+            eq_reinstalls: 0,
+            device_chosen: None,
+            device_applied: None,
+            devices,
+            device_polled: now,
+            device_poll_due: false,
         }
-        .with_gapless_options()
+        .with_gapless_options();
+        pump.refresh_devices();
+        pump
     }
 
     /// mpv's own side of gapless: keep the audio output running across a file change, and open
@@ -378,12 +453,18 @@ impl Pump {
             }
             // Drain every queued mpv event, then wait briefly for the next.
             // Short waits while the gain glides, so the steps stay small.
-            let mut timeout = if self.gain.is_ramping() { 0.01 } else { 0.05 };
+            let mut timeout = if self.gain.is_ramping() || self.eq_bands.is_ramping() {
+                0.01
+            } else {
+                0.05
+            };
             while let Some(ev) = next_event(&self.mpv, timeout) {
                 timeout = 0.0;
                 self.on_mpv_event(ev);
             }
             self.update_gain();
+            self.update_eq();
+            self.update_devices();
             self.poll();
         }
     }
@@ -414,6 +495,17 @@ impl Pump {
                     // What was lined up is taken back: the next track opens at the end of this one.
                     self.dequeue();
                 }
+            }
+            Cmd::SetAudioDevice(device) => {
+                self.device_chosen = device;
+                self.refresh_devices();
+                self.apply_device();
+            }
+            Cmd::SetEqualizer(eq) => self.set_equalizer(eq),
+            Cmd::SetSpeed(speed) => {
+                let _ = self
+                    .mpv
+                    .set_property("speed", f64::from(apollo_domain::audio::sanitize_speed(speed)));
             }
             Cmd::Stop => self.stop_playback(),
             Cmd::SetVolume(percent) => {
@@ -457,6 +549,7 @@ impl Pump {
     /// Silence everything and forget the active load; events still in flight are ignored.
     fn stop_playback(&mut self) {
         self.active = None;
+        self.audio_ready = false;
         // `stop` empties the playlist, a lined-up track included.
         self.queued = None;
         let _ = self.mpv.command("stop", &[]);
@@ -482,6 +575,9 @@ impl Pump {
         // (`loadfile replace` also empties the playlist, so nothing stays lined up.)
         self.position.reset();
         self.queued = None;
+        // The audio chain of the track before is going; the equalizer's gains are sent again
+        // when mpv builds the next one.
+        self.audio_ready = false;
         let video_id = lease.video_id().as_str().to_owned();
         let headers = HeaderPlan::from(lease.headers_for(lease.url()));
         self.active = Some(Active {
@@ -656,11 +752,18 @@ impl Pump {
     // ----------------------------------------------------------------- gain
 
     /// The gain in dB the playing track should have right now: its normalization when the switch
-    /// is on and its loudness is known, else unity.
+    /// is on and its loudness is known, else unity, plus the equalizer's clip guard.
     fn desired_gain_db(&self) -> f32 {
         match self.active.as_ref() {
-            Some(a) if self.normalize => gain_db(a.loudness_db),
-            _ => 0.0,
+            Some(a) => {
+                let normalization = if self.normalize {
+                    gain_db(a.loudness_db)
+                } else {
+                    0.0
+                };
+                normalization + self.eq_preamp_db()
+            }
+            None => 0.0,
         }
     }
 
@@ -705,6 +808,161 @@ impl Pump {
         }
     }
 
+    // ------------------------------------------------------------ equalizer
+
+    /// The clip guard's preamp, which rides on the same `volume-gain` as normalization. Not
+    /// applied while the chain it guards is not in mpv.
+    fn eq_preamp_db(&self) -> f32 {
+        if self.eq_installed {
+            self.eq.preamp_db()
+        } else {
+            0.0
+        }
+    }
+
+    fn set_equalizer(&mut self, eq: Equalizer) {
+        let eq = eq.sanitized();
+        self.eq = eq;
+        if !self.eq_installed && !self.eq_failed {
+            if eq.is_flat() {
+                // Nothing to filter yet; the chain goes in with the first boost.
+                return;
+            }
+            self.install_eq_chain();
+        }
+        if !self.eq_installed {
+            return;
+        }
+        let now = Instant::now();
+        self.eq_bands.glide(now, &eq.effective_gains(), EQ_GLIDE);
+        // The clip guard moves with the curve, over the same time.
+        if self.active.is_some() {
+            let db = self.desired_gain_db();
+            self.gain.glide(now, db, EQ_GLIDE);
+        }
+    }
+
+    /// Puts the ten filters into mpv's chain at the gains the bands are heading to. mpv
+    /// rebuilds its audio filters for this, so it is done once, ahead of the first boost.
+    fn install_eq_chain(&mut self) {
+        let chain = eq::chain(&self.eq_bands.targets());
+        match self.mpv.set_property("af", chain.as_str()) {
+            Ok(()) => {
+                self.eq_installed = true;
+                if self.audio_ready {
+                    // mpv rebuilds the graph under the playing track and says so when done.
+                    self.audio_ready = false;
+                    self.eq_ready_at = Some(Instant::now() + EQ_READY_WAIT);
+                }
+            }
+            Err(_) => self.eq_failed = true,
+        }
+    }
+
+    /// A band would not take its gain: the graph is not what the chain says. Install the chain
+    /// again at the gains the bands are heading to, and after a few of those give up for the
+    /// run (flat, and no clip guard) rather than rebuild the filters over and over.
+    fn reinstall_eq_chain(&mut self) {
+        self.eq_reinstalls += 1;
+        if self.eq_reinstalls > MAX_EQ_REINSTALLS {
+            let _ = self.mpv.set_property("af", "");
+            self.eq_installed = false;
+            self.eq_failed = true;
+            self.glide_to_desired_gain();
+            return;
+        }
+        self.eq_installed = false;
+        self.install_eq_chain();
+    }
+
+    /// Once per loop: move the bands one step along their glide and send what moved.
+    fn update_eq(&mut self) {
+        if !self.eq_installed {
+            return;
+        }
+        let now = Instant::now();
+        if self.eq_ready_at.is_some_and(|at| now >= at) {
+            self.eq_ready_at = None;
+            self.audio_ready = true;
+            self.eq_bands.resend(now);
+        }
+        let moved = self.eq_bands.step(now);
+        if moved.is_empty() || !self.audio_ready {
+            // With no graph to reach, the gains are sent whole when mpv builds one.
+            return;
+        }
+        for (band, db) in moved {
+            if self.send_band(band, db).is_err() {
+                self.reinstall_eq_chain();
+                return;
+            }
+        }
+    }
+
+    fn send_band(&self, band: usize, db: f32) -> Result<(), ()> {
+        let (label, gain) = (eq::label(band), eq::gain_arg(db));
+        self.mpv
+            .command("af-command", &[&label, "gain", &gain, eq::COMMAND_TARGET])
+            .map_err(|_| ())
+    }
+
+    /// mpv built its audio chain (a file started, the output changed): the filters hold the
+    /// gains they were installed with, so every band is sent again.
+    fn on_audio_reconfig(&mut self) {
+        self.audio_ready = true;
+        self.eq_ready_at = None;
+        if self.eq_installed {
+            self.eq_bands.resend(Instant::now());
+        }
+    }
+
+    // --------------------------------------------------------------- devices
+
+    /// Reads the system's output list into the shared copy. True when it changed.
+    fn refresh_devices(&mut self) -> bool {
+        let Some(list) = read_audio_devices(&self.mpv) else {
+            return false;
+        };
+        match self.devices.lock() {
+            Ok(mut cache) if *cache != list => {
+                *cache = list;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Plays on the chosen device while the system lists it, else on the system default, and
+    /// moves back when it returns. mpv reopens its output and playback carries on.
+    fn apply_device(&mut self) {
+        let list = self.devices.lock().map(|d| d.clone()).unwrap_or_default();
+        let want = resolve_device(self.device_chosen.as_deref(), &list).map(str::to_owned);
+        if want == self.device_applied {
+            return;
+        }
+        let name = want.as_deref().unwrap_or(SYSTEM_DEFAULT);
+        if self.mpv.set_property("audio-device", name).is_ok() {
+            self.device_applied = want;
+        } else if want.is_some() {
+            // The device was listed but could not be used: the default plays instead.
+            let _ = self.mpv.set_property("audio-device", SYSTEM_DEFAULT);
+            self.device_applied = None;
+        }
+    }
+
+    /// Once per loop: look at the list again every [`DEVICE_POLL`], or at once after the output
+    /// complained.
+    fn update_devices(&mut self) {
+        if !self.device_poll_due && self.device_polled.elapsed() < DEVICE_POLL {
+            return;
+        }
+        self.device_poll_due = false;
+        self.device_polled = Instant::now();
+        if self.refresh_devices() {
+            self.apply_device();
+        }
+    }
+
     // -------------------------------------------------------------- headers
 
     /// Sets the per-request headers for the *next* open. mpv accepts one global header list, so
@@ -728,6 +986,12 @@ impl Pump {
     fn on_mpv_event(&mut self, ev: OwnedEvent) {
         match ev {
             OwnedEvent::Log { level, text } => {
+                if (level == "error" || level == "warn" || level == "fatal")
+                    && classify_log(&text) == Some(Failure::Device)
+                {
+                    // A device gone or refusing: look at what the system lists right away.
+                    self.device_poll_due = true;
+                }
                 if let Some(a) = self.active.as_mut() {
                     if level == "error" || level == "warn" || level == "fatal" {
                         if a.logs.len() == MAX_LOG_LINES {
@@ -777,7 +1041,14 @@ impl Pump {
                     s.started = true;
                 }
             }
-            OwnedEvent::PlaybackRestart => self.on_playback_restart(),
+            OwnedEvent::PlaybackRestart => {
+                if !self.audio_ready && self.active.as_ref().is_some_and(|a| a.loaded) {
+                    // Audio is playing, so a graph exists even if no reconfigure was heard.
+                    self.on_audio_reconfig();
+                }
+                self.on_playback_restart();
+            }
+            OwnedEvent::AudioReconfig => self.on_audio_reconfig(),
             OwnedEvent::EndFile { reason, error } => self.on_end_file(reason, error),
             OwnedEvent::Other => {}
         }
@@ -837,6 +1108,7 @@ impl Pump {
                 }
             }
             self.active = None;
+            self.audio_ready = false;
             self.clear_request_headers();
             if loaded {
                 self.emit(load, EngineEvent::Eof);
@@ -846,6 +1118,7 @@ impl Pump {
         } else if reason == ERROR as u32 {
             let failure = classify_end_file_error(error, a.logs.iter().map(String::as_str));
             self.active = None;
+            self.audio_ready = false;
             self.clear_request_headers();
             self.fail_load(load, from, failure);
         }
@@ -951,5 +1224,60 @@ fn set_string_list(mpv: &Mpv, name: &str, items: &[String]) -> Result<(), ()> {
         Ok(())
     } else {
         Err(())
+    }
+}
+
+/// The output devices mpv lists, or `None` when the list cannot be read. The property is a node
+/// (an array of `{name, description}` maps), read through the C API and freed after.
+fn read_audio_devices(mpv: &Mpv) -> Option<Vec<AudioDevice>> {
+    use libmpv2_sys as sys;
+    let name = CString::new("audio-device-list").ok()?;
+    let mut node = std::mem::MaybeUninit::<sys::mpv_node>::zeroed();
+    // SAFETY: mpv fills `node` on success and `mpv_free_node_contents` releases what it
+    // allocated; every pointer read below comes from that node and is only used before the free.
+    unsafe {
+        let rc = sys::mpv_get_property(
+            mpv.ctx.as_ptr(),
+            name.as_ptr(),
+            sys::mpv_format_MPV_FORMAT_NODE,
+            node.as_mut_ptr() as *mut c_void,
+        );
+        if rc < 0 {
+            return None;
+        }
+        let mut node = node.assume_init();
+        let text = |p: *const std::os::raw::c_char| {
+            std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+        };
+        let entries = if node.format == sys::mpv_format_MPV_FORMAT_NODE_ARRAY && !node.u.list.is_null()
+        {
+            let list = &*node.u.list;
+            let mut entries = Vec::new();
+            for i in 0..list.num.max(0) as usize {
+                let item = &*list.values.add(i);
+                if item.format != sys::mpv_format_MPV_FORMAT_NODE_MAP || item.u.list.is_null() {
+                    continue;
+                }
+                let map = &*item.u.list;
+                let (mut id, mut description) = (String::new(), String::new());
+                for j in 0..map.num.max(0) as usize {
+                    let value = &*map.values.add(j);
+                    if value.format != sys::mpv_format_MPV_FORMAT_STRING {
+                        continue;
+                    }
+                    match text(*map.keys.add(j)).as_str() {
+                        "name" => id = text(value.u.string),
+                        "description" => description = text(value.u.string),
+                        _ => {}
+                    }
+                }
+                entries.push((id, description));
+            }
+            Some(entries)
+        } else {
+            None
+        };
+        sys::mpv_free_node_contents(&mut node);
+        entries.map(device::from_entries)
     }
 }

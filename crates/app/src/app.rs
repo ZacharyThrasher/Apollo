@@ -125,6 +125,8 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
             SqliteSettings::default_location().map(|s| Arc::new(s) as Arc<dyn SettingsBackend>),
         )
     });
+    // The saved output device and equalizer, and any change to them later.
+    crate::audio::bind(&player, &settings, cx);
     // Plays are reported to YouTube Music only while "Add plays to history" is on.
     let reporter = mode.play_reporter(&ports.service);
     let history_on = settings.read(cx).get(&ADD_PLAYS_TO_HISTORY);

@@ -2,6 +2,7 @@
 //! types may appear here (BUILD_SPEC ARCH-01).
 
 pub mod account;
+pub mod audio;
 pub mod lease;
 pub mod library;
 pub mod links;
