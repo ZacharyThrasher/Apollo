@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use apollo_app::art::{ArtSource, DecodedArt, SyntheticArt};
 use apollo_app::backend::{LibraryTrack, Ports, Prepared};
 use apollo_app::home::{Access, HomeModel, Phase};
-use apollo_app::library::model::{ArtistTarget, LibraryModel, Load};
+use apollo_app::library::model::{ArtistTarget, LibraryModel, Load, Tab};
 use apollo_app::library::sim::{self, SimLibrary, WriteBehaviour};
 use apollo_app::library::{ArtistContent, LibrarySource, TrackRow};
 use apollo_app::page_cache::{keys, PageCache};
@@ -19,7 +19,7 @@ use apollo_app::url_thumbs::ThumbSource;
 use apollo_domain::library::{Collection, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{LoadFailure, LoadState, Page};
 use apollo_domain::model::{BrowseId, Track};
-use apollo_provider::{HomePage, HomeShelf};
+use apollo_provider::{HistoryDay, HomePage, HomeShelf, Hit};
 use apollo_runtime::mock::{MockEngine, MockResolver};
 use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
 
@@ -83,6 +83,14 @@ impl LibrarySource for Switch {
     fn artist(&self, id: &BrowseId) -> Result<ArtistContent, LoadFailure> {
         self.check()?;
         self.inner.artist(id)
+    }
+    fn library_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        self.check()?;
+        self.inner.library_artists()
+    }
+    fn history(&self) -> Result<Vec<HistoryDay>, LoadFailure> {
+        self.check()?;
+        self.inner.history()
     }
     fn home(&self) -> Result<HomePage, LoadFailure> {
         self.check()?;
@@ -328,6 +336,38 @@ fn a_failed_refresh_leaves_cached_lists_alone_except_a_dead_session(cx: &mut Tes
         rig.model.read_with(vcx, |m, _| m.collections().clone()),
         Load::Failed(LoadFailure::Session),
         "an expired sign-in is always said"
+    );
+}
+
+#[gpui::test]
+fn the_artists_and_history_tabs_draw_the_last_answer_then_follow_the_fresh_one(
+    cx: &mut TestAppContext,
+) {
+    let fresh_artists = SimLibrary::instant().library_artists().unwrap();
+    let fresh_days = SimLibrary::instant().history().unwrap();
+    assert!(fresh_artists.len() > 1 && fresh_days.len() > 1);
+    let (rig, vcx) = rig(cx, |cache| {
+        put(cache, keys::ARTISTS, fresh_artists[..1].to_vec());
+        put(cache, keys::HISTORY, fresh_days[..1].to_vec());
+    });
+    rig.install(vcx);
+    vcx.run_until_parked();
+
+    rig.model.update(vcx, |m, cx| m.set_tab(Tab::Artists, cx));
+    rig.model.read_with(vcx, |m, _| {
+        assert_eq!(m.artist_list().len(), 1, "the cached artists, before any fetch");
+    });
+    rig.model.update(vcx, |m, cx| m.set_tab(Tab::History, cx));
+    let cached_rows = rig.model.read_with(vcx, |m, _| m.history_count());
+    assert!(cached_rows > 0, "the cached history is drawn at once");
+    vcx.run_until_parked();
+    rig.model.read_with(vcx, |m, _| {
+        assert_eq!(m.artist_list().len(), fresh_artists.len());
+        assert!(m.history_count() > cached_rows, "the fresh history replaced it");
+    });
+    assert_eq!(
+        rig.cache.get::<Vec<Hit>>(keys::ARTISTS).unwrap().value.len(),
+        fresh_artists.len()
     );
 }
 

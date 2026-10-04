@@ -40,6 +40,11 @@ pub mod keys {
     /// Every library playlist and saved album.
     pub const COLLECTIONS: &str = "lib:collections";
 
+    /// The Library's Artists tab.
+    pub const ARTISTS: &str = "lib:artists";
+    /// The Library's History tab.
+    pub const HISTORY: &str = "lib:history";
+
     /// An album or playlist page: its whole track list.
     pub fn collection(id: &BrowseId) -> String {
         format!("coll:{}", id.as_str())

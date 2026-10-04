@@ -135,10 +135,20 @@ Applied to the lyrics pane (`ui/lyrics_pane.rs`, `lyrics.rs`) and the Lyrics but
 
 ## Instant pages (invisible speed work, 2026-10-04)
 No visible change: no "refreshing" indicator, no Settings row. A page that was opened before draws from the cache at once and is fetched again behind it; the fresh answer replaces it in place only if it differs (no scroll jump, no flicker). A page opened for the first time keeps the shared skeleton pulse.
-1. **What is cached:** Home's first batch, the Library lists, and every album, artist and playlist page's whole track list, in the `page_cache` table (`crates/app/src/page_cache.rs`), also held in memory for the session. Home is drawn at launch as soon as the account is known, before the session is confirmed.
+1. **What is cached:** Home's first batch, the Library lists (playlists and albums, Artists, History), and every album, artist and playlist page's whole track list, in the `page_cache` table (`crates/app/src/page_cache.rs`), also held in memory for the session. Home is drawn at launch as soon as the account is known, before the session is confirmed.
 2. **Account:** pages are filed under the chosen channel. Another account purges the old one's pages; signing out by choice purges everything.
 3. **Writes:** a like drops Liked Music's page and an add to a playlist drops that playlist's page and the Library list, at the moment of the write and again when it settles. A fetch that began before a drop cannot put its older answer back. Playlist editing calls `PageCache::invalidate_collection(id)` (browse id or bare `PL...` id); `invalidate_library()` after a playlist or album is created, deleted or saved.
 4. **Failures:** a failed refresh behind cached content is silent, except a dead session ("Sign-in expired"), which always replaces the cached page.
+
+## Search decisions (coordinator brief, 2026-10-04)
+Applied to the popover under the Search field (`ui/search_popover.rs`) and `search.rs`.
+1. **Popover:** one anchored popover hangs under the field, as wide as the field, styled like the track menu (bg.overlay, 8px radius, border.subtle, 4px padding, 32px rows with a 16px Fluent search icon in text.secondary). Up to 8 rows. Up, Down, Enter and Esc work it; a click picks a row. No scrim, no helper text.
+2. **Recents:** with the field focused and empty it lists up to 10 recent searches. Each has an x (Fluent dismiss) that removes it, and the header has a small "Clear" on the right. Recents are saved when a search is made on purpose (Enter, a picked row, or playing or opening a result), newest first, one copy each, 20 kept. A pasted link is never a recent.
+3. **Suggestions:** while typing, the service's completions, asked for after a 150 ms pause (not written to history, so no 2-character minimum), cached per query. The typed text itself and repeats are left out. A failure shows nothing.
+4. **Closing:** Esc closes the popover first, then clears the field, then leaves it. Enter, a pick, and a click outside close it; typing or refocusing an empty field brings it back. Down goes to the results once it is closed.
+5. **Pasted links:** a music.youtube.com, youtube.com or youtu.be link acts on Enter with no confirmation: a track plays now, a playlist, album or artist opens its page. A link is never searched for (nothing is typed into history). A link that is not one of those says "Can't open that link" with a Clear action.
+6. **Hide music videos:** removes the video versions from the Songs group (albums, artists and playlists are untouched). It applies to the answer already on screen, with no new request.
+7. **Settings > Search** (after Playback): "Save recent searches" (on) and "Hide music videos" (off). Turning the first off forgets the list. Signing out forgets it too.
 
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

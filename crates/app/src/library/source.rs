@@ -4,7 +4,7 @@
 use apollo_domain::library::{Collection, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{BrowseId, Track};
-use apollo_provider::{ArtistSection, HomePage};
+use apollo_provider::{ArtistSection, HistoryDay, HomePage, Hit, ListedTrack};
 
 use crate::art::DecodedArt;
 
@@ -18,6 +18,18 @@ pub struct TrackRow {
     pub explicit: bool,
     /// Whether the account has liked the track, when the row said so.
     pub liked: Option<bool>,
+}
+
+impl From<ListedTrack> for TrackRow {
+    fn from(listed: ListedTrack) -> Self {
+        Self {
+            track: listed.track,
+            occurrence: listed.occurrence,
+            thumbnail: listed.thumbnail,
+            explicit: listed.explicit,
+            liked: listed.liked,
+        }
+    }
 }
 
 impl ListItem for TrackRow {
@@ -58,6 +70,16 @@ pub trait LibrarySource: Send + Sync {
 
     /// An artist page: top songs and album rows, all in one answer.
     fn artist(&self, id: &BrowseId) -> Result<ArtistContent, LoadFailure>;
+
+    /// The artists behind the account's library, in the service's order (the Artists tab).
+    fn library_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
+    /// The play history in the service's date buckets, most recent first (the History tab).
+    fn history(&self) -> Result<Vec<HistoryDay>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
 
     /// The account's home feed: its first batch of shelves and the token for the next batch.
     fn home(&self) -> Result<HomePage, LoadFailure> {

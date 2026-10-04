@@ -5,8 +5,8 @@ use apollo_domain::library::{Collection, CollectionKind, PlaylistTarget, WriteFa
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track, VideoId};
 use innertube::{
-    AccountIdentity, AccountInfo, AlbumPage, BrowseItem, PlaylistContinuation, PlaylistOption,
-    PlaylistPage, Rating, SongItem,
+    AccountIdentity, AccountInfo, AlbumPage, BrowseItem, HistoryGroup, PlaylistContinuation,
+    PlaylistOption, PlaylistPage, Rating, SongItem,
 };
 
 /// A track as it appears in a listing: the playable identity plus the row's own occurrence token,
@@ -156,6 +156,29 @@ pub fn collections_from_grid(cards: &[BrowseItem], kind: CollectionKind) -> Vec<
     cards
         .iter()
         .filter_map(|c| collection_from_card(c, kind))
+        .collect()
+}
+
+/// One of YouTube Music's date buckets of the play history ("Today", "Yesterday", "This week"),
+/// most recent play first.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HistoryDay {
+    pub title: String,
+    pub items: Vec<ListedTrack>,
+}
+
+/// The history's buckets in the service's order. A row that cannot be played or shown is dropped,
+/// and a bucket it empties goes with it.
+pub fn history_days(groups: &[HistoryGroup]) -> Vec<HistoryDay> {
+    groups
+        .iter()
+        .filter_map(|g| {
+            let items: Vec<ListedTrack> = g.items.iter().filter_map(track_from_song).collect();
+            (!items.is_empty()).then(|| HistoryDay {
+                title: g.title.clone(),
+                items,
+            })
+        })
         .collect()
 }
 

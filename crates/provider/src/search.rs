@@ -3,6 +3,8 @@
 //! The mapping is pure and tested against recorded responses. Unreadable rows are counted in
 //! `skipped`, never silently dropped, so "nothing found" stays distinct from "could not read".
 
+use std::collections::BTreeSet;
+
 use apollo_domain::model::{ArtistRef, BrowseId, Track, VideoId};
 use innertube::BrowseItem;
 
@@ -29,6 +31,8 @@ pub struct SearchResults {
     pub playlists: Vec<Hit>,
     /// Rows that came back but could not become a result (no usable id or title).
     pub skipped: u32,
+    /// Video ids of `songs` rows that are music videos rather than the audio track.
+    pub video_ids: BTreeSet<String>,
 }
 
 impl SearchResults {
@@ -37,6 +41,14 @@ impl SearchResults {
             && self.albums.is_empty()
             && self.artists.is_empty()
             && self.playlists.is_empty()
+    }
+
+    /// The same results without the songs that are music videos.
+    pub fn without_videos(&self) -> SearchResults {
+        let mut out = self.clone();
+        out.songs
+            .retain(|s| !self.video_ids.contains(s.track.video_id.as_str()));
+        out
     }
 }
 
@@ -60,7 +72,13 @@ pub fn search_results(parsed: &innertube::SearchResults) -> SearchResults {
         seen.push((item.kind, item.id.as_str()));
         match item.kind {
             "song" => match track_from_item(item) {
-                Some(track) => out.songs.push(track),
+                Some(track) => {
+                    if item.is_video {
+                        out.video_ids
+                            .insert(track.track.video_id.as_str().to_owned());
+                    }
+                    out.songs.push(track)
+                }
                 None => out.skipped = out.skipped.saturating_add(1),
             },
             "album" | "artist" | "playlist" => match hit_from_item(item) {
