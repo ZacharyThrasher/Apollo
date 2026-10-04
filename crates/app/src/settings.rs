@@ -3,9 +3,9 @@
 //! with its position.
 //!
 //! The Settings screen's switches go through [`SettingsModel`]: a typed accessor the screen and
-//! the rest of the app share. A setting is declared once as a [`BoolSetting`] constant (key plus
-//! default); the model caches it, notifies observers when it changes, and writes it through on a
-//! background thread.
+//! the rest of the app share. A setting is declared once as a [`BoolSetting`] (or, for a value
+//! that is text, a [`TextSetting`]) constant (key plus default); the model caches it, notifies
+//! observers when it changes, and writes it through on a background thread.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 
+use apollo_domain::audio::Equalizer;
 use apollo_domain::queue::{Queue, QueueSnapshot};
 use apollo_store::Store;
 use gpui::Context;
@@ -37,6 +38,19 @@ impl BoolSetting {
     }
 }
 
+/// A text setting: the store key and what it is until the owner changes it.
+#[derive(Clone, Copy, Debug)]
+pub struct TextSetting {
+    pub key: &'static str,
+    pub default: &'static str,
+}
+
+impl TextSetting {
+    pub const fn new(key: &'static str, default: &'static str) -> Self {
+        Self { key, default }
+    }
+}
+
 /// Playback > Add plays to history: Apollo tells YouTube Music what was played, as its web client
 /// does, so plays show in History and keep shaping Home and mixes. Off sends nothing at all.
 pub const ADD_PLAYS_TO_HISTORY: BoolSetting = BoolSetting::new("add_plays_to_history", true);
@@ -48,12 +62,24 @@ pub const START_MINIMIZED_TO_TRAY: BoolSetting = BoolSetting::new("start_minimiz
 /// seconds (a movie, a call) pauses the music. Off until the owner asks for it.
 pub const PAUSE_ON_OTHER_AUDIO: BoolSetting = BoolSetting::new("pause_on_other_audio", false);
 
+/// Window > Keep mini player on top: the mini player floats above other windows.
+pub const MINI_PLAYER_ON_TOP: BoolSetting = BoolSetting::new("mini_player_on_top", true);
+
 /// Discord > Show what I'm playing: the track shows as Rich Presence in the Discord client.
 pub const DISCORD_PRESENCE: BoolSetting = BoolSetting::new("discord_presence", false);
 
 /// Keyboard > Global hotkeys: Ctrl+Alt shortcuts (play/pause, next, previous, volume) that work
 /// while Apollo is not focused.
 pub const GLOBAL_HOTKEYS: BoolSetting = BoolSetting::new("global_hotkeys", false);
+
+/// Audio > Equalizer: the switch. Off until the owner turns it on.
+pub const EQUALIZER_ENABLED: BoolSetting = BoolSetting::new("equalizer_enabled", false);
+/// Audio > Equalizer: the ten band gains in dB, comma separated (see `Equalizer::gains_to_text`).
+/// Empty is flat. Kept while the switch is off.
+pub const EQUALIZER_GAINS: TextSetting = TextSetting::new("equalizer_gains", "");
+/// Audio > Output device: the id of the device chosen (mpv's device name). Empty is "System
+/// default". Kept while the device is unplugged, so it is used again when it returns.
+pub const AUDIO_DEVICE: TextSetting = TextSetting::new("audio_device", "");
 
 /// Where settings are kept. Blocking: the model only calls it off the UI thread for writes.
 pub trait SettingsBackend: Send + Sync {
@@ -90,7 +116,8 @@ fn parse_bool(value: &str) -> Option<bool> {
 pub struct SettingsModel {
     backend: Option<Arc<dyn SettingsBackend>>,
     cache: RefCell<HashMap<&'static str, bool>>,
-    writer: Option<Sender<(&'static str, bool)>>,
+    text: RefCell<HashMap<&'static str, String>>,
+    writer: Option<Sender<(&'static str, String)>>,
 }
 
 impl SettingsModel {
@@ -98,10 +125,10 @@ impl SettingsModel {
     /// and then only for this run (tests, non-Windows).
     pub fn new(backend: Option<Arc<dyn SettingsBackend>>) -> Self {
         let writer = backend.clone().map(|backend| {
-            let (tx, rx) = channel::<(&'static str, bool)>();
+            let (tx, rx) = channel::<(&'static str, String)>();
             std::thread::spawn(move || {
                 for (key, value) in rx {
-                    backend.set(key, if value { "true" } else { "false" });
+                    backend.set(key, &value);
                 }
             });
             tx
@@ -109,6 +136,7 @@ impl SettingsModel {
         Self {
             backend,
             cache: RefCell::new(HashMap::new()),
+            text: RefCell::new(HashMap::new()),
             writer,
         }
     }
@@ -138,9 +166,49 @@ impl SettingsModel {
         }
         self.cache.borrow_mut().insert(setting.key, value);
         if let Some(writer) = &self.writer {
-            let _ = writer.send((setting.key, value));
+            let _ = writer.send((setting.key, if value { "true" } else { "false" }.to_owned()));
         }
         cx.notify();
+    }
+
+    pub fn get_text(&self, setting: &TextSetting) -> String {
+        if let Some(value) = self.text.borrow().get(setting.key) {
+            return value.clone();
+        }
+        let value = self
+            .backend
+            .as_ref()
+            .and_then(|b| b.get(setting.key))
+            .unwrap_or_else(|| setting.default.to_owned());
+        self.text
+            .borrow_mut()
+            .insert(setting.key, value.clone());
+        value
+    }
+
+    pub fn set_text(&mut self, setting: &TextSetting, value: &str, cx: &mut Context<Self>) {
+        if self.get_text(setting) == value {
+            return;
+        }
+        self.text.borrow_mut().insert(setting.key, value.to_owned());
+        if let Some(writer) = &self.writer {
+            let _ = writer.send((setting.key, value.to_owned()));
+        }
+        cx.notify();
+    }
+
+    /// The equalizer as saved: the switch and the curve. A damaged curve reads as flat.
+    pub fn equalizer(&self) -> Equalizer {
+        Equalizer {
+            enabled: self.get(&EQUALIZER_ENABLED),
+            gains_db: Equalizer::gains_from_text(&self.get_text(&EQUALIZER_GAINS))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The output device chosen, `None` for the system default.
+    pub fn audio_device(&self) -> Option<String> {
+        Some(self.get_text(&AUDIO_DEVICE)).filter(|id| !id.is_empty())
     }
 }
 
@@ -557,5 +625,34 @@ mod tests {
         let backend = Arc::new(SqliteSettings::at(dir.path().join("apollo.db")));
         backend.set(CLOSE_TO_TRAY.key, "maybe");
         assert!(SettingsModel::new(Some(backend)).get(&CLOSE_TO_TRAY));
+    }
+
+    #[test]
+    fn text_settings_start_at_their_default_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(SqliteSettings::at(dir.path().join("apollo.db")));
+        let model = SettingsModel::new(Some(backend.clone()));
+        assert_eq!(model.get_text(&AUDIO_DEVICE), "");
+        assert_eq!(model.audio_device(), None);
+        backend.set(AUDIO_DEVICE.key, "wasapi/{abc}");
+        let model = SettingsModel::new(Some(backend));
+        assert_eq!(model.audio_device().as_deref(), Some("wasapi/{abc}"));
+    }
+
+    #[test]
+    fn the_equalizer_reads_as_off_and_flat_until_saved_and_damage_reads_as_flat() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(SqliteSettings::at(dir.path().join("apollo.db")));
+        let model = SettingsModel::new(Some(backend.clone()));
+        assert_eq!(model.equalizer(), Equalizer::flat());
+        backend.set(EQUALIZER_ENABLED.key, "true");
+        backend.set(EQUALIZER_GAINS.key, "6,5,4,2,0,0,0,0,0,0");
+        let model = SettingsModel::new(Some(backend.clone()));
+        let eq = model.equalizer();
+        assert!(eq.enabled);
+        assert_eq!(eq.gains_db[0], 6.0);
+        backend.set(EQUALIZER_GAINS.key, "6,5,oops");
+        let model = SettingsModel::new(Some(backend));
+        assert_eq!(model.equalizer().gains_db, [0.0; 10]);
     }
 }

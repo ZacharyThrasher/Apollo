@@ -35,6 +35,8 @@ use crate::ui::library::{self, LibraryView};
 use crate::ui::lyrics_pane::LyricsPane;
 use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
+use crate::ui::audio_page::AudioPage;
+use crate::ui::choice_menu::{self, ChoiceHandle, ChoiceMenu};
 use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus};
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
@@ -91,6 +93,9 @@ pub fn bind_keys(cx: &mut App) {
     explore_page::bind_keys(cx);
     playlist_picker::bind_keys(cx);
     track_menu::bind_keys(cx);
+    choice_menu::bind_keys(cx);
+    crate::ui::vslider::bind_keys(cx);
+    crate::ui::mini_player::bind_keys(cx);
 }
 
 /// A toast on screen, possibly on its way out.
@@ -117,6 +122,8 @@ pub struct Shell {
     picker: Entity<PlaylistPicker>,
     /// The menu a right-click or a row's More button opens.
     menu: Entity<TrackMenu>,
+    /// The pick-one popover of the Output device row and the speed button.
+    choices: Entity<ChoiceMenu>,
     /// The sleep timer popover the moon button in Now Playing opens.
     sleep_menu: Entity<SleepMenu>,
     /// The error on screen: it outlives the notice by the length of its fade-out.
@@ -135,6 +142,8 @@ pub struct Shell {
     routed_to_sign_in: bool,
     /// Keeps the window-activation hook that dismisses tooltips alive.
     _activation: Option<gpui::Subscription>,
+    /// Keeps the recorder of the window's size and position alive.
+    _remembered: Option<gpui::Subscription>,
     route: Route,
     nav_expanded: bool,
     nav_toggled: bool,
@@ -213,7 +222,8 @@ impl Shell {
             like: stop(cx, 26),
             mute: stop(cx, 27),
             volume: stop(cx, 28),
-            // Beside the queue button, ahead of it.
+            // Beside the queue button, ahead of it: mini player, then lyrics, then queue.
+            mini: stop(cx, 29),
             lyrics: stop(cx, 29),
             queue: stop(cx, 29),
         };
@@ -241,6 +251,9 @@ impl Shell {
         });
         cx.observe(&menu, |_, _, cx| cx.notify()).detach();
         cx.set_global(MenuHandle(menu.clone()));
+        let choices = cx.new(ChoiceMenu::new);
+        cx.observe(&choices, |_, _, cx| cx.notify()).detach();
+        cx.set_global(ChoiceHandle(choices.clone()));
         let sleep_menu = cx.new(|cx| SleepMenu::new(player.clone(), cx));
         cx.observe(&sleep_menu, |_, _, cx| cx.notify()).detach();
         cx.set_global(SleepMenuHandle(sleep_menu.clone()));
@@ -315,10 +328,12 @@ impl Shell {
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
         let playback_page =
             cx.new(|cx| PlaybackPage::new(player.clone(), settings.clone(), cx));
+        let audio_page = cx.new(|cx| AudioPage::new(player.clone(), settings.clone(), cx));
         let settings_page = cx.new(|cx| {
             SettingsPage::new(
                 account_page,
                 playback_page,
+                audio_page,
                 settings.clone(),
                 player.clone(),
                 cx,
@@ -433,6 +448,7 @@ impl Shell {
             writes,
             picker,
             menu,
+            choices,
             sleep_menu,
             toast: None,
             detail_origin: None,
@@ -441,6 +457,7 @@ impl Shell {
             search_account_live: false,
             routed_to_sign_in: false,
             _activation: None,
+            _remembered: None,
             route: Route::Home,
             nav_expanded: false,
             nav_toggled: false,
@@ -561,6 +578,7 @@ impl Shell {
             ("bar-like", bar.like.clone()),
             ("bar-mute", bar.mute.clone()),
             ("bar-volume", bar.volume.clone()),
+            ("bar-mini", bar.mini.clone()),
             ("bar-lyrics", bar.lyrics.clone()),
             ("bar-queue", bar.queue.clone()),
         ]);
@@ -606,6 +624,10 @@ impl Shell {
 
     pub fn menu(&self) -> &Entity<TrackMenu> {
         &self.menu
+    }
+
+    pub fn choices(&self) -> &Entity<ChoiceMenu> {
+        &self.choices
     }
 
     pub fn nav_expanded(&self) -> bool {
@@ -906,6 +928,11 @@ impl Shell {
     }
 
     /// Hooks that need the window: tooltips go away when it loses focus.
+    /// Keeps `subscription` (the window's position recorder) alive as long as the shell.
+    pub fn keep(&mut self, subscription: Option<gpui::Subscription>) {
+        self._remembered = subscription;
+    }
+
     pub fn install_window_hooks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._activation = Some(cx.observe_window_activation(window, |_, window, cx| {
             if !window.is_window_active() {
@@ -1175,6 +1202,7 @@ impl Render for Shell {
                 let shell = shell.clone();
                 move |_, cx| shell.update(cx, |s, cx| s.toggle_lyrics(cx))
             })),
+            on_mini_player: Rc::new(Box::new(|_, cx| crate::mini::open(cx))),
             on_queue_toggle: Rc::new(Box::new({
                 let shell = shell.clone();
                 move |_, cx| shell.update(cx, |s, cx| s.toggle_queue(cx))
@@ -1215,6 +1243,7 @@ impl Render for Shell {
         });
         let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
         let menu = self.menu.read(cx).is_open().then(|| self.menu.clone());
+        let choices = self.choices.read(cx).is_open().then(|| self.choices.clone());
         let sleep_menu = self
             .sleep_menu
             .read(cx)
@@ -1289,6 +1318,7 @@ impl Render for Shell {
             .children(toast)
             .children(picker)
             .children(menu)
+            .children(choices)
             .children(sleep_menu)
     }
 }

@@ -1,6 +1,6 @@
 //! Settings: one scrolling column of sections. Account first (its own page), then the sections
-//! of switches built from [`SettingsSection`] and [`SettingsRow`]: Playback, Search, Window,
-//! Discord, then Keyboard.
+//! of switches built from [`SettingsSection`] and [`SettingsRow`]: Playback, Audio, Search,
+//! Window, Discord, then Keyboard.
 
 use apollo_theme::tokens::spacing;
 use gpui::{
@@ -13,9 +13,10 @@ use crate::player::PlayerModel;
 use crate::search::{HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES};
 use crate::settings::{
     BoolSetting, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS,
-    START_MINIMIZED_TO_TRAY,
+    MINI_PLAYER_ON_TOP, START_MINIMIZED_TO_TRAY,
 };
 use crate::ui::account_page::{self, AccountPage};
+use crate::ui::audio_page::AudioPage;
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::settings_row::{SettingsRow, SettingsSection};
 
@@ -25,6 +26,7 @@ pub const MAX_WIDTH: f32 = 720.0;
 pub struct SettingsPage {
     account_page: Entity<AccountPage>,
     playback_page: Entity<PlaybackPage>,
+    audio_page: Entity<AudioPage>,
     settings: Entity<SettingsModel>,
     player: Entity<PlayerModel>,
     focus: Vec<FocusHandle>,
@@ -36,6 +38,7 @@ impl SettingsPage {
     pub fn new(
         account_page: Entity<AccountPage>,
         playback_page: Entity<PlaybackPage>,
+        audio_page: Entity<AudioPage>,
         settings: Entity<SettingsModel>,
         player: Entity<PlayerModel>,
         cx: &mut Context<Self>,
@@ -44,6 +47,7 @@ impl SettingsPage {
         Self {
             account_page,
             playback_page,
+            audio_page,
             settings,
             player,
             focus: Vec::new(),
@@ -90,7 +94,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(7, cx);
+        let h = self.handles(8, cx);
 
         let search_section = SettingsSection::new("Search")
             .row(self.bool_row(
@@ -148,6 +152,15 @@ impl Render for SettingsPage {
             );
         }
 
+        window_section = window_section.row(self.bool_row(
+            "setting-mini-player-on-top",
+            "Keep mini player on top",
+            &MINI_PLAYER_ON_TOP,
+            &h[7],
+            accent,
+            cx,
+        ));
+
         let discord_section = SettingsSection::new("Discord").row(self.bool_row(
             "setting-discord-presence",
             "Show what I'm playing",
@@ -177,6 +190,7 @@ impl Render for SettingsPage {
             .pb(px(spacing::S8))
             .child(self.account_page.clone())
             .child(self.playback_page.clone())
+            .child(self.audio_page.clone())
             .child(search_section)
             .child(window_section)
             .child(discord_section)

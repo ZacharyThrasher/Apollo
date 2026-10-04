@@ -31,6 +31,8 @@ pub enum TrayCommand {
     ToggleWindow,
     /// "Show Apollo".
     ShowWindow,
+    /// "Mini player".
+    MiniPlayer,
     PlayPause,
     Next,
     Previous,
@@ -48,6 +50,7 @@ impl TrayCommand {
             TrayCommand::Previous => Some(OsCommand::Previous),
             TrayCommand::ToggleWindow
             | TrayCommand::ShowWindow
+            | TrayCommand::MiniPlayer
             | TrayCommand::Sleep(_)
             | TrayCommand::Quit => None,
         }
@@ -376,6 +379,7 @@ mod tests {
             Some(OsCommand::Previous)
         );
         assert_eq!(TrayCommand::Quit.player_command(), None);
+        assert_eq!(TrayCommand::MiniPlayer.player_command(), None);
         assert_eq!(TrayCommand::ToggleWindow.player_command(), None);
         assert_eq!(
             TrayCommand::Sleep(SleepChoice::EndOfTrack).player_command(),
