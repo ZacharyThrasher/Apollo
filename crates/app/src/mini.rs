@@ -6,9 +6,17 @@
 //! window (the tray, a second launch of the app) goes through [`show_main`] and the mini
 //! player gives way.
 //!
+//! A main window expanded *from* the mini player (the expand button, double-clicking the art,
+//! Esc) is the mini player's guest: its close button collapses it back to the mini player
+//! rather than closing or hiding it, and, with "Collapse when Apollo loses focus" on, it
+//! collapses by itself [`COLLAPSE_GRACE`] after Apollo stops being the active app (cancelled if
+//! Apollo comes back first). Showing the main window any other way (the tray, a second
+//! launch) is ordinary: close keeps its usual meaning.
+//!
 //! The view is `ui/mini_player.rs`; the remembered position is `window_state.rs`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     App, AppContext, Entity, Global, WindowBackgroundAppearance, WindowBounds, WindowHandle,
@@ -16,7 +24,7 @@ use gpui::{
 };
 
 use crate::player::PlayerModel;
-use crate::settings::{SettingsBackend, SettingsModel, MINI_PLAYER_HUD};
+use crate::settings::{SettingsBackend, SettingsModel, MINI_COLLAPSE_ON_BLUR, MINI_PLAYER_HUD};
 use crate::ui::mini_player::{self, MiniPlayer};
 use crate::ui::shell::Shell;
 use crate::window_state::{self, Constraints, Home, KEY_HUD, KEY_MINI};
@@ -28,12 +36,15 @@ pub const PLACEMENT: Constraints = Constraints {
     home: Home::BottomRight,
 };
 
-/// The HUD's window: the panel plus room for its shadow, parked in the same corner.
+/// The HUD's window: the panel and nothing round it, parked in the same corner.
 pub const HUD_PLACEMENT: Constraints = Constraints {
     default_size: (mini_player::HUD_WIDTH, mini_player::HUD_HEIGHT),
     min_size: (mini_player::HUD_WIDTH, mini_player::HUD_HEIGHT),
     home: Home::BottomRight,
 };
+
+/// How long Apollo may be out of focus before an expanded main window collapses back.
+pub const COLLAPSE_GRACE: Duration = Duration::from_millis(1500);
 
 /// What the controller needs, kept for the life of the app.
 struct Host {
@@ -44,6 +55,11 @@ struct Host {
     mini: Option<WindowHandle<MiniPlayer>>,
     /// The mini player is open but hidden (the HUD hotkey).
     hidden: bool,
+    /// The main window is showing because it was expanded from the mini player.
+    from_mini: bool,
+    /// Counts focus changes of the main window, so a pending collapse can tell it was
+    /// overtaken.
+    focus_changes: u64,
 }
 
 impl Global for Host {}
@@ -64,7 +80,74 @@ pub fn install(
         store,
         mini: None,
         hidden: false,
+        from_mini: false,
+        focus_changes: 0,
     });
+    // The main window's close button, Alt+F4 and the taskbar's Close, wherever no tray icon
+    // takes the request over (the tray's own handler asks `collapse_on_close` first).
+    let _ = main.update(cx, |_, window, cx| {
+        window.on_window_should_close(cx, |_, cx| !collapse_on_close(cx));
+    });
+    // Losing the keyboard to another app starts the grace period.
+    let _ = main.update(cx, |_, window, cx| {
+        cx.observe_window_activation(window, |_, window, cx| {
+            main_activation_changed(window.is_window_active(), cx);
+        })
+        .detach();
+    });
+}
+
+/// Whether the main window is showing as the mini player's guest.
+pub fn expanded_from_mini(cx: &App) -> bool {
+    cx.try_global::<Host>().is_some_and(|h| h.from_mini) && !is_open(cx)
+}
+
+/// A close request on the main window: when it was expanded from the mini player it collapses
+/// back instead. True when it did (the window must then not close or hide).
+pub fn collapse_on_close(cx: &mut App) -> bool {
+    if !expanded_from_mini(cx) {
+        return false;
+    }
+    // Deferred: the request comes from inside the main window's own update.
+    cx.defer(open);
+    true
+}
+
+/// The main window gained or lost the keyboard. An expanded window that lost it collapses after
+/// [`COLLAPSE_GRACE`] unless it has it back by then.
+pub fn main_activation_changed(active: bool, cx: &mut App) {
+    if !cx.has_global::<Host>() {
+        return;
+    }
+    let host = cx.global_mut::<Host>();
+    host.focus_changes += 1;
+    let seen = host.focus_changes;
+    if active {
+        return;
+    }
+    let (main, settings) = (host.main, host.settings.clone());
+    if !expanded_from_mini(cx) || !settings.read(cx).get(&MINI_COLLAPSE_ON_BLUR) {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(COLLAPSE_GRACE).await;
+        cx.update(|cx| {
+            let unchanged = cx
+                .try_global::<Host>()
+                .is_some_and(|h| h.focus_changes == seen);
+            let away = main
+                .update(cx, |_, window, _| !window.is_window_active())
+                .unwrap_or(false);
+            if unchanged
+                && away
+                && expanded_from_mini(cx)
+                && settings.read(cx).get(&MINI_COLLAPSE_ON_BLUR)
+            {
+                open(cx);
+            }
+        });
+    })
+    .detach();
 }
 
 /// The mini player's window, if it is open.
@@ -80,6 +163,9 @@ pub fn is_open(cx: &App) -> bool {
 
 /// Opens the mini player and hides the main window; with it already open, brings it forward.
 pub fn open(cx: &mut App) {
+    if cx.has_global::<Host>() {
+        cx.global_mut::<Host>().from_mini = false;
+    }
     if let Some(mini) = window(cx) {
         if cx.global::<Host>().hidden {
             set_hidden(cx, false);
@@ -109,7 +195,9 @@ pub fn open(cx: &mut App) {
         (KEY_MINI, &PLACEMENT)
     };
     let place = window_state::restore(cx, store.as_ref(), key, placement);
-    let Ok(writes) = main.read_with(cx, |shell, _| shell.writes().clone()) else {
+    let Ok((writes, lyrics)) = main.read_with(cx, |shell, _| {
+        (shell.writes().clone(), shell.lyrics().clone())
+    }) else {
         return;
     };
     let opened = cx.open_window(
@@ -140,6 +228,7 @@ pub fn open(cx: &mut App) {
                     player,
                     settings,
                     writes,
+                    lyrics,
                     hud,
                     |_, cx| cx.defer(return_to_main),
                     cx,
@@ -156,9 +245,8 @@ pub fn open(cx: &mut App) {
         }
     };
     let _ = mini.update(cx, |view, window, cx| {
-        if hud {
-            view.start_hud(window, cx);
-        } else {
+        view.start(window, cx);
+        if !hud {
             view.focus_root(window, cx);
         }
         // Closing it any other way (Alt+F4) still brings the main window back.
@@ -226,12 +314,16 @@ pub fn return_to_main(cx: &mut App) {
     let Some(main) = cx.try_global::<Host>().map(|h| h.main) else {
         return;
     };
+    cx.global_mut::<Host>().from_mini = true;
     let _ = main.update(cx, |_, window, _| crate::platform::show_window(window));
 }
 
 /// Brings the main window forward for the tray or a second launch, whichever of the two
 /// windows was showing.
 pub fn show_main(cx: &mut App, main: WindowHandle<Shell>) {
+    if cx.has_global::<Host>() {
+        cx.global_mut::<Host>().from_mini = false;
+    }
     dismiss(cx);
     let _ = main.update(cx, |_, window, _| crate::platform::show_window(window));
 }

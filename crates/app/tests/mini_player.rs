@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 
 use apollo_app::art::{ArtSource, DecodedArt, SyntheticArt};
 use apollo_app::backend::{LibraryTrack, Ports, Prepared};
-use apollo_app::hud::{DIM, HOLD};
+use apollo_app::hud::{DIM, HOLD, IDLE_DIM};
 use apollo_app::mini;
 use apollo_app::player::PlayerModel;
 use apollo_app::search::Unavailable;
 use apollo_app::settings::{
-    SettingsBackend, SettingsModel, HUD_AUTO_HIDE, MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP,
+    SettingsBackend, SettingsModel, HUD_AUTO_HIDE, MINI_COLLAPSE_ON_BLUR, MINI_DIM,
+    MINI_FADE_CONTROLS, MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP, MINI_SHOW_LYRICS, MINI_SHOW_VOLUME,
 };
 use apollo_app::style::Fonts;
 use apollo_app::ui::mini_player::{self, MiniPlayer};
@@ -23,11 +24,12 @@ use apollo_app::ui::shell::{self, Shell};
 use apollo_app::url_thumbs::NoThumbs;
 use apollo_app::window_state::{self, SavedWindow, KEY_HUD, KEY_MAIN, KEY_MINI};
 use apollo_domain::model::Track;
-use apollo_domain::playback::Intent;
+use apollo_domain::playback::{EngineEvent, Event, Intent, LeaseId};
+use apollo_lyrics::{FetchError, Line, Lyrics, LyricsQuery, LyricsService, LyricsSource};
 use apollo_runtime::mock::{MockEngine, MockResolver};
 use gpui::{
     point, px, size, AppContext, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-    TestAppContext, VisualTestContext, WindowHandle, WindowOptions,
+    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, WindowHandle, WindowOptions,
 };
 
 /// An in-memory settings table that counts its writes.
@@ -156,7 +158,6 @@ fn opening_the_mini_player_makes_one_small_window_in_the_corner(cx: &mut TestApp
     let windows = cx.update(|cx| cx.windows().len());
     cx.update(mini::open);
     assert_eq!(cx.update(|cx| cx.windows().len()), windows);
-    drop(world);
 }
 
 #[gpui::test]
@@ -528,7 +529,7 @@ fn with_auto_hide_off_the_hud_stays_solid(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_hud_snaps_to_the_nearest_corner_once_it_sits_still(cx: &mut TestAppContext) {
     // Left near the bottom-right corner of the 1920x1080 test display.
-    let store = MemoryStore::with(&[(KEY_HUD, "1550,960,360,104,0")]);
+    let store = MemoryStore::with(&[(KEY_HUD, "1580,1000,320,64,0")]);
     let (_world, handle, hand) = open_hud(cx, Some(store));
     hand.pass(0.3, cx);
     assert_eq!(
@@ -541,10 +542,9 @@ fn the_hud_snaps_to_the_nearest_corner_once_it_sits_still(cx: &mut TestAppContex
         .read_with(cx, |m, _| m.last_snap())
         .unwrap()
         .expect("snapped");
-    // It is the 320x64 panel that sits 16px in; the window has 20px of shadow room around it.
-    let pad = mini_player::HUD_PAD;
+    // It is the 320x64 panel (the whole window) that sits 16px in.
     assert_eq!(
-        (snap.x + pad, snap.y + pad),
+        (snap.x, snap.y),
         (1920.0 - 320.0 - 16.0, 1080.0 - 64.0 - 16.0),
         "16px in from the corner"
     );
@@ -574,7 +574,7 @@ fn the_hud_hotkey_shows_and_hides_without_closing_the_mini_player(cx: &mut TestA
 }
 
 #[gpui::test]
-fn the_hud_is_a_320_by_64_panel_with_room_for_its_shadow_and_its_own_saved_place(
+fn the_hud_window_is_exactly_the_320_by_64_panel_and_has_its_own_saved_place(
     cx: &mut TestAppContext,
 ) {
     let store = MemoryStore::with(&[(KEY_MINI, "100,100,360,96,0")]);
@@ -593,7 +593,12 @@ fn the_hud_is_a_320_by_64_panel_with_room_for_its_shadow_and_its_own_saved_place
     );
     assert_eq!(
         (f32::from(panel.origin.x), f32::from(panel.origin.y)),
-        (mini_player::HUD_PAD, mini_player::HUD_PAD)
+        (0.0, 0.0),
+        "nothing round the panel: no margin, so no frame"
+    );
+    assert_eq!(
+        (f32::from(window.width), f32::from(window.height)),
+        (320.0, 64.0)
     );
     // Its place is not the mini player's: the mini player's saved spot is left alone.
     assert!(store.writes_of(KEY_MINI).is_empty());
@@ -622,7 +627,7 @@ fn under_the_pointer_the_panel_goes_opaque_and_the_controls_appear(cx: &mut Test
         .expect("controls under the pointer");
     // Previous, play/pause, next and the heart, 28px each, at the panel's right.
     assert!(f32::from(controls.size.width) >= 4.0 * 28.0);
-    assert_eq!(f32::from(controls.size.height), 64.0 - 2.0);
+    assert_eq!(f32::from(controls.size.height), 64.0);
 
     hand.inside.set(false);
     hand.pass(0.3, cx);
@@ -642,4 +647,522 @@ fn a_new_track_changes_over_for_a_moment_and_then_settles(cx: &mut TestAppContex
     assert!(changing(cx), "title, artist and art are crossing over");
     hand.pass(0.3, cx);
     assert!(!changing(cx), "settled after the swap time");
+}
+
+// ---- Mini player upgrades: idle fade, volume, lyrics, collapse -------------------------------
+
+fn volume_of(world: &World, cx: &mut TestAppContext) -> u8 {
+    world.player.read_with(cx, |m, _| m.view().volume)
+}
+
+fn open_plain(cx: &mut TestAppContext) -> (World, WindowHandle<MiniPlayer>, Hand) {
+    let world = setup(cx, None);
+    cx.update(mini::open);
+    cx.run_until_parked();
+    let handle = cx.update(|cx| mini::window(cx)).expect("opened");
+    let hand = Hand::new();
+    hand.attach(handle, cx);
+    // The test pointer starts over the window; send it away so the window can go idle.
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.simulate_mouse_move(point(px(-50.0), px(-50.0)), None, Modifiers::default());
+    cx.run_until_parked();
+    (world, handle, hand)
+}
+
+fn levels(handle: WindowHandle<MiniPlayer>, cx: &mut TestAppContext) -> (f32, f32) {
+    handle
+        .read_with(cx, |m, _| (m.controls_level(), m.window_level()))
+        .unwrap()
+}
+
+#[gpui::test]
+fn left_alone_the_controls_fade_and_then_the_window_dims_and_the_pointer_restores_both(
+    cx: &mut TestAppContext,
+) {
+    let (_world, handle, hand) = open_plain(cx);
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    hand.pass(3.8, cx);
+    assert_eq!(levels(handle, cx), (1.0, 1.0));
+    assert!(vcx.debug_bounds("mini-controls").is_some());
+
+    // The controls go first (150 ms), then the window dims toward 60%.
+    hand.pass(0.25, cx);
+    let (controls, window) = levels(handle, cx);
+    assert!(controls < 1.0, "fading: {controls}");
+    assert_eq!(window, 1.0, "the window waits for them");
+    hand.pass(0.2, cx);
+    assert_eq!(levels(handle, cx).0, 0.0);
+    assert!(
+        vcx.debug_bounds("mini-controls").is_none(),
+        "nothing left to click"
+    );
+    hand.pass(1.0, cx);
+    let (controls, window) = levels(handle, cx);
+    assert_eq!(controls, 0.0);
+    assert!((window - IDLE_DIM).abs() < 1e-3, "{window}");
+
+    // The pointer over the window brings everything back at once, without waiting for a poll.
+    vcx.simulate_mouse_move(point(px(200.0), px(40.0)), None, Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(levels(handle, cx), (1.0, 1.0));
+    assert!(vcx.debug_bounds("mini-controls").is_some());
+    hand.pass(10.0, cx);
+    assert_eq!(
+        levels(handle, cx),
+        (1.0, 1.0),
+        "stays while the pointer is over"
+    );
+
+    // Leaving starts a fresh wait.
+    vcx.simulate_mouse_move(point(px(-50.0), px(-50.0)), None, Modifiers::default());
+    cx.run_until_parked();
+    hand.pass(3.0, cx);
+    assert_eq!(levels(handle, cx), (1.0, 1.0));
+    hand.pass(2.0, cx);
+    assert_eq!(levels(handle, cx).0, 0.0);
+}
+
+#[gpui::test]
+fn the_idle_fades_are_each_a_setting(cx: &mut TestAppContext) {
+    let (world, handle, hand) = open_plain(cx);
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_FADE_CONTROLS, false, cx));
+    hand.pass(6.0, cx);
+    let (controls, window) = levels(handle, cx);
+    assert_eq!(controls, 1.0, "controls stay with Fade controls off");
+    assert!((window - IDLE_DIM).abs() < 1e-3, "{window}");
+
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_DIM, false, cx));
+    hand.pass(0.5, cx);
+    assert_eq!(levels(handle, cx), (1.0, 1.0), "Dim off brings it back");
+    hand.pass(8.0, cx);
+    assert_eq!(levels(handle, cx), (1.0, 1.0), "and it stays");
+
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_FADE_CONTROLS, true, cx));
+    hand.pass(5.0, cx);
+    assert_eq!(levels(handle, cx), (0.0, 1.0), "only the controls fade");
+}
+
+#[gpui::test]
+fn a_new_track_shows_a_faded_mini_player_again(cx: &mut TestAppContext) {
+    let (world, handle, hand) = open_plain(cx);
+    hand.pass(6.0, cx);
+    assert_eq!(levels(handle, cx).0, 0.0);
+    world.player.update(cx, |m, cx| m.next(cx));
+    cx.run_until_parked();
+    hand.pass(0.5, cx);
+    assert_eq!(levels(handle, cx), (1.0, 1.0));
+}
+
+#[gpui::test]
+fn the_volume_slider_is_72px_shares_the_app_volume_and_is_a_setting(cx: &mut TestAppContext) {
+    let (world, handle, _hand) = open_plain(cx);
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    world.player.update(cx, |m, cx| m.set_volume(30, cx));
+    cx.run_until_parked();
+    let slider = vcx
+        .debug_bounds("mini-volume")
+        .expect("the volume slider shows");
+    assert_eq!(f32::from(slider.size.width), 72.0);
+    // It sits on the right, under the buttons.
+    assert!(f32::from(slider.left()) > 200.0);
+
+    // A click halfway along sets half volume, in the player the main window uses.
+    vcx.simulate_click(
+        point(slider.left() + slider.size.width * 0.5, slider.center().y),
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert_eq!(volume_of(&world, cx), 50);
+
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_SHOW_VOLUME, false, cx));
+    cx.run_until_parked();
+    assert!(vcx.debug_bounds("mini-volume").is_none(), "off hides it");
+    assert!(
+        vcx.debug_bounds("mini-controls").is_some(),
+        "the buttons stay"
+    );
+}
+
+#[gpui::test]
+fn the_wheel_over_the_window_changes_the_volume_five_percent_a_notch(cx: &mut TestAppContext) {
+    let (world, handle, _hand) = open_plain(cx);
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    world.player.update(cx, |m, cx| m.set_volume(50, cx));
+    cx.run_until_parked();
+    let wheel = |vcx: &mut VisualTestContext, at: (f32, f32), delta: ScrollDelta| {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: point(px(at.0), px(at.1)),
+            delta,
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+    };
+    // Over the text, then over the art (which blocks the pointer from the window behind it).
+    wheel(&mut vcx, (200.0, 40.0), ScrollDelta::Lines(point(0.0, 3.0)));
+    assert_eq!(volume_of(&world, cx), 55, "up is louder");
+    wheel(&mut vcx, (48.0, 48.0), ScrollDelta::Lines(point(0.0, -3.0)));
+    wheel(&mut vcx, (48.0, 48.0), ScrollDelta::Lines(point(0.0, -3.0)));
+    assert_eq!(
+        volume_of(&world, cx),
+        45,
+        "down is quieter, over the art too"
+    );
+    // A touchpad needs a good stretch of scrolling for one step.
+    wheel(
+        &mut vcx,
+        (200.0, 40.0),
+        ScrollDelta::Pixels(point(px(0.0), px(15.0))),
+    );
+    assert_eq!(volume_of(&world, cx), 45);
+    wheel(
+        &mut vcx,
+        (200.0, 40.0),
+        ScrollDelta::Pixels(point(px(0.0), px(30.0))),
+    );
+    assert_eq!(volume_of(&world, cx), 50);
+
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_SHOW_VOLUME, false, cx));
+    wheel(&mut vcx, (200.0, 40.0), ScrollDelta::Lines(point(0.0, 3.0)));
+    assert_eq!(
+        volume_of(&world, cx),
+        50,
+        "Show volume off leaves the wheel alone"
+    );
+}
+
+// -- lyrics --
+
+/// Synced lines every five seconds for the first track; nothing for the others.
+struct Script;
+impl LyricsSource for Script {
+    fn fetch(&self, q: &LyricsQuery) -> Result<Option<Lyrics>, FetchError> {
+        Ok((q.video_id == "track000000").then(|| {
+            Lyrics::Synced(
+                (0..6)
+                    .map(|i| Line {
+                        start_ms: 5_000 * (i + 1),
+                        text: if i == 3 {
+                            "   ".into()
+                        } else {
+                            format!("Line number {i}")
+                        },
+                    })
+                    .collect(),
+            )
+        }))
+    }
+}
+
+fn with_lyrics(world: &World, cx: &mut TestAppContext) {
+    let service = Arc::new(LyricsService::new(vec![Arc::new(Script)], None));
+    world
+        .main
+        .update(cx, |shell, _, cx| {
+            shell.lyrics().update(cx, |l, cx| l.install(service, cx))
+        })
+        .unwrap();
+    cx.run_until_parked();
+}
+
+/// Starts the first track and reports a position.
+fn play_at(world: &World, cx: &mut TestAppContext, position_ms: u64) {
+    let started = world
+        .player
+        .read_with(cx, |m, _| m.coordinator().unwrap().active_load());
+    let load = match started {
+        Some(load) => load,
+        None => {
+            world.player.update(cx, |m, cx| m.handle(Event::Play, cx));
+            world
+                .player
+                .read_with(cx, |m, _| m.coordinator().unwrap().active_load().unwrap())
+        }
+    };
+    world.player.update(cx, |m, cx| {
+        if position_ms == 0 || m.view().position_ms == 0 {
+            m.handle(
+                Event::Resolved {
+                    load,
+                    result: Ok(LeaseId(1)),
+                },
+                cx,
+            );
+            m.handle(
+                Event::Engine {
+                    load,
+                    event: EngineEvent::Opened {
+                        duration_ms: Some(200_000),
+                    },
+                },
+                cx,
+            );
+        }
+        m.handle(
+            Event::Engine {
+                load,
+                event: EngineEvent::Position(position_ms),
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_current_synced_line_shows_under_the_artist_when_lyrics_are_on(cx: &mut TestAppContext) {
+    let (world, handle, hand) = open_plain(cx);
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    with_lyrics(&world, cx);
+    play_at(&world, cx, 6_000);
+    let line = |cx: &mut TestAppContext| {
+        handle
+            .read_with(cx, |m, _| m.lyric_line().map(str::to_owned))
+            .unwrap()
+    };
+    assert_eq!(
+        line(cx).as_deref(),
+        Some("Line number 0"),
+        "followed even while off"
+    );
+    assert!(
+        vcx.debug_bounds("mini-lyric").is_none(),
+        "Show lyrics is off by default"
+    );
+
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_SHOW_LYRICS, true, cx));
+    cx.run_until_parked();
+    let row = vcx.debug_bounds("mini-lyric").expect("the lyric row");
+    assert_eq!(f32::from(row.size.height), 16.0);
+    // Under the title and artist, in the text column.
+    assert!(f32::from(row.origin.y) > 40.0);
+    assert!(f32::from(row.origin.x) > 90.0);
+
+    play_at(&world, cx, 11_000);
+    assert_eq!(line(cx).as_deref(), Some("Line number 1"));
+    // The cross-fade runs and ends.
+    hand.pass(0.1, cx);
+    hand.pass(0.3, cx);
+    assert_eq!(line(cx).as_deref(), Some("Line number 1"));
+
+    // A blank line shows nothing; so does a track without synced lyrics.
+    play_at(&world, cx, 21_000);
+    assert_eq!(line(cx), None, "an instrumental gap is empty");
+    assert!(
+        vcx.debug_bounds("mini-lyric").is_some(),
+        "the row keeps its room so the text does not jump"
+    );
+    play_at(&world, cx, 26_000);
+    assert_eq!(line(cx).as_deref(), Some("Line number 4"));
+    world.player.update(cx, |m, cx| m.next(cx));
+    cx.run_until_parked();
+    assert_eq!(line(cx), None, "track 1 has no lyrics");
+}
+
+#[gpui::test]
+fn the_hud_shows_the_lyric_line_too(cx: &mut TestAppContext) {
+    let (world, handle, _hand) = open_hud(cx, None);
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    with_lyrics(&world, cx);
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_SHOW_LYRICS, true, cx));
+    play_at(&world, cx, 6_000);
+    assert_eq!(
+        handle
+            .read_with(cx, |m, _| m.lyric_line().map(str::to_owned))
+            .unwrap()
+            .as_deref(),
+        Some("Line number 0")
+    );
+    let row = vcx.debug_bounds("mini-lyric").expect("the HUD's lyric row");
+    let panel = vcx.debug_bounds("hud-panel").expect("panel");
+    assert!(panel.contains(&row.origin) && panel.contains(&row.bottom_right()));
+}
+
+// -- collapse back to the mini player --
+
+#[gpui::test]
+fn closing_a_window_expanded_from_the_mini_player_collapses_back_to_it(cx: &mut TestAppContext) {
+    let world = setup(cx, None);
+    open_mini(cx);
+    assert!(
+        !cx.update(|cx| mini::collapse_on_close(cx)),
+        "nothing expanded yet"
+    );
+    cx.update(mini::return_to_main);
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| mini::is_open(cx)));
+    assert!(cx.update(|cx| mini::expanded_from_mini(cx)));
+
+    // The close request (the X, Alt+F4, the taskbar) goes through the window's should-close.
+    let mut main = VisualTestContext::from_window(world.main.into(), cx);
+    assert!(!main.simulate_close(), "the window stays");
+    cx.run_until_parked();
+    assert!(cx.update(|cx| mini::is_open(cx)), "the mini player is back");
+    assert!(!cx.update(|cx| mini::expanded_from_mini(cx)));
+    // With the mini player showing again, there is nothing more to collapse.
+    assert!(!cx.update(|cx| mini::collapse_on_close(cx)));
+}
+
+#[gpui::test]
+fn showing_the_main_window_any_other_way_keeps_the_normal_close(cx: &mut TestAppContext) {
+    let world = setup(cx, None);
+    open_mini(cx);
+    cx.update(mini::return_to_main);
+    assert!(cx.update(|cx| mini::expanded_from_mini(cx)));
+    // The tray or a second launch asks for it: that is an ordinary window again.
+    cx.update(|cx| mini::show_main(cx, world.main));
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| mini::expanded_from_mini(cx)));
+    assert!(!cx.update(|cx| mini::collapse_on_close(cx)));
+    let mut main = VisualTestContext::from_window(world.main.into(), cx);
+    assert!(main.simulate_close(), "close closes");
+}
+
+#[gpui::test]
+fn an_expanded_window_that_loses_focus_collapses_after_the_grace_period(cx: &mut TestAppContext) {
+    let world = setup(cx, None);
+    open_mini(cx);
+    cx.update(mini::return_to_main);
+    cx.run_until_parked();
+    // The main window is active after the expand; the user switches to another app.
+    VisualTestContext::from_window(world.main.into(), cx).deactivate_window();
+    cx.executor().advance_clock(Duration::from_millis(1_400));
+    cx.run_until_parked();
+    assert!(
+        !cx.update(|cx| mini::is_open(cx)),
+        "still in its grace period"
+    );
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    assert!(cx.update(|cx| mini::is_open(cx)), "collapsed");
+    assert!(!cx.update(|cx| mini::expanded_from_mini(cx)));
+}
+
+#[gpui::test]
+fn focus_coming_back_in_time_cancels_the_collapse(cx: &mut TestAppContext) {
+    let world = setup(cx, None);
+    open_mini(cx);
+    cx.update(mini::return_to_main);
+    cx.run_until_parked();
+    let mut main = VisualTestContext::from_window(world.main.into(), cx);
+    main.deactivate_window();
+    cx.executor().advance_clock(Duration::from_millis(1_000));
+    main.update(|window, _| window.activate_window());
+    main.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(2_000));
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| mini::is_open(cx)), "it stayed expanded");
+    assert!(cx.update(|cx| mini::expanded_from_mini(cx)));
+    // Losing it again starts a fresh grace period.
+    main.deactivate_window();
+    cx.executor().advance_clock(Duration::from_millis(1_600));
+    cx.run_until_parked();
+    assert!(cx.update(|cx| mini::is_open(cx)));
+}
+
+#[gpui::test]
+fn the_collapse_on_focus_loss_only_applies_to_an_expanded_window_with_the_setting_on(
+    cx: &mut TestAppContext,
+) {
+    let world = setup(cx, None);
+    // The main window shown any other way: losing focus does nothing.
+    cx.update(|cx| mini::main_activation_changed(false, cx));
+    cx.executor().advance_clock(Duration::from_secs(5));
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| mini::is_open(cx)));
+
+    // Expanded, with the setting off: nothing either.
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_COLLAPSE_ON_BLUR, false, cx));
+    open_mini(cx);
+    cx.update(mini::return_to_main);
+    cx.update(|cx| mini::main_activation_changed(false, cx));
+    cx.executor().advance_clock(Duration::from_secs(5));
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| mini::is_open(cx)));
+
+    // Turned off during the grace period, it is honoured when the time is up.
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_COLLAPSE_ON_BLUR, true, cx));
+    cx.update(|cx| mini::main_activation_changed(false, cx));
+    cx.executor().advance_clock(Duration::from_millis(500));
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_COLLAPSE_ON_BLUR, false, cx));
+    cx.executor().advance_clock(Duration::from_millis(1_500));
+    cx.run_until_parked();
+    assert!(!cx.update(|cx| mini::is_open(cx)));
+}
+
+// -- Settings > Mini player --
+
+#[gpui::test]
+fn settings_has_a_mini_player_section_after_window_with_the_new_rows_in_order(
+    cx: &mut TestAppContext,
+) {
+    use apollo_app::ui::nav::Route;
+    cx.update(|cx| {
+        Fonts::install(cx);
+        shell::bind_keys(cx);
+    });
+    let player = cx.new(|_| PlayerModel::new());
+    let (shell, vcx) = cx.add_window_view({
+        let player = player.clone();
+        move |_, cx| Shell::new(player, cx)
+    });
+    vcx.simulate_resize(size(px(1280.0), px(2600.0)));
+    shell.update(vcx, |s, cx| s.show_route(Route::Settings, cx));
+    vcx.run_until_parked();
+    let ids = [
+        "setting-start-minimized",
+        "setting-mini-player-on-top",
+        "setting-mini-fade-controls",
+        "setting-mini-dim",
+        "setting-mini-show-volume",
+        "setting-mini-show-lyrics",
+        "setting-mini-collapse-on-blur",
+        "setting-mini-player-hud",
+        "setting-hud-auto-hide",
+        "setting-discord-presence",
+    ];
+    let mut last = f32::MIN;
+    for id in ids {
+        let top = f32::from(
+            vcx.debug_bounds(id)
+                .unwrap_or_else(|| panic!("{id} is on the page"))
+                .origin
+                .y,
+        );
+        assert!(top > last, "{id} is out of order");
+        last = top;
+    }
+    let settings = shell.read_with(vcx, |s, cx| s.settings(cx));
+    let defaults = settings.read_with(vcx, |m, _| {
+        [
+            m.get(&MINI_PLAYER_ON_TOP),
+            m.get(&MINI_FADE_CONTROLS),
+            m.get(&MINI_DIM),
+            m.get(&MINI_SHOW_VOLUME),
+            m.get(&MINI_SHOW_LYRICS),
+            m.get(&MINI_COLLAPSE_ON_BLUR),
+            m.get(&MINI_PLAYER_HUD),
+            m.get(&HUD_AUTO_HIDE),
+        ]
+    });
+    assert_eq!(defaults, [true, true, true, true, false, true, false, true]);
 }

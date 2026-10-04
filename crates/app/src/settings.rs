@@ -68,7 +68,7 @@ pub const START_MINIMIZED_TO_TRAY: BoolSetting = BoolSetting::new("start_minimiz
 /// seconds (a movie, a call) pauses the music. Off until the owner asks for it.
 pub const PAUSE_ON_OTHER_AUDIO: BoolSetting = BoolSetting::new("pause_on_other_audio", false);
 
-/// Window > Keep mini player on top: the mini player floats above other windows.
+/// Mini player > Keep on top: the mini player floats above other windows.
 pub const MINI_PLAYER_ON_TOP: BoolSetting = BoolSetting::new("mini_player_on_top", true);
 
 /// Discord > Show what I'm playing: the track shows as Rich Presence in the Discord client.
@@ -78,11 +78,23 @@ pub const DISCORD_PRESENCE: BoolSetting = BoolSetting::new("discord_presence", f
 /// while Apollo is not focused.
 pub const GLOBAL_HOTKEYS: BoolSetting = BoolSetting::new("global_hotkeys", false);
 
-/// Window > HUD mode for mini player: the mini player becomes an always-on-top, click-through
+/// Mini player > HUD mode: the mini player becomes an always-on-top, click-through
 /// overlay that never takes the keyboard (for watching and controlling music over a game).
 pub const MINI_PLAYER_HUD: BoolSetting = BoolSetting::new("mini_player_hud", false);
-/// Window > Auto-hide HUD: the HUD dims after a few seconds without a track change.
+/// Mini player > Auto-hide HUD: the HUD dims after a few seconds without a track change.
 pub const HUD_AUTO_HIDE: BoolSetting = BoolSetting::new("hud_auto_hide", true);
+/// Mini player > Fade controls when idle: after a few seconds without the pointer, the transport
+/// buttons and the volume slider fade out.
+pub const MINI_FADE_CONTROLS: BoolSetting = BoolSetting::new("mini_fade_controls", true);
+/// Mini player > Dim when idle: after the same wait, the whole window dims.
+pub const MINI_DIM: BoolSetting = BoolSetting::new("mini_dim", true);
+/// Mini player > Show volume: the volume slider, and the mouse wheel changing the volume.
+pub const MINI_SHOW_VOLUME: BoolSetting = BoolSetting::new("mini_show_volume", true);
+/// Mini player > Show lyrics: the current synced lyric line under the artist (also in the HUD).
+pub const MINI_SHOW_LYRICS: BoolSetting = BoolSetting::new("mini_show_lyrics", false);
+/// Mini player > Collapse when Apollo loses focus: a main window expanded from the mini player
+/// goes back to it after a short grace period once Apollo is no longer the active app.
+pub const MINI_COLLAPSE_ON_BLUR: BoolSetting = BoolSetting::new("mini_collapse_on_blur", true);
 
 /// Audio > Equalizer: the switch. Off until the owner turns it on.
 pub const EQUALIZER_ENABLED: BoolSetting = BoolSetting::new("equalizer_enabled", false);
@@ -118,6 +130,11 @@ pub const REPORTED_KEYS: &[&str] = &[
     GLOBAL_HOTKEYS.key,
     MINI_PLAYER_HUD.key,
     HUD_AUTO_HIDE.key,
+    MINI_FADE_CONTROLS.key,
+    MINI_DIM.key,
+    MINI_SHOW_VOLUME.key,
+    MINI_SHOW_LYRICS.key,
+    MINI_COLLAPSE_ON_BLUR.key,
     EQUALIZER_ENABLED.key,
     EQUALIZER_GAINS.key,
     AUDIO_DEVICE.key,

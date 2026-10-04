@@ -66,7 +66,11 @@ enum CaptionButton {
 
 /// Closes like the native button: through the window's close request, which Close to tray
 /// answers by hiding. Without a native window handle the window is simply removed.
-fn close(window: &mut Window) {
+fn close(window: &mut Window, cx: &mut App) {
+    // Expanded from the mini player: it collapses back instead.
+    if crate::mini::collapse_on_close(cx) {
+        return;
+    }
     #[cfg(windows)]
     if crate::tray_win::request_close(window) {
         return;
@@ -103,11 +107,11 @@ impl CaptionButton {
     }
 
     /// What an assistive-technology Click on the button does.
-    fn activate(self, window: &mut Window) {
+    fn activate(self, window: &mut Window, cx: &mut App) {
         match self {
             Self::Minimize => window.minimize_window(),
             Self::Maximize | Self::Restore => window.zoom_window(),
-            Self::Close => close(window),
+            Self::Close => close(window, cx),
         }
     }
 
@@ -154,8 +158,8 @@ impl RenderOnce for CaptionButton {
             .role(gpui::Role::Button)
             .aria_label(self.label())
             .when(enabled, |d| {
-                d.on_a11y_action(gpui::AccessibleAction::Click, move |_, window, _| {
-                    self.activate(window)
+                d.on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
+                    self.activate(window, cx)
                 })
             })
             .child(self.glyph())

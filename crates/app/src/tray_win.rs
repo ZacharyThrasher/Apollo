@@ -238,6 +238,10 @@ pub fn install(
 
     let _ = window.update(cx, |_, window, cx| {
         window.on_window_should_close(cx, move |window, cx| {
+            // Expanded from the mini player: close collapses back to it.
+            if crate::mini::collapse_on_close(cx) {
+                return false;
+            }
             let close_to_tray = settings.read(cx).get(&CLOSE_TO_TRAY);
             match on_close_requested(close_to_tray, true) {
                 CloseAction::Hide => {
@@ -273,7 +277,9 @@ pub fn install(
                     let _ = weak.update(cx, |m, cx| m.set_sleep(choice, cx));
                     // The menu flipped the clicked entry's mark by itself: put it back to what
                     // the player now says.
-                    let now = weak.read_with(cx, |m, _| m.sleep_choice()).unwrap_or(choice);
+                    let now = weak
+                        .read_with(cx, |m, _| m.sleep_choice())
+                        .unwrap_or(choice);
                     host_for_commands.update(cx, |host, _| {
                         if let Some(bridge) = host.bridge.as_mut() {
                             bridge.force_sleep(now);

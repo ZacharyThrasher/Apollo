@@ -74,6 +74,15 @@ pub fn round_corners(window: &Window) {
     let _ = window;
 }
 
+/// Turns off the thin frame Windows 11 draws round a window (the HUD wants a clean edge). No
+/// effect off Windows or on builds before Windows 11.
+pub fn hide_border(window: &Window) {
+    #[cfg(windows)]
+    win::hide_border(window);
+    #[cfg(not(windows))]
+    let _ = window;
+}
+
 /// Shows a window without taking the keyboard from whatever has it (the HUD coming back).
 pub fn show_window_inactive(window: &mut Window) {
     #[cfg(windows)]
@@ -155,6 +164,9 @@ mod win {
     const SPI_GETWORKAREA: u32 = 0x0030;
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
     const DWMWCP_ROUND: i32 = 2;
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    /// "No border" for DWMWA_BORDER_COLOR.
+    const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
 
     #[repr(C)]
     #[derive(Default)]
@@ -235,6 +247,21 @@ mod win {
                 DWMWA_WINDOW_CORNER_PREFERENCE,
                 (&preference as *const i32).cast(),
                 std::mem::size_of::<i32>() as u32,
+            )
+        };
+    }
+
+    pub fn hide_border(window: &Window) {
+        let Some(hwnd) = hwnd_of(window) else { return };
+        let color = DWMWA_COLOR_NONE;
+        // SAFETY: DWMWA_BORDER_COLOR reads one u32 through the pointer; an unsupported
+        // attribute (before Windows 11) just returns an error code.
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR,
+                (&color as *const u32).cast(),
+                std::mem::size_of::<u32>() as u32,
             )
         };
     }
