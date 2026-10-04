@@ -6,7 +6,7 @@
 use url::Url;
 
 use crate::library::{Collection, CollectionKind};
-use crate::model::{PlaylistId, VideoId};
+use crate::model::{BrowseId, PlaylistId, VideoId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExternalLink {
@@ -16,6 +16,10 @@ pub enum ExternalLink {
         playlist: Option<PlaylistId>,
     },
     Playlist(PlaylistId),
+    /// An album page (`/browse/MPREb_…`).
+    Album(BrowseId),
+    /// An artist page (`/channel/UC…` or `/browse/UC…`).
+    Artist(BrowseId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +81,29 @@ pub fn parse_external_link(input: &str) -> Result<ExternalLink, LinkError> {
         "/playlist" => playlist
             .map(ExternalLink::Playlist)
             .ok_or(LinkError::UnsupportedPath),
-        _ => Err(LinkError::UnsupportedPath),
+        path => {
+            let mut segments = path.trim_matches('/').split('/');
+            let (kind, id) = (segments.next(), segments.next());
+            if segments.next().is_some() {
+                return Err(LinkError::UnsupportedPath);
+            }
+            match (kind, id) {
+                (Some("channel"), Some(id)) if id.starts_with("UC") => {
+                    browse_id(id).map(ExternalLink::Artist)
+                }
+                (Some("browse"), Some(id)) if id.starts_with("MPRE") => {
+                    browse_id(id).map(ExternalLink::Album)
+                }
+                (Some("browse"), Some(id)) if id.starts_with("UC") => {
+                    browse_id(id).map(ExternalLink::Artist)
+                }
+                // A playlist's browse id is its list id behind a `VL`.
+                (Some("browse"), Some(id)) if id.starts_with("VL") => {
+                    playlist_id(&id[2..]).map(ExternalLink::Playlist)
+                }
+                _ => Err(LinkError::UnsupportedPath),
+            }
+        }
     }
 }
 
@@ -106,6 +132,14 @@ fn id_chars_ok(s: &str) -> bool {
 
 fn video_id(s: &str) -> Result<VideoId, LinkError> {
     VideoId::parse(s).ok_or(LinkError::BadId)
+}
+
+fn browse_id(s: &str) -> Result<BrowseId, LinkError> {
+    if (2..=64).contains(&s.len()) && id_chars_ok(s) {
+        Ok(BrowseId::new(s))
+    } else {
+        Err(LinkError::BadId)
+    }
 }
 
 fn playlist_id(s: &str) -> Result<PlaylistId, LinkError> {
@@ -242,9 +276,11 @@ mod tests {
     fn rejects_unsupported_paths() {
         for u in [
             "https://www.youtube.com/",
-            "https://www.youtube.com/channel/UC1234567890",
+            "https://www.youtube.com/channel/PL1234567890",
+            "https://www.youtube.com/channel/UC1234567890/videos",
             "https://www.youtube.com/watch",
-            "https://music.youtube.com/browse/MPREb_x",
+            "https://music.youtube.com/browse/FEmusic_home",
+            "https://www.youtube.com/@someone",
         ] {
             assert_eq!(
                 parse_external_link(u),
@@ -252,5 +288,32 @@ mod tests {
                 "{u}"
             );
         }
+    }
+
+    #[test]
+    fn album_artist_and_browse_playlist_pages_parse() {
+        assert_eq!(
+            parse_external_link("https://music.youtube.com/browse/MPREb_abc123"),
+            Ok(ExternalLink::Album(BrowseId::new("MPREb_abc123")))
+        );
+        for u in [
+            "https://music.youtube.com/channel/UCabc123?si=x",
+            "https://www.youtube.com/channel/UCabc123",
+            "https://music.youtube.com/browse/UCabc123",
+        ] {
+            assert_eq!(
+                parse_external_link(u),
+                Ok(ExternalLink::Artist(BrowseId::new("UCabc123"))),
+                "{u}"
+            );
+        }
+        assert_eq!(
+            parse_external_link("https://music.youtube.com/browse/VLPL123"),
+            Ok(ExternalLink::Playlist(PlaylistId::new("PL123")))
+        );
+        assert_eq!(
+            parse_external_link("https://music.youtube.com/channel/UCabc%3B123"),
+            Err(LinkError::BadId)
+        );
     }
 }

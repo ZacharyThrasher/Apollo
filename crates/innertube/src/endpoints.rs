@@ -12,6 +12,7 @@ use crate::models::browse::{
     SearchSuggestions,
 };
 use crate::models::context::Context;
+use crate::models::lyrics::parse_lyrics_page;
 use crate::models::metadata::{
     self, AccountIdentity, AccountInfo, NextResult, Rating, SearchResult,
 };
@@ -156,6 +157,22 @@ impl InnerTube {
         let value = self.post("next", metadata_client, &body, true).await?;
         let next = metadata::parse_next(&value);
         Ok(next)
+    }
+
+    /// YouTube Music's own lyrics for a video, as plain text. `next` names the track's lyrics tab
+    /// and a `browse` of that tab holds the text; `Ok(None)` is an answer (no tab, or an empty
+    /// one). Read-only.
+    pub async fn lyrics(
+        &self,
+        metadata_client: &YouTubeClient,
+        video_id: &str,
+    ) -> Result<Option<String>, Error> {
+        let next = self.next(metadata_client, Some(video_id), None).await?;
+        let Some(browse_id) = next.lyrics_browse_id else {
+            return Ok(None);
+        };
+        let value = self.browse(metadata_client, Some(&browse_id), None).await?;
+        Ok(parse_lyrics_page(&value))
     }
 
     /// How loud YouTube measured a video, from the `player` endpoint (`playerConfig.audioConfig`).
