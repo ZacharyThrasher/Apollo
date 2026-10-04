@@ -10,7 +10,9 @@ use apollo_domain::library::{
 };
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track};
-use apollo_provider::{ArtistSection, Hit, HomeItem, HomePage, HomeShelf, ListedTrack};
+use apollo_provider::{
+    ArtistSection, ExplorePage, Hit, HomeItem, HomePage, HomeShelf, ListedTrack, MoodTile,
+};
 
 use super::source::{ArtistContent, LibrarySource, TrackRow};
 use crate::art::{DecodedArt, SyntheticArt};
@@ -65,6 +67,25 @@ pub enum HomeBehaviour {
     FailMore(LoadFailure),
 }
 
+/// Songs on the simulated chart: more than Explore shows, so "Show all" has somewhere to go.
+pub const CHART_SONGS: usize = 24;
+/// The chart's own page, where "Show all" leads.
+pub const CHART_ID: &str = "VLPLsimchart";
+/// Mood tiles for the states: one with no playlists, one that fails to load.
+pub const MOOD_EMPTY: &str = "sim-mood:Empty";
+pub const MOOD_BROKEN: &str = "sim-mood:Broken";
+
+/// How the simulated service answers Explore (tests drive the states with this).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ExploreBehaviour {
+    #[default]
+    Feed,
+    /// Every request fails.
+    Fail(LoadFailure),
+    /// The page reads cleanly and holds nothing.
+    Empty,
+}
+
 /// How the simulated service answers a write (tests drive the failure paths with this).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum WriteBehaviour {
@@ -112,6 +133,11 @@ struct SimState {
     home: HomeBehaviour,
     /// Home requests the simulation received: `""` for the first batch, else the token.
     home_log: Vec<String>,
+    explore: ExploreBehaviour,
+    /// Explore requests received.
+    explore_requests: u32,
+    /// The mood tokens `mood_playlists` was asked for, in order.
+    mood_log: Vec<String>,
     /// Makes `radio` fail (autoplay's error path).
     radio: Option<LoadFailure>,
     /// The seeds `radio` was asked about, in order.
@@ -128,6 +154,9 @@ impl SimState {
             log: Vec::new(),
             home: HomeBehaviour::default(),
             home_log: Vec::new(),
+            explore: ExploreBehaviour::default(),
+            explore_requests: 0,
+            mood_log: Vec::new(),
             radio: None,
             radio_seeds: Vec::new(),
         }
@@ -179,6 +208,21 @@ impl SimLibrary {
     /// The home requests received, `""` for a first batch and the token for a following one.
     pub fn home_log(&self) -> Vec<String> {
         self.state().home_log.clone()
+    }
+
+    /// How Explore is answered from now on (tests).
+    pub fn set_explore_behaviour(&self, behaviour: ExploreBehaviour) {
+        self.state().explore = behaviour;
+    }
+
+    /// How many times Explore was asked for.
+    pub fn explore_requests(&self) -> u32 {
+        self.state().explore_requests
+    }
+
+    /// The mood tokens asked for, in order.
+    pub fn mood_requests(&self) -> Vec<String> {
+        self.state().mood_log.clone()
     }
 
     /// Makes the radio fail (tests).
@@ -485,15 +529,87 @@ fn home_artist(f: &Fixture) -> HomeItem {
 }
 
 fn home_playlist(c: &Collection) -> HomeItem {
+    HomeItem::Collection(home_playlist_collection(c))
+}
+
+fn home_playlist_collection(c: &Collection) -> Collection {
     let hue = c
         .thumbnail
         .as_deref()
         .and_then(|t| t.strip_prefix("sim://art/"))
         .and_then(|h| h.parse::<f32>().ok());
-    HomeItem::Collection(Collection {
+    Collection {
         thumbnail: hue.map(|h| format!("sim://hue/{h}")),
         ..c.clone()
-    })
+    }
+}
+
+fn album_collection(f: &Fixture) -> Collection {
+    Collection {
+        kind: CollectionKind::Album,
+        id: BrowseId::new(format!("{SEARCH_ALBUM_PREFIX}{}", f.album)),
+        title: f.album.into(),
+        subtitle: Some(format!("{} • 2024", f.artist)),
+        thumbnail: home_art(f.art),
+    }
+}
+
+fn listed(row: TrackRow, art: Option<SyntheticArt>) -> ListedTrack {
+    ListedTrack {
+        track: row.track,
+        occurrence: None,
+        thumbnail: home_art(art),
+        explicit: false,
+        liked: None,
+    }
+}
+
+/// The simulated Explore page: new releases, a chart longer than the page shows, one card shelf
+/// and the mood tiles (two of them the failure states).
+fn explore_content() -> ExplorePage {
+    let top_songs: Vec<ListedTrack> = FIXTURES
+        .iter()
+        .enumerate()
+        .map(|(n, f)| listed(fixture_row(f, n), f.art))
+        .chain(
+            (0..CHART_SONGS.saturating_sub(FIXTURES.len())).map(|n| {
+                listed(
+                    generated_row(n),
+                    Some(SyntheticArt::Hue((n % 12) as f32 * 30.0)),
+                )
+            }),
+        )
+        .take(CHART_SONGS)
+        .collect();
+    let trending: Vec<HomeItem> = FIXTURES.iter().rev().map(home_album).collect();
+    let tile = |title: &str| MoodTile {
+        title: title.into(),
+        params: format!("sim-mood:{title}"),
+    };
+    ExplorePage {
+        new_releases: FIXTURES.iter().map(album_collection).collect(),
+        top_songs,
+        top_songs_all: Some(Collection {
+            kind: CollectionKind::Playlist,
+            id: BrowseId::new(CHART_ID),
+            title: "Trending".into(),
+            subtitle: None,
+            thumbnail: None,
+        }),
+        shelves: vec![HomeShelf {
+            title: "Trending".into(),
+            items: trending,
+        }],
+        moods: [
+            "Chill", "Workout", "Focus", "Party", "Sleep", "Commute", "Romance", "Feel good",
+            "Energy boosters", "Rock", "Pop", "Hip-hop", "Dance & electronic", "Jazz", "Classical",
+            "Country", "Empty", "Broken",
+        ]
+        .into_iter()
+        .map(tile)
+        .collect(),
+        skipped: 0,
+    }
 }
 
 /// The simulated home feed: three batches, a song shelf, shelves of cards of every kind and one
@@ -681,6 +797,36 @@ impl LibrarySource for SimLibrary {
         match behaviour {
             HomeBehaviour::Fail(f) | HomeBehaviour::FailMore(f) => Err(f),
             _ => home_batch(Some(token)).ok_or(LoadFailure::Parse),
+        }
+    }
+
+    fn explore(&self) -> Result<ExplorePage, LoadFailure> {
+        self.wait(LATENCY);
+        let behaviour = {
+            let mut state = self.state();
+            state.explore_requests += 1;
+            state.explore
+        };
+        match behaviour {
+            ExploreBehaviour::Fail(f) => Err(f),
+            ExploreBehaviour::Empty => Ok(ExplorePage::default()),
+            ExploreBehaviour::Feed => Ok(explore_content()),
+        }
+    }
+
+    fn mood_playlists(&self, params: &str) -> Result<Vec<Collection>, LoadFailure> {
+        self.wait(LATENCY);
+        self.state().mood_log.push(params.to_owned());
+        match params {
+            MOOD_BROKEN => Err(LoadFailure::Network),
+            MOOD_EMPTY => Ok(Vec::new()),
+            _ => Ok(all_collections()
+                .iter()
+                .filter(|c| c.kind == CollectionKind::Playlist && c.thumbnail.is_some())
+                .filter(|c| c.id.as_str() != BROKEN_ID)
+                .take(10)
+                .map(home_playlist_collection)
+                .collect()),
         }
     }
 

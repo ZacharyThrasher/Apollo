@@ -532,9 +532,9 @@ fn press_enter(vcx: &mut VisualTestContext) {
 #[gpui::test]
 fn the_tab_order_reaches_sign_in_and_enter_presses_it(cx: &mut TestAppContext) {
     let (r, vcx) = rig(cx, Scripted::new(vec![], valid(0)), FakeSource::ok(), true);
-    // Signed out: Settings is open. Tab walks the nav (toggle, four items) and then lands on
+    // Signed out: Settings is open. Tab walks the nav (toggle, five items) and then lands on
     // the page's first control, Sign in; Enter presses it.
-    vcx.simulate_keystrokes("tab tab tab tab tab tab");
+    vcx.simulate_keystrokes("tab tab tab tab tab tab tab");
     press_enter(vcx);
     vcx.run_until_parked();
     assert!(matches!(screen(&r, vcx), Screen::SignedIn { .. }));

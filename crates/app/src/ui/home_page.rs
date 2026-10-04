@@ -112,12 +112,12 @@ pub fn visible_range(offset: f32, viewport: f32, step: f32, count: usize) -> Ran
 }
 
 /// A sideways scroll in progress.
-struct Slide {
-    from: f32,
-    to: f32,
-    started: Instant,
+pub(crate) struct Slide {
+    pub(crate) from: f32,
+    pub(crate) to: f32,
+    pub(crate) started: Instant,
     /// The offset last written, to tell the page's own movement from a wheel or a focus jump.
-    written: f32,
+    pub(crate) written: f32,
 }
 
 struct Row {
@@ -797,6 +797,7 @@ impl HomeView {
                         menu: Subject::track(song.track.clone(), song.thumbnail.clone()),
                         focus: focus.clone(),
                         accent,
+                        width: COLUMN_WIDTH,
                         on_play: Rc::new(move |_, cx| play_from(&player, &shelf, j, cx)),
                         on_intent: Some(Rc::new({
                             let (hint_player, track) = (self.player.clone(), song.track.clone());
@@ -863,19 +864,21 @@ fn failure_line(failure: LoadFailure) -> SharedString {
 /// One compact song: art that plays on click, then title and artists. The whole row is the
 /// control, like a card.
 #[derive(IntoElement)]
-struct SongTile {
-    id: SharedString,
-    title: SharedString,
-    artists: SharedString,
-    thumb: Thumb,
-    playing: bool,
+pub(crate) struct SongTile {
+    pub(crate) id: SharedString,
+    pub(crate) title: SharedString,
+    pub(crate) artists: SharedString,
+    pub(crate) thumb: Thumb,
+    pub(crate) playing: bool,
     /// What the More button and a right-click offer.
-    menu: Subject,
-    focus: FocusHandle,
-    accent: Accent,
-    on_play: Rc<dyn Fn(&mut Window, &mut App) + 'static>,
+    pub(crate) menu: Subject,
+    pub(crate) focus: FocusHandle,
+    pub(crate) accent: Accent,
+    /// The row's width: a column of Home's grid, or wider where a list stands alone.
+    pub(crate) width: f32,
+    pub(crate) on_play: Rc<dyn Fn(&mut Window, &mut App) + 'static>,
     /// The pointer arrived: let the player start resolving the song before the click.
-    on_intent: Option<Rc<dyn Fn(&mut App) + 'static>>,
+    pub(crate) on_intent: Option<Rc<dyn Fn(&mut App) + 'static>>,
 }
 
 impl RenderOnce for SongTile {
@@ -973,7 +976,7 @@ impl RenderOnce for SongTile {
             .flex_row()
             .items_center()
             .gap(px(spacing::S3))
-            .w(px(COLUMN_WIDTH))
+            .w(px(self.width))
             .h(px(SONG_ROW))
             .flex_none()
             .px(px(spacing::S1))
@@ -1024,13 +1027,13 @@ impl RenderOnce for SongTile {
 /// A row's previous/next button: a 32px circle on bg.overlay that shows while the pointer is
 /// over the row. Not a tab stop: the keyboard moves through the items instead.
 #[derive(IntoElement)]
-struct ScrollButton {
-    id: ElementId,
+pub(crate) struct ScrollButton {
+    pub(crate) id: ElementId,
     /// Names the button for the headless tests (`home-next-<shelf>`).
-    selector: String,
-    icon: Icon,
-    label: &'static str,
-    on_click: Box<dyn Fn(&mut Window, &mut App) + 'static>,
+    pub(crate) selector: String,
+    pub(crate) icon: Icon,
+    pub(crate) label: &'static str,
+    pub(crate) on_click: Box<dyn Fn(&mut Window, &mut App) + 'static>,
 }
 
 impl RenderOnce for ScrollButton {
@@ -1167,7 +1170,7 @@ fn skeleton_song(cx: &App) -> AnyElement {
 }
 
 /// A heading block and a row at the final size of a shelf of cards (or of songs).
-fn skeleton_shelf(songs: bool, animate: bool, cx: &App) -> AnyElement {
+pub(crate) fn skeleton_shelf(songs: bool, animate: bool, cx: &App) -> AnyElement {
     let heading = style::text_style(div(), typography::SECTION, cx)
         .mt(px(spacing::S6))
         .mb(px(spacing::S2))

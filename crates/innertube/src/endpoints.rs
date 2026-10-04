@@ -373,6 +373,40 @@ impl InnerTube {
         Ok(browse::parse_moods(&value))
     }
 
+    /// Explore (`FEmusic_explore`): the shelves under the New releases / Charts / Moods buttons
+    /// (trending songs, new releases when the account is offered them). Which shelves come back
+    /// depends on the account and country, so callers pick by what a shelf holds.
+    pub async fn explore(&self, client: &YouTubeClient) -> Result<HomePage, Error> {
+        let value = self.browse(client, Some("FEmusic_explore"), None).await?;
+        let mut page = browse::parse_explore(&value);
+        page.sections.retain(|s| !s.items.is_empty());
+        Ok(page)
+    }
+
+    /// Charts (`FEmusic_charts`) for the session's country (its locale's `gl`): chart playlists,
+    /// top artists, and a ranked song list where the service sends one.
+    pub async fn charts(&self, client: &YouTubeClient) -> Result<HomePage, Error> {
+        let value = self.browse(client, Some("FEmusic_charts"), None).await?;
+        let mut page = browse::parse_explore(&value);
+        page.sections.retain(|s| !s.items.is_empty());
+        Ok(page)
+    }
+
+    /// New albums and singles (`FEmusic_new_releases_albums`) as cards.
+    pub async fn new_releases(&self, client: &YouTubeClient) -> Result<Vec<BrowseItem>, Error> {
+        let value = self.browse(client, Some("FEmusic_new_releases_albums"), None).await?;
+        Ok(browse::parse_cards(&value))
+    }
+
+    /// The playlists of one mood or genre tile (`params` from [`Self::moods`]).
+    pub async fn mood_playlists(
+        &self,
+        client: &YouTubeClient,
+        params: &str,
+    ) -> Result<Vec<BrowseItem>, Error> {
+        self.browse_grid(client, "FEmusic_moods_and_genres_category", Some(params)).await
+    }
+
     /// Play history (`FEmusic_history`), in YouTube's own date buckets (Today, Yesterday, …).
     /// context/08. Needs login: signed out, YouTube has nothing to return.
     pub async fn history(&self, client: &YouTubeClient) -> Result<Vec<HistoryGroup>, Error> {
