@@ -15,6 +15,7 @@
 mod lyrics;
 mod loudness;
 mod migrations;
+mod pages;
 mod queue;
 
 use std::fmt;
@@ -25,6 +26,7 @@ use rusqlite::Connection;
 pub use lyrics::CachedLyrics;
 pub use loudness::LoudnessRow;
 pub use migrations::{Migration, MIGRATIONS};
+pub use pages::CachedPage;
 
 #[derive(Debug)]
 pub enum StoreError {

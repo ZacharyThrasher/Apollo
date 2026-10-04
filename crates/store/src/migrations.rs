@@ -78,4 +78,19 @@ Migration {
             fetched_at INTEGER NOT NULL
         );
     ",
+}, Migration {
+    version: 4,
+    sql: "
+        -- The last answer for a page (Home, the library lists, an album, artist or playlist), so
+        -- reopening one draws at once and refreshes behind it. `body` is the page serialized by
+        -- the app; the store never reads it. Rows belong to one account and are purged when the
+        -- account changes or signs out.
+        CREATE TABLE page_cache (
+            account_key TEXT    NOT NULL,
+            page_key    TEXT    NOT NULL,
+            body        TEXT    NOT NULL,
+            fetched_at  INTEGER NOT NULL,
+            PRIMARY KEY (account_key, page_key)
+        );
+    ",
 }];
