@@ -1,6 +1,6 @@
-//! High-level endpoint facade over the transport. Read paths plus the two writes Apollo makes:
-//! `rate` (like / unlike) and adding one track to a playlist. Playlist create, rename, delete and
-//! removal, and the library `feedback` toggles, stay out until a milestone needs them
+//! High-level endpoint facade over the transport. Read paths plus the writes Apollo makes:
+//! `rate` (like / unlike), adding one track to a playlist and `subscribe` (an artist's channel).
+//! Playlist create, rename, delete and removal, and the library `feedback` toggles, stay out until a milestone needs them
 //! (see NOTICE.md).
 
 use serde::Serialize;
@@ -17,6 +17,7 @@ use crate::models::metadata::{
     self, AccountIdentity, AccountInfo, NextResult, Rating, SearchResult,
 };
 use crate::models::player::{parse_player_loudness, PlayerLoudness};
+use crate::tracking::{self, parse_playback_tracking, PlaybackTracking, WatchtimePing};
 use crate::transport::{Error, InnerTube};
 
 /// Search filter params (opaque base64). context/08.
@@ -202,10 +203,10 @@ impl InnerTube {
 
     /// How loud YouTube measured a video, from the `player` endpoint (`playerConfig.audioConfig`).
     ///
-    /// Metadata only. The response also carries stream URLs and playback-tracking pings; both are
-    /// dropped unread (audio comes from yt-dlp, and Apollo does not report plays). The request is
-    /// the plain one the web client sends before it has a stream: no signature timestamp, no
-    /// PO token, nothing that would let the answer be played. Read-only and idempotent.
+    /// Metadata only. The response also carries stream URLs; they are dropped unread (audio comes
+    /// from yt-dlp). The request is the plain one the web client sends before it has a stream:
+    /// no signature timestamp, no PO token, nothing that would let the answer be played.
+    /// Read-only and idempotent.
     pub async fn player_loudness(
         &self,
         client: &YouTubeClient,
@@ -214,6 +215,54 @@ impl InnerTube {
         let body = player_body(self.context_for(client), video_id);
         let value = self.post("player", client, &body, true).await?;
         Ok(parse_player_loudness(&value))
+    }
+
+    /// The URLs to report a play of `video_id` to, from the same metadata-only `player` request
+    /// as [`player_loudness`](Self::player_loudness). `Ok(None)` when the response has none.
+    /// Read-only; reporting is a separate step ([`report_playback_start`](Self::report_playback_start)).
+    pub async fn player_tracking(
+        &self,
+        client: &YouTubeClient,
+        video_id: &str,
+    ) -> Result<Option<PlaybackTracking>, Error> {
+        let body = player_body(self.context_for(client), video_id);
+        let value = self.post("player", client, &body, true).await?;
+        Ok(parse_playback_tracking(&value))
+    }
+
+    /// Tell YouTube Music a playback has started (the web client's `videostatsPlaybackUrl`
+    /// ping). `nonce` is this playback's [`new_nonce`]; every later ping about it reuses it.
+    /// One attempt, no retry: a lost ping is a play that is not in History, not an error.
+    pub async fn report_playback_start(
+        &self,
+        client: &YouTubeClient,
+        tracking: &PlaybackTracking,
+        nonce: &str,
+        position_ms: u64,
+    ) -> Result<(), Error> {
+        let url = tracking::playback_url(
+            &tracking.playback_url,
+            nonce,
+            &client.client_version,
+            position_ms,
+        )
+        .ok_or_else(|| Error::Other("tracking url is not a url".into()))?;
+        self.send_tracking_ping(client, &url).await
+    }
+
+    /// Send one watch-time ping for the playback `nonce` (the web client's
+    /// `videostatsWatchtimeUrl`). One attempt, no retry.
+    pub async fn report_watchtime(
+        &self,
+        client: &YouTubeClient,
+        tracking: &PlaybackTracking,
+        nonce: &str,
+        ping: &WatchtimePing,
+    ) -> Result<(), Error> {
+        let url =
+            tracking::watchtime_url(&tracking.watchtime_url, nonce, &client.client_version, ping)
+                .ok_or_else(|| Error::Other("tracking url is not a url".into()))?;
+        self.send_tracking_ping(client, &url).await
     }
 
     /// Logged-in account summary (`account/account_menu`, context/01). Requires a cookie. Also the
@@ -416,6 +465,40 @@ impl InnerTube {
         Ok(browse::parse_moods(&value))
     }
 
+    /// Explore (`FEmusic_explore`): the shelves under the New releases / Charts / Moods buttons
+    /// (trending songs, new releases when the account is offered them). Which shelves come back
+    /// depends on the account and country, so callers pick by what a shelf holds.
+    pub async fn explore(&self, client: &YouTubeClient) -> Result<HomePage, Error> {
+        let value = self.browse(client, Some("FEmusic_explore"), None).await?;
+        let mut page = browse::parse_explore(&value);
+        page.sections.retain(|s| !s.items.is_empty());
+        Ok(page)
+    }
+
+    /// Charts (`FEmusic_charts`) for the session's country (its locale's `gl`): chart playlists,
+    /// top artists, and a ranked song list where the service sends one.
+    pub async fn charts(&self, client: &YouTubeClient) -> Result<HomePage, Error> {
+        let value = self.browse(client, Some("FEmusic_charts"), None).await?;
+        let mut page = browse::parse_explore(&value);
+        page.sections.retain(|s| !s.items.is_empty());
+        Ok(page)
+    }
+
+    /// New albums and singles (`FEmusic_new_releases_albums`) as cards.
+    pub async fn new_releases(&self, client: &YouTubeClient) -> Result<Vec<BrowseItem>, Error> {
+        let value = self.browse(client, Some("FEmusic_new_releases_albums"), None).await?;
+        Ok(browse::parse_cards(&value))
+    }
+
+    /// The playlists of one mood or genre tile (`params` from [`Self::moods`]).
+    pub async fn mood_playlists(
+        &self,
+        client: &YouTubeClient,
+        params: &str,
+    ) -> Result<Vec<BrowseItem>, Error> {
+        self.browse_grid(client, "FEmusic_moods_and_genres_category", Some(params)).await
+    }
+
     /// Play history (`FEmusic_history`), in YouTube's own date buckets (Today, Yesterday, …).
     /// context/08. Needs login: signed out, YouTube has nothing to return.
     pub async fn history(&self, client: &YouTubeClient) -> Result<Vec<HistoryGroup>, Error> {
@@ -581,6 +664,24 @@ impl InnerTube {
         Ok(())
     }
 
+    /// Subscribe to or unsubscribe from an artist's channel (`subscription/subscribe` and
+    /// `subscription/unsubscribe`, the requests the artist page's own button makes). `channel_id`
+    /// is the artist's `UC…` id.
+    ///
+    /// Idempotent on the service's side, but sent exactly once all the same: a timeout leaves the
+    /// outcome unknown, and the caller reads the artist page back to learn what the account
+    /// holds instead of firing the request again.
+    pub async fn subscribe(
+        &self,
+        client: &YouTubeClient,
+        channel_id: &str,
+        subscribed: bool,
+    ) -> Result<(), Error> {
+        let body = subscribe_body(self.context_for(client), channel_id);
+        self.post_once(subscribe_path(subscribed), client, &body, true).await?;
+        Ok(())
+    }
+
     /// The playlists the signed-in account can add this video to, and whether each already holds
     /// it (`playlist/get_add_to_playlist`, the request YouTube Music's own "Save to playlist"
     /// sheet makes). Only playlists the account may edit come back, which is why the picker asks
@@ -621,6 +722,25 @@ impl InnerTube {
             Err(Error::Refused("playlist edit was not accepted".into()))
         }
     }
+}
+
+fn subscribe_path(subscribed: bool) -> &'static str {
+    if subscribed {
+        "subscription/subscribe"
+    } else {
+        "subscription/unsubscribe"
+    }
+}
+
+fn subscribe_body(context: Context, channel_id: &str) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        channel_ids: [String; 1],
+    }
+    serde_json::to_value(Body { context, channel_ids: [channel_id.to_owned()] })
+        .expect("a plain struct serialises")
 }
 
 fn rate_path(rating: Rating) -> &'static str {
@@ -770,6 +890,17 @@ mod tests {
         assert_eq!(body["target"], json!({ "videoId": "dQw4w9WgXcQ" }));
         assert_eq!(body["context"]["client"]["clientName"], "WEB_REMIX");
         // The signed-in channel rides along, as on every other authenticated request.
+        assert_eq!(body["context"]["user"]["onBehalfOfUser"], "PAGE1");
+    }
+
+    #[test]
+    fn subscribing_names_one_channel_and_acts_as_the_signed_in_account() {
+        assert_eq!(subscribe_path(true), "subscription/subscribe");
+        assert_eq!(subscribe_path(false), "subscription/unsubscribe");
+        let (tube, client) = tube();
+        let body = subscribe_body(tube.context_for(&client), "UCdrake");
+        assert_eq!(body["channelIds"], json!(["UCdrake"]));
+        assert_eq!(body["context"]["client"]["clientName"], "WEB_REMIX");
         assert_eq!(body["context"]["user"]["onBehalfOfUser"], "PAGE1");
     }
 

@@ -12,7 +12,9 @@ use std::time::Duration;
 use apollo_domain::library::{Collection, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::BrowseId;
-use apollo_provider::{HistoryDay, HomePage, HomeShelf, Hit, InnerTubeSource, ListedTrack};
+use apollo_provider::{
+    ExplorePage, HistoryDay, HomePage, HomeShelf, Hit, InnerTubeSource, ListedTrack,
+};
 use apollo_services_common::{unix_now, SecretString, SessionProvider};
 use innertube::{Locale, Session};
 
@@ -209,7 +211,16 @@ impl LibrarySource for InnerTubeLibrary {
             name: page.name,
             thumbnail: page.thumbnail,
             top_songs: page.top_songs.into_iter().map(row).collect(),
+            top_songs_id: page.top_songs_id,
             sections: page.sections,
+            related: page.related,
+            description: page.description,
+            subscribers: page.subscribers,
+            monthly_listeners: page.monthly_listeners,
+            channel_id: page.channel_id,
+            subscribed: page.subscribed,
+            radio_playlist_id: page.radio_playlist_id,
+            shuffle_playlist_id: page.shuffle_playlist_id,
             skipped: page.skipped,
         })
     }
@@ -236,11 +247,41 @@ impl LibrarySource for InnerTubeLibrary {
         })
     }
 
+    fn explore(&self) -> Result<ExplorePage, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.explore().await
+        })
+    }
+
+    fn mood_playlists(&self, params: &str) -> Result<Vec<Collection>, LoadFailure> {
+        let source = self.source()?;
+        self.rt
+            .block_on(async { source.mood_playlists(params).await })
+    }
+
     fn radio(&self, video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
         let source = self.source()?;
         self.rt.block_on(async {
             source.ensure_visitor_data().await;
             Ok(source.radio(video_id).await?.into_iter().map(row).collect())
+        })
+    }
+
+    fn mix(&self, playlist_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            Ok(source.mix(playlist_id).await?.into_iter().map(row).collect())
+        })
+    }
+
+    fn set_subscribed(&self, channel_id: &str, subscribed: bool) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.set_subscribed(channel_id, subscribed).await
         })
     }
 

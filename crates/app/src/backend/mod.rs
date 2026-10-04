@@ -18,6 +18,7 @@ use apollo_services_common::EventSink;
 use crate::account::AccountPorts;
 use crate::art::ArtSource;
 use crate::library::LibrarySource;
+use crate::reporting::PlayReporter;
 use crate::search::SearchSource;
 use crate::url_thumbs::ThumbSource;
 
@@ -26,6 +27,8 @@ pub mod account;
 pub mod real;
 #[cfg(feature = "real-services")]
 pub mod real_loudness;
+#[cfg(feature = "provider")]
+pub mod real_report;
 #[cfg(feature = "real-services")]
 pub mod real_lyrics;
 #[cfg(feature = "real-services")]
@@ -111,6 +114,24 @@ impl Mode {
             Mode::SimSignedOut => account::start(ports, false),
             #[cfg(all(windows, feature = "real-services"))]
             Mode::Real(opts) => real::start_account(opts, ports),
+        }
+    }
+
+    /// Where plays are reported to YouTube Music (History and recommendations). Only the real
+    /// services report: the simulation never does, whatever the setting says.
+    pub fn play_reporter(
+        &self,
+        account: &apollo_account::service::AccountService,
+    ) -> Option<Arc<dyn PlayReporter>> {
+        match self {
+            Mode::Sim | Mode::SimSignedOut => {
+                let _ = account;
+                None
+            }
+            #[cfg(all(windows, feature = "real-services"))]
+            Mode::Real(_) => {
+                real_report::reporter(account).map(|r| Arc::new(r) as Arc<dyn PlayReporter>)
+            }
         }
     }
 

@@ -7,6 +7,7 @@ pub mod art;
 pub mod assets;
 pub mod autostart;
 pub mod backend;
+pub mod explore;
 pub mod discord;
 pub mod home;
 #[cfg(windows)]
@@ -25,6 +26,7 @@ pub mod pc_watch_win;
 pub mod persist;
 pub mod platform;
 pub mod player;
+pub mod reporting;
 pub mod search;
 pub mod settings;
 pub mod sleep_timer;

@@ -1,4 +1,4 @@
-//! Left nav rail: Home, Search, Library, with Settings pinned at the bottom. 64px with icons and
+//! Left nav rail: Home, Explore, Search, Library, with Settings pinned at the bottom. 64px with icons and
 //! tooltips, 220px with labels.
 
 use apollo_theme::tokens::{layout, motion, radius, spacing, typography};
@@ -16,19 +16,27 @@ use crate::ui::tooltip::Tooltip;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Route {
     Home,
+    Explore,
     Search,
     Library,
     Settings,
 }
 
 impl Route {
-    /// The three destinations at the top of the rail.
-    pub const MAIN: [Route; 3] = [Route::Home, Route::Search, Route::Library];
-    pub const ALL: [Route; 4] = [Route::Home, Route::Search, Route::Library, Route::Settings];
+    /// The destinations at the top of the rail.
+    pub const MAIN: [Route; 4] = [Route::Home, Route::Explore, Route::Search, Route::Library];
+    pub const ALL: [Route; 5] = [
+        Route::Home,
+        Route::Explore,
+        Route::Search,
+        Route::Library,
+        Route::Settings,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Route::Home => "Home",
+            Route::Explore => "Explore",
             Route::Search => "Search",
             Route::Library => "Library",
             Route::Settings => "Settings",
@@ -39,6 +47,8 @@ impl Route {
         match (self, active) {
             (Route::Home, false) => Icon::HomeRegular,
             (Route::Home, true) => Icon::HomeFilled,
+            (Route::Explore, false) => Icon::CompassRegular,
+            (Route::Explore, true) => Icon::CompassFilled,
             (Route::Search, false) => Icon::SearchRegular,
             (Route::Search, true) => Icon::SearchFilled,
             (Route::Library, false) => Icon::LibraryRegular,
@@ -51,6 +61,7 @@ impl Route {
     fn id(self) -> &'static str {
         match self {
             Route::Home => "nav-home",
+            Route::Explore => "nav-explore",
             Route::Search => "nav-search",
             Route::Library => "nav-library",
             Route::Settings => "nav-settings",
@@ -76,7 +87,7 @@ pub struct NavRail {
     route: Route,
     accent: Accent,
     toggle_focus: FocusHandle,
-    item_focus: [FocusHandle; 4],
+    item_focus: [FocusHandle; 5],
     /// Warning dot on Settings, with its accessible name: why the account needs the owner.
     attention: Option<&'static str>,
     on_toggle: Option<Handler>,
@@ -90,7 +101,7 @@ impl NavRail {
         route: Route,
         accent: Accent,
         toggle_focus: &FocusHandle,
-        item_focus: &[FocusHandle; 4],
+        item_focus: &[FocusHandle; 5],
     ) -> Self {
         Self {
             expanded,

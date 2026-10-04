@@ -264,6 +264,9 @@ pub struct ArtistPage {
     /// supplied: unlike a song or a playlist, an artist radio id can't be built client-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub radio_playlist_id: Option<String>,
+    /// The header's Shuffle button: a mix of the artist's songs (`RDAO…`), from `playButton`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shuffle_playlist_id: Option<String>,
     /// Top songs shelf (usually 5).
     pub top_songs: Vec<SongItem>,
     /// The shelf's "Show all" target: a `VL…` playlist of the artist's songs, pageable like any
@@ -427,6 +430,58 @@ pub fn parse_moods(root: &Value) -> Vec<MoodSection> {
                 .collect();
             (!items.is_empty()).then_some(MoodSection { title, items })
         })
+        .collect()
+}
+
+/// Parse a `FEmusic_explore` or `FEmusic_charts` response into titled shelves: the carousels the
+/// home parser reads, then the plain list shelves (`musicShelfRenderer`, a chart's ranked songs)
+/// as shelves of song rows. Both pages are a column of such shelves and a few navigation buttons
+/// this parser ignores; a shelf it cannot read is counted in `skipped_shelves`.
+pub fn parse_explore(root: &Value) -> HomePage {
+    let list_shelves = find_all(root, "musicShelfRenderer");
+    let mut page = parse_home(root);
+    // The home parser counts every list shelf as one it does not read; they are read here.
+    page.skipped_shelves = page.skipped_shelves.saturating_sub(list_shelves.len() as u32);
+    for shelf in list_shelves {
+        let nodes = shelf.get("contents").and_then(Value::as_array);
+        let items: Vec<BrowseItem> =
+            nodes.map(|c| c.iter().filter_map(parse_carousel_item).collect()).unwrap_or_default();
+        let unread = nodes.map_or(0, Vec::len).saturating_sub(items.len()) as u32;
+        let title = runs_text(shelf.get("title")).unwrap_or_default();
+        if items.is_empty() {
+            // The country picker is a shelf with a menu and no rows: nothing was lost.
+            if unread > 0 {
+                page.skipped_shelves += 1;
+            }
+            continue;
+        }
+        let more = shelf
+            .get("bottomEndpoint")
+            .or_else(|| {
+                shelf
+                    .get("title")
+                    .and_then(|t| t.get("runs"))
+                    .and_then(|r| r.get(0))
+                    .and_then(|r| r.get("navigationEndpoint"))
+            })
+            .and_then(|e| e.get("browseEndpoint"));
+        let more_browse_id =
+            more.and_then(|e| e.get("browseId")).and_then(Value::as_str).map(str::to_owned);
+        let more_params =
+            more.and_then(|e| e.get("params")).and_then(Value::as_str).map(str::to_owned);
+        page.sections.push(Section { title, items, more_browse_id, more_params, skipped: unread });
+    }
+    page
+}
+
+/// Parse a `FEmusic_new_releases_albums` response: every card on it, album or single, in the
+/// service's order, whether it comes as a grid or as a shelf. A card seen twice is kept once.
+pub fn parse_cards(root: &Value) -> Vec<BrowseItem> {
+    let mut seen = std::collections::HashSet::new();
+    find_all(root, "musicTwoRowItemRenderer")
+        .into_iter()
+        .filter_map(parse_two_row_item)
+        .filter(|card| seen.insert(card.id.clone()))
         .collect()
 }
 
@@ -1060,7 +1115,13 @@ pub fn parse_artist(root: &Value, browse_id: &str) -> ArtistPage {
         }
     }
 
-    let radio_playlist_id = header.and_then(radio_playlist_id);
+    // The radio lives in `startRadioButton` (or, on a header without one, a menu item) and the
+    // shuffle mix in `playButton`. Both are `RD…` watch endpoints, so each is read from its own
+    // spot, never from the header at large: that would hand back whichever sorts first.
+    let radio = header
+        .and_then(|h| h.get("startRadioButton").or_else(|| h.get("menu")))
+        .and_then(radio_playlist_id);
+    let shuffle = header.and_then(|h| h.get("playButton")).and_then(radio_playlist_id);
 
     ArtistPage {
         name,
@@ -1070,7 +1131,8 @@ pub fn parse_artist(root: &Value, browse_id: &str) -> ArtistPage {
         monthly_listeners,
         channel_id,
         subscribed,
-        radio_playlist_id,
+        radio_playlist_id: radio,
+        shuffle_playlist_id: shuffle,
         top_songs,
         top_songs_id,
         sections,
@@ -1380,6 +1442,36 @@ mod tests {
             "title": { "runs": [{ "text": "An Artist" }] }
         } } });
         assert_eq!(parse_artist(&bare, "UCx").radio_playlist_id, None);
+    }
+
+    // The Shuffle button's mix is an `RD…` id too, and `playButton` sorts before `startRadioButton`:
+    // reading "the first RD id in the header" would start the shuffle mix as the radio.
+    #[test]
+    fn the_shuffle_mix_is_not_mistaken_for_the_radio() {
+        let root = json!({
+            "header": { "musicImmersiveHeaderRenderer": {
+                "title": { "runs": [{ "text": "An Artist" }] },
+                "playButton": { "buttonRenderer": {
+                    "navigationEndpoint": { "watchEndpoint": { "playlistId": "RDAOshuffle1" } }
+                } },
+                "startRadioButton": { "buttonRenderer": {
+                    "navigationEndpoint": { "watchEndpoint": { "playlistId": "RDEMradio1" } }
+                } }
+            } }
+        });
+        let a = parse_artist(&root, "UCx");
+        assert_eq!(a.radio_playlist_id.as_deref(), Some("RDEMradio1"));
+        assert_eq!(a.shuffle_playlist_id.as_deref(), Some("RDAOshuffle1"));
+        // Only a shuffle button: there is no radio to offer, and the mix is not passed off as one.
+        let only_shuffle = json!({ "header": { "musicImmersiveHeaderRenderer": {
+            "title": { "runs": [{ "text": "An Artist" }] },
+            "playButton": { "buttonRenderer": {
+                "navigationEndpoint": { "watchEndpoint": { "playlistId": "RDAOshuffle1" } }
+            } }
+        } } });
+        let a = parse_artist(&only_shuffle, "UCx");
+        assert_eq!(a.radio_playlist_id, None);
+        assert_eq!(a.shuffle_playlist_id.as_deref(), Some("RDAOshuffle1"));
     }
 
     // History comes back as one `musicShelfRenderer` per day, not one shelf of rows: the day title

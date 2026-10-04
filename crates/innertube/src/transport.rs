@@ -2,8 +2,9 @@
 //!
 //! Vendored from Limusic and trimmed (see NOTICE.md). Differences that matter:
 //! no session "healer" (a 401/403 is surfaced as [`Error::SessionExpired`] and the account layer
-//! decides what it means), no blocklist or hide-video filters, no playback-tracking or upload
-//! calls, and `Session` never prints its cookie.
+//! decides what it means), no blocklist or hide-video filters, no upload calls, play reporting only through
+//! [`InnerTube::send_tracking_ping`] (https YouTube hosts only, one attempt), and `Session`
+//! never prints its cookie.
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -294,6 +295,30 @@ impl InnerTube {
         body: &B,
         set_login: bool,
     ) -> Result<serde_json::Value, Error> {
+        self.send(path, client, body, set_login, true).await
+    }
+
+    /// [`Self::post`] that sends the request exactly once. For a write whose outcome the caller
+    /// reads back itself: a timeout or a dropped connection may mean the service applied it, and a
+    /// silent second attempt would hide that.
+    pub async fn post_once<B: Serialize>(
+        &self,
+        path: &str,
+        client: &YouTubeClient,
+        body: &B,
+        set_login: bool,
+    ) -> Result<serde_json::Value, Error> {
+        self.send(path, client, body, set_login, false).await
+    }
+
+    async fn send<B: Serialize>(
+        &self,
+        path: &str,
+        client: &YouTubeClient,
+        body: &B,
+        set_login: bool,
+        retry: bool,
+    ) -> Result<serde_json::Value, Error> {
         // `path` may already carry query params (e.g. browse continuations); chain accordingly.
         let sep = if path.contains('?') { '&' } else { '?' };
         let url = format!("{BASE_URL}{path}{sep}prettyPrint=false");
@@ -321,7 +346,7 @@ impl InnerTube {
                     return Ok(resp.json().await?);
                 }
                 // Retry only on connect/timeout (transient).
-                Err(e) if attempt < 3 && (e.is_timeout() || e.is_connect() || e.is_request()) => {
+                Err(e) if retry && attempt < 3 && (e.is_timeout() || e.is_connect() || e.is_request()) => {
                     tracing::warn!(attempt, error = %e.without_url(), "retrying InnerTube POST {path}");
                     tokio::time::sleep(delay).await;
                     delay *= 2;
@@ -382,6 +407,34 @@ impl InnerTube {
         }
         h
     }
+    /// Send one play-reporting ping (a GET to a `playbackTracking` URL) as the signed-in account.
+    ///
+    /// The URL must be an https YouTube URL ([`crate::tracking::checked_url`]) because the
+    /// request carries the cookie. Unlike [`post`](Self::post): one attempt (a ping is never
+    /// retried), a short timeout so a hung host cannot hold the caller, and the response is
+    /// neither a verdict on the session (a refused ping does not sign anyone out) nor a source
+    /// of cookies (`s.youtube.com` sets its own, which do not belong in the account's jar).
+    pub(crate) async fn send_tracking_ping(
+        &self,
+        client: &YouTubeClient,
+        url: &str,
+    ) -> Result<(), Error> {
+        let url = crate::tracking::checked_url(url)?;
+        let mut headers = self.headers(client, true);
+        headers.remove("content-type");
+        headers.remove("x-goog-api-format-version");
+        headers.insert(HeaderName::from_static("accept"), HeaderValue::from_static("*/*"));
+        self.http
+            .get(url)
+            .headers(headers)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| Error::Http(e.without_url()))?;
+        Ok(())
+    }
+
     /// Bootstrap `visitorData` anonymously by scraping `sw.js_data`. context/04 §A.
     pub async fn fetch_visitor_data(&self) -> Result<String, Error> {
         let text = self.http.get(SW_JS_DATA_URL).send().await?.error_for_status()?.text().await?;
