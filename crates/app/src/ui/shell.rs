@@ -1459,7 +1459,9 @@ impl Render for Shell {
                 let shell = shell.clone();
                 move |_, cx| shell.update(cx, |s, cx| s.toggle_lyrics(cx))
             })),
-            on_mini_player: Rc::new(Box::new(|_, cx| crate::mini::open(cx))),
+            // Deferred: this runs inside the main window's own event, and opening the mini player
+            // reads and then hides that same window.
+            on_mini_player: Rc::new(Box::new(|_, cx| cx.defer(crate::mini::open))),
             on_queue_toggle: Rc::new(Box::new({
                 let shell = shell.clone();
                 move |_, cx| shell.update(cx, |s, cx| s.toggle_queue(cx))

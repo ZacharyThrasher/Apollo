@@ -160,6 +160,24 @@ fn opening_the_mini_player_makes_one_small_window_in_the_corner(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn the_player_bar_button_opens_it_from_inside_a_main_window_event(cx: &mut TestAppContext) {
+    // The button runs inside the main window's own event, where that window cannot be read or
+    // updated again: opening has to wait until the event is over (it crashed the app once).
+    let world = setup(cx, None);
+    let mut vcx = VisualTestContext::from_window(world.main.into(), cx);
+    vcx.run_until_parked();
+    let button = vcx
+        .debug_bounds("bar-mini")
+        .expect("the player bar has a mini player button");
+    vcx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        cx.update(|cx| mini::is_open(cx)),
+        "clicking the button opens the mini player"
+    );
+}
+
+#[gpui::test]
 fn returning_closes_the_mini_player_and_keeps_the_main_window(cx: &mut TestAppContext) {
     let world = setup(cx, None);
     let (_handle, _vcx) = open_mini(cx);
