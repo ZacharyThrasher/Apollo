@@ -2,6 +2,7 @@
 //! state for browsing it. [`source::LibrarySource`] is the port the screen reads through; the
 //! simulated backend and the InnerTube provider implement it.
 
+pub mod browse;
 pub mod model;
 pub mod sim;
 pub mod source;

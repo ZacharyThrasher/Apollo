@@ -18,7 +18,7 @@ use crate::motion::PanelSlide;
 use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
 use crate::settings::SettingsModel;
-use crate::settings::LyricsOpenStore;
+use crate::settings::{LibrarySortStore, LyricsOpenStore};
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
 use crate::ui::home_page::{self, HomeView};
@@ -604,6 +604,16 @@ impl Shell {
             let _ = pane.update(cx, |p, cx| p.restore_open(saved, cx));
         })
         .detach();
+    }
+
+    /// Where the Library tabs' sort choices are remembered.
+    pub fn install_library_sort(
+        &mut self,
+        store: Option<Arc<dyn LibrarySortStore>>,
+        cx: &mut Context<Self>,
+    ) {
+        let model = self.library.read(cx).model().clone();
+        model.update(cx, |m, cx| m.install_sort_store(store, cx));
     }
 
     pub fn toggle_queue(&mut self, cx: &mut Context<Self>) {

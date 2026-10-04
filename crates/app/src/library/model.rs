@@ -15,10 +15,16 @@ use apollo_domain::model::{BrowseId, Track};
 use gpui::{Context, Entity, RenderImage};
 use image::imageops;
 
+use apollo_provider::Hit;
+
+use super::browse::{
+    history_groups, history_len, history_row, sort_artists, sort_collections, HistoryGroup, SortKey,
+};
 use super::source::{ArtistContent, LibrarySource, TrackRow};
 use super::writes::{LibraryWrites, WritesEvent};
 use crate::art::{sized_thumbnail, DecodedArt};
 use crate::player::{PlayerModel, Status};
+use crate::settings::LibrarySortStore;
 use crate::url_thumbs::Thumb as ThumbView;
 
 /// Cover downloads running at once. Fast scrolling queues many; the newest request goes first.
@@ -36,6 +42,12 @@ const CARD_ART_PX: u32 = 288;
 pub enum Tab {
     Playlists,
     Albums,
+    Artists,
+    History,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 4] = [Tab::Playlists, Tab::Albums, Tab::Artists, Tab::History];
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,6 +211,14 @@ fn key(url: &str, size: ArtSize) -> String {
     format!("{size:?}|{url}")
 }
 
+/// The lists as the screen shows them: the loaded ones in the chosen order.
+#[derive(Default)]
+struct Shown {
+    playlists: Vec<Collection>,
+    albums: Vec<Collection>,
+    artists: Vec<Hit>,
+}
+
 pub struct LibraryModel {
     player: Entity<PlayerModel>,
     writes: Entity<LibraryWrites>,
@@ -206,6 +226,15 @@ pub struct LibraryModel {
     tab: Tab,
     collections: Load<Collections>,
     collections_rev: u64,
+    /// The Artists tab: the artists behind the library, in the service's order.
+    artists: Load<Vec<Hit>>,
+    artists_rev: u64,
+    /// The History tab: the play history in the service's date buckets.
+    history: Load<Vec<HistoryGroup>>,
+    history_rev: u64,
+    sorts: HashMap<Tab, SortKey>,
+    sort_store: Option<Arc<dyn LibrarySortStore>>,
+    shown: Shown,
     /// Open pages, the one on screen last. Album and playlist pages opened from an artist page
     /// stack on it, and back unwinds one at a time.
     stack: Vec<Entry>,
@@ -232,6 +261,13 @@ impl LibraryModel {
             tab: Tab::Playlists,
             collections: Load::Idle,
             collections_rev: 0,
+            artists: Load::Idle,
+            artists_rev: 0,
+            history: Load::Idle,
+            history_rev: 0,
+            sorts: HashMap::new(),
+            sort_store: None,
+            shown: Shown::default(),
             stack: Vec::new(),
             next_detail: 1,
             thumbs: Thumbs::default(),
@@ -250,12 +286,50 @@ impl LibraryModel {
         &self.collections
     }
 
+    /// The tab's playlists or albums in the chosen order (nothing for the other tabs).
     pub fn list(&self, tab: Tab) -> &[Collection] {
         match (&self.collections, tab) {
-            (Load::Ready(c), Tab::Playlists) => &c.playlists,
-            (Load::Ready(c), Tab::Albums) => &c.albums,
+            (Load::Ready(_), Tab::Playlists) => &self.shown.playlists,
+            (Load::Ready(_), Tab::Albums) => &self.shown.albums,
             _ => &[],
         }
+    }
+
+    pub fn artists(&self) -> &Load<Vec<Hit>> {
+        &self.artists
+    }
+
+    /// The Artists tab's cards in the chosen order.
+    pub fn artist_list(&self) -> &[Hit] {
+        match self.artists {
+            Load::Ready(_) => &self.shown.artists,
+            _ => &[],
+        }
+    }
+
+    pub fn history(&self) -> &Load<Vec<HistoryGroup>> {
+        &self.history
+    }
+
+    /// The history's rows across its buckets.
+    pub fn history_count(&self) -> usize {
+        match &self.history {
+            Load::Ready(groups) => history_len(groups),
+            _ => 0,
+        }
+    }
+
+    /// The `n`th history row counting across buckets.
+    pub fn history_at(&self, n: usize) -> Option<TrackRow> {
+        match &self.history {
+            Load::Ready(groups) => history_row(groups, n).map(|(_, row)| row.clone()),
+            _ => None,
+        }
+    }
+
+    /// How the tab is ordered: the saved choice, else the default.
+    pub fn sort(&self, tab: Tab) -> SortKey {
+        self.sorts.get(&tab).copied().unwrap_or_default()
     }
 
     /// The collection page on screen, if that is what is on top.
@@ -298,6 +372,7 @@ impl LibraryModel {
             Some(source) => {
                 self.source = Some(source);
                 self.load_collections(cx);
+                self.ensure_tab(self.tab, cx);
             }
             None if unavailable && self.collections == Load::Idle => {
                 self.collections = Load::Failed(LoadFailure::Other);
@@ -319,6 +394,11 @@ impl LibraryModel {
         self.tab = Tab::Playlists;
         self.collections_rev += 1;
         self.collections = Load::Idle;
+        self.artists_rev += 1;
+        self.artists = Load::Idle;
+        self.history_rev += 1;
+        self.history = Load::Idle;
+        self.shown = Shown::default();
         if self.source.is_some() {
             self.load_collections(cx);
         } else {
@@ -352,6 +432,7 @@ impl LibraryModel {
                     Ok(list) => Load::Ready(split_collections(list)),
                     Err(f) => Load::Failed(f),
                 };
+                m.reshow();
                 cx.notify();
             });
         })
@@ -361,8 +442,179 @@ impl LibraryModel {
     pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
+            self.ensure_tab(tab, cx);
             cx.notify();
         }
+    }
+
+    // ---- artists, history, sort -----------------------------------------------------------
+
+    /// Starts what the tab shows when it is opened: the artists once, the history every time
+    /// (it keeps what it has on screen while the fresh one loads).
+    fn ensure_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        match tab {
+            Tab::Artists if matches!(self.artists, Load::Idle) => self.load_artists(cx),
+            Tab::History => self.load_history(cx),
+            _ => {}
+        }
+    }
+
+    pub fn reload_artists(&mut self, cx: &mut Context<Self>) {
+        self.load_artists(cx);
+    }
+
+    fn load_artists(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        self.artists = Load::Loading;
+        self.artists_rev += 1;
+        let rev = self.artists_rev;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { source.library_artists() })
+                .await;
+            let _ = this.update(cx, |m, cx| {
+                if m.artists_rev != rev {
+                    return;
+                }
+                m.artists = match result {
+                    Ok(list) => Load::Ready(list),
+                    Err(f) => Load::Failed(f),
+                };
+                m.reshow();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn reload_history(&mut self, cx: &mut Context<Self>) {
+        self.load_history(cx);
+    }
+
+    /// Loads the history. Rows already shown stay until the new ones arrive (and stay if they
+    /// never do).
+    fn load_history(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let refresh = matches!(self.history, Load::Ready(_));
+        if !refresh {
+            self.history = Load::Loading;
+        }
+        self.history_rev += 1;
+        let rev = self.history_rev;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { source.history() })
+                .await;
+            let _ = this.update(cx, |m, cx| {
+                if m.history_rev != rev {
+                    return;
+                }
+                match result {
+                    Ok(days) => {
+                        let groups = history_groups(days);
+                        let seeds: Vec<(String, bool)> = groups
+                            .iter()
+                            .flat_map(|g| like_seeds(&g.rows, false))
+                            .collect();
+                        m.writes.update(cx, |w, cx| w.seed(seeds, cx));
+                        m.history = Load::Ready(groups);
+                    }
+                    Err(f) if !refresh => m.history = Load::Failed(f),
+                    Err(_) => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Plays a history row now, in front of whatever is queued (what a Search result does).
+    pub fn play_history(&mut self, n: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.history_at(n) else {
+            return;
+        };
+        self.player.update(cx, |p, cx| {
+            p.hint_art(row.track.video_id.as_str(), row.thumbnail.as_deref());
+            p.play_now(row.track, cx)
+        });
+    }
+
+    /// Orders the tab's list. The choice is remembered.
+    pub fn set_sort(&mut self, tab: Tab, key: SortKey, cx: &mut Context<Self>) {
+        if !tab.sorts().contains(&key) || self.sort(tab) == key {
+            return;
+        }
+        self.sorts.insert(tab, key);
+        self.reshow();
+        if let Some(store) = self.sort_store.clone() {
+            cx.background_executor()
+                .spawn(async move { store.save(tab.stored(), key.stored()) })
+                .detach();
+        }
+        cx.notify();
+    }
+
+    /// Where the sort choices are kept: the saved ones are applied as soon as they are read.
+    pub fn install_sort_store(
+        &mut self,
+        store: Option<Arc<dyn LibrarySortStore>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sort_store = store.clone();
+        let Some(store) = store else { return };
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_executor()
+                .spawn(async move {
+                    [Tab::Playlists, Tab::Albums, Tab::Artists]
+                        .into_iter()
+                        .filter_map(|tab| {
+                            let key = SortKey::from_stored(&store.load(tab.stored())?)?;
+                            Some((tab, key))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |m, cx| {
+                for (tab, key) in saved {
+                    // A choice made before the saved one was read wins.
+                    if tab.sorts().contains(&key) {
+                        m.sorts.entry(tab).or_insert(key);
+                    }
+                }
+                m.reshow();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Rebuilds what the lists show from what was loaded and the chosen orders.
+    fn reshow(&mut self) {
+        let (mut playlists, mut albums) = match &self.collections {
+            Load::Ready(c) => (c.playlists.clone(), c.albums.clone()),
+            _ => (Vec::new(), Vec::new()),
+        };
+        sort_collections(&mut playlists, self.sort(Tab::Playlists));
+        sort_collections(&mut albums, self.sort(Tab::Albums));
+        let mut artists = match &self.artists {
+            Load::Ready(list) => list.clone(),
+            _ => Vec::new(),
+        };
+        sort_artists(&mut artists, self.sort(Tab::Artists));
+        self.shown = Shown {
+            playlists,
+            albums,
+            artists,
+        };
     }
 
     // ---- pages --------------------------------------------------------------------------
