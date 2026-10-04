@@ -12,11 +12,12 @@ use std::time::Instant;
 use apollo_theme::Accent;
 use gpui::{App, AppContext, Entity, Window, WindowHandle};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::player::PlayerModel;
 use crate::settings::{SettingsModel, CLOSE_TO_TRAY};
+use crate::sleep_timer::SleepChoice;
 use crate::smtc::hwnd_of;
 use crate::tray::{
     icon_rgba, on_close_requested, ClickGate, CloseAction, TrayBridge, TrayCommand, TraySink,
@@ -29,6 +30,8 @@ const ID_PLAY_PAUSE: &str = "tray-play-pause";
 const ID_NEXT: &str = "tray-next";
 const ID_PREVIOUS: &str = "tray-previous";
 const ID_SHOW: &str = "tray-show";
+const ID_SLEEP_OFF: &str = "tray-sleep-off";
+const ID_SLEEP_END_OF_TRACK: &str = "tray-sleep-end-of-track";
 const ID_QUIT: &str = "tray-quit";
 
 const SW_HIDE: i32 = 0;
@@ -54,6 +57,8 @@ pub struct Tray {
 struct WinSink {
     icon: TrayIcon,
     play_pause: MenuItem,
+    /// The "Sleep timer" submenu's entries, one per choice.
+    sleep: Vec<(SleepChoice, CheckMenuItem)>,
 }
 
 impl TraySink for WinSink {
@@ -66,6 +71,21 @@ impl TraySink for WinSink {
     fn set_playing(&mut self, playing: bool) {
         self.play_pause
             .set_text(if playing { "Pause" } else { "Play" });
+    }
+
+    fn set_sleep(&mut self, choice: SleepChoice) {
+        for (c, item) in &self.sleep {
+            item.set_checked(*c == choice);
+        }
+    }
+}
+
+/// The menu id of a sleep timer entry (`tray-sleep-15`, ...).
+fn sleep_id(choice: SleepChoice) -> String {
+    match choice {
+        SleepChoice::Off => ID_SLEEP_OFF.to_owned(),
+        SleepChoice::Minutes(m) => format!("tray-sleep-{m}"),
+        SleepChoice::EndOfTrack => ID_SLEEP_END_OF_TRACK.to_owned(),
     }
 }
 
@@ -80,11 +100,29 @@ impl Tray {
         let previous = MenuItem::with_id(ID_PREVIOUS, "Previous", true, None);
         let show = MenuItem::with_id(ID_SHOW, "Show Apollo", true, None);
         let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
+        let sleep: Vec<(SleepChoice, CheckMenuItem)> = SleepChoice::MENU
+            .iter()
+            .map(|c| {
+                (
+                    *c,
+                    CheckMenuItem::with_id(sleep_id(*c), c.label(), true, *c == SleepChoice::Off, None),
+                )
+            })
+            .collect();
+        let sleep_menu = Submenu::new("Sleep timer", true);
+        for (_, item) in &sleep {
+            sleep_menu
+                .append(item)
+                .map_err(|err| eprintln!("tray: could not build the sleep menu: {err}"))
+                .ok()?;
+        }
         let menu = Menu::new();
         menu.append_items(&[
             &play_pause,
             &next,
             &previous,
+            &PredefinedMenuItem::separator(),
+            &sleep_menu,
             &PredefinedMenuItem::separator(),
             &show,
             &quit,
@@ -124,7 +162,11 @@ impl Tray {
             .map_err(|err| eprintln!("tray: could not add the icon: {err}"))
             .ok()?;
         Some(Self {
-            sink: WinSink { icon, play_pause },
+            sink: WinSink {
+                icon,
+                play_pause,
+                sleep,
+            },
             commands,
         })
     }
@@ -137,7 +179,12 @@ fn menu_command(id: &str) -> Option<TrayCommand> {
         ID_PREVIOUS => TrayCommand::Previous,
         ID_SHOW => TrayCommand::ShowWindow,
         ID_QUIT => TrayCommand::Quit,
-        _ => return None,
+        other => {
+            return SleepChoice::MENU
+                .iter()
+                .find(|c| sleep_id(**c) == other)
+                .map(|c| TrayCommand::Sleep(*c))
+        }
     })
 }
 
@@ -160,9 +207,13 @@ pub fn install(
     }
     let host = cx.new(|cx| {
         cx.observe(&player, |host: &mut Host, player, cx| {
-            let state = player.read(cx).media_state();
+            let (state, sleep) = {
+                let p = player.read(cx);
+                (p.media_state(), p.sleep_choice())
+            };
             if let Some(bridge) = host.bridge.as_mut() {
                 bridge.apply(&state);
+                bridge.apply_sleep(sleep);
             }
         })
         .detach();
@@ -170,10 +221,14 @@ pub fn install(
             bridge: Some(TrayBridge::new(sink)),
         }
     });
-    let state = player.read(cx).media_state();
+    let (state, sleep) = {
+        let p = player.read(cx);
+        (p.media_state(), p.sleep_choice())
+    };
     host.update(cx, |host, _| {
         if let Some(bridge) = host.bridge.as_mut() {
             bridge.apply(&state);
+            bridge.apply_sleep(sleep);
         }
     });
 
@@ -191,6 +246,7 @@ pub fn install(
     });
 
     let weak = player.downgrade();
+    let host_for_commands = host.clone();
     cx.spawn(async move |cx| {
         let mut gate = ClickGate::default();
         while let Some(command) = commands.recv().await {
@@ -205,6 +261,17 @@ pub fn install(
                     let _ = window.update(cx, |_, window, _| show(window));
                 }
                 TrayCommand::Quit => cx.quit(),
+                TrayCommand::Sleep(choice) => {
+                    let _ = weak.update(cx, |m, cx| m.set_sleep(choice, cx));
+                    // The menu flipped the clicked entry's mark by itself: put it back to what
+                    // the player now says.
+                    let now = weak.read_with(cx, |m, _| m.sleep_choice()).unwrap_or(choice);
+                    host_for_commands.update(cx, |host, _| {
+                        if let Some(bridge) = host.bridge.as_mut() {
+                            bridge.force_sleep(now);
+                        }
+                    });
+                }
                 transport => {
                     if let Some(os) = transport.player_command() {
                         let _ = weak.update(cx, |m, cx| m.os_command(os, cx));
@@ -284,5 +351,15 @@ mod tests {
         assert_eq!(menu_command(ID_SHOW), Some(TrayCommand::ShowWindow));
         assert_eq!(menu_command(ID_QUIT), Some(TrayCommand::Quit));
         assert_eq!(menu_command("other"), None);
+    }
+
+    #[test]
+    fn every_sleep_entry_has_its_own_id_that_maps_back() {
+        let mut ids = std::collections::HashSet::new();
+        for choice in SleepChoice::MENU {
+            let id = sleep_id(choice);
+            assert!(ids.insert(id.clone()), "{id} repeats");
+            assert_eq!(menu_command(&id), Some(TrayCommand::Sleep(choice)));
+        }
     }
 }

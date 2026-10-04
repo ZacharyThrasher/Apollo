@@ -840,3 +840,100 @@ fn settings_has_a_playback_section_whose_switch_flips_normalization(cx: &mut Tes
     click(vcx, "setting-normalize-volume");
     assert!(player.read_with(vcx, |m, _| m.normalize()));
 }
+
+// ---- the PC around the player: sleep timer and pause for other audio ----------------------------
+
+#[gpui::test]
+fn settings_playback_has_a_pause_on_other_audio_row_that_is_off_until_flipped(cx: &mut TestAppContext) {
+    use apollo_app::settings::PAUSE_ON_OTHER_AUDIO;
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (_player, shell, vcx) = setup(cx);
+    shell.update(vcx, |s, cx| s.show_route(Route::Settings, cx));
+    vcx.run_until_parked();
+
+    let gapless = bounds(vcx, "setting-gapless-playback");
+    let row = bounds(vcx, "setting-pause-on-other-audio");
+    let switch = bounds(vcx, "setting-pause-on-other-audio-switch");
+    assert_eq!(row.size.height, gpui::px(48.0), "a settings row is 48px");
+    assert!(row.top() >= gapless.bottom(), "under the other Playback rows, in the same card");
+    assert_eq!(row.left(), gapless.left());
+    assert!(switch.left() > row.center().x && switch.right() <= row.right());
+    let settings = shell.read_with(vcx, |s, cx| s.settings(cx));
+    assert!(!settings.read_with(vcx, |m, _| m.get(&PAUSE_ON_OTHER_AUDIO)), "off by default");
+
+    click(vcx, "setting-pause-on-other-audio");
+    assert!(settings.read_with(vcx, |m, _| m.get(&PAUSE_ON_OTHER_AUDIO)));
+    click(vcx, "setting-pause-on-other-audio");
+    assert!(!settings.read_with(vcx, |m, _| m.get(&PAUSE_ON_OTHER_AUDIO)));
+}
+
+#[gpui::test]
+fn now_playing_has_a_moon_that_opens_the_sleep_menu_and_the_choice_sticks(cx: &mut TestAppContext) {
+    use apollo_app::sleep_timer::SleepChoice;
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (player, shell, vcx) = setup(cx);
+    click(vcx, "now-playing-toggle");
+    vcx.run_until_parked();
+
+    // The moon sits with the other title-line actions, one hit target.
+    let playlist = bounds(vcx, "np-playlist");
+    let moon = bounds(vcx, "np-sleep");
+    assert!(moon.left() >= playlist.right(), "after add to playlist");
+    assert!(moon.size.height <= gpui::px(32.0));
+    assert!(vcx.debug_bounds("np-sleep-minutes").is_none(), "no label while off");
+
+    click(vcx, "np-sleep");
+    vcx.run_until_parked();
+    let menu = shell.read_with(vcx, |s, _| s.sleep_menu().clone());
+    assert!(menu.read_with(vcx, |m, _| m.is_open()));
+    let panel = bounds(vcx, "sleep-menu");
+    assert_eq!(panel.size.width, gpui::px(220.0), "context menu width");
+    let rows: Vec<_> = (0..6)
+        .map(|i| {
+            let selector: &'static str =
+                Box::leak(format!("sleep-menu-item-{i}").into_boxed_str());
+            bounds(vcx, selector)
+        })
+        .collect();
+    assert!(rows.iter().all(|r| r.size.height == gpui::px(32.0)), "32px rows");
+    assert!(rows.windows(2).all(|w| w[0].bottom() <= w[1].top()), "in order, top to bottom");
+    assert!(rows.iter().all(|r| r.left() >= panel.left() && r.right() <= panel.right()));
+    assert_eq!(menu.read_with(vcx, |m, _| m.cursor()), Some(0), "starts on Off, which is on");
+
+    // 30 min: the menu closes at once, the timer runs, and the moon carries the minutes.
+    click(vcx, "sleep-menu-item-2");
+    vcx.run_until_parked();
+    assert!(!menu.read_with(vcx, |m, _| m.is_open()));
+    assert_eq!(
+        player.read_with(vcx, |m, _| m.sleep_choice()),
+        SleepChoice::Minutes(30)
+    );
+    let label = bounds(vcx, "np-sleep-minutes");
+    assert!(label.size.width > gpui::px(0.0));
+    assert_eq!(bounds(vcx, "np-sleep"), moon, "nothing around the moon moved");
+
+    // Reopened, the cursor starts on the row that is on; End of track by keyboard.
+    click(vcx, "np-sleep");
+    vcx.run_until_parked();
+    assert_eq!(menu.read_with(vcx, |m, _| m.cursor()), Some(2));
+    vcx.simulate_keystrokes("end enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        player.read_with(vcx, |m, _| m.sleep_choice()),
+        SleepChoice::EndOfTrack
+    );
+    assert!(vcx.debug_bounds("np-sleep-minutes").is_none(), "no countdown for end of track");
+
+    // Off turns it off; Escape closes without choosing.
+    click(vcx, "np-sleep");
+    vcx.run_until_parked();
+    click(vcx, "sleep-menu-item-0");
+    vcx.run_until_parked();
+    assert_eq!(player.read_with(vcx, |m, _| m.sleep_choice()), SleepChoice::Off);
+    click(vcx, "np-sleep");
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(!menu.read_with(vcx, |m, _| m.is_open()));
+    assert_eq!(player.read_with(vcx, |m, _| m.sleep_choice()), SleepChoice::Off);
+}

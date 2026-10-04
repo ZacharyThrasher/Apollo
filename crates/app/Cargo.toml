@@ -58,6 +58,19 @@ raw-window-handle = "0.6"
 souvlaki = { version = "=0.8.3", default-features = false }
 tray-icon = "0.26"
 
+# Core Audio (default output device, other apps' audio sessions) and the suspend/resume notice
+# for pc_watch_win.rs. Same version as GPUI's own `windows`, so no extra copy.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
+  "Win32_System_Com",
+  "Win32_System_Power",
+  "Win32_UI_WindowsAndMessaging",
+]
+
 [build-dependencies]
 # Embeds assets/apollo.ico as the exe/window icon (no-op off Windows).
 embed-resource = "3"

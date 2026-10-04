@@ -22,6 +22,7 @@ use crate::library::LibrarySource;
 use crate::os_media::{MediaState, MediaTrack, OsCommand};
 use crate::persist::QueueSaver;
 use crate::settings::{AutoplayStore, GaplessStore, NormalizeStore, QueueStore, VolumeStore};
+use crate::sleep_timer::{Playhead, SleepChoice, SleepStep, SleepTimer};
 use crate::thumbs::Thumbs;
 
 type AppDriver =
@@ -50,6 +51,11 @@ const RADIO_RETRY: Duration = Duration::from_secs(30);
 
 /// How often the playing position is saved between queue changes.
 const CHECKPOINT_EVERY: Duration = Duration::from_secs(5);
+
+/// How often the sleep timer looks while a fade is possible (a countdown a long way off, or the
+/// end of a long track, is looked at once a second instead).
+const SLEEP_TICK_FAST: Duration = Duration::from_millis(50);
+const SLEEP_TICK_SLOW: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -121,6 +127,9 @@ pub struct PlayerView {
     pub volume: u8,
     pub muted: bool,
     pub error: Option<Failure>,
+    /// The sleep timer's setting, and while a countdown runs the minutes left (rounded up).
+    pub sleep: SleepChoice,
+    pub sleep_minutes: Option<u32>,
     pub accent: Accent,
     pub accent_moving: bool,
 }
@@ -135,6 +144,17 @@ pub struct PlayerModel {
     accent: AccentAnim,
     volume: u8,
     muted: bool,
+    /// The sleep timer's fade: the share of the user's volume that is let through (1.0 = all).
+    /// Separate from `volume`, which stays what the user set.
+    fade: f32,
+    /// The fade ended in a pause and the volume is held down until the music is wanted again,
+    /// so it is not brought back while the engine is still winding down.
+    fade_held: bool,
+    /// What was last sent to the engine, to skip sending the same percentage again.
+    pushed_volume: Option<u8>,
+    sleep: SleepTimer,
+    sleep_ticking: bool,
+    sleep_label: Option<u32>,
     volume_store: Option<Arc<dyn VolumeStore>>,
     shuffle_seed: u64,
     latency: Latency,
@@ -175,6 +195,12 @@ impl PlayerModel {
             accent: AccentAnim::new(Accent::fallback()),
             volume: DEFAULT_VOLUME,
             muted: false,
+            fade: 1.0,
+            fade_held: false,
+            pushed_volume: None,
+            sleep: SleepTimer::default(),
+            sleep_ticking: false,
+            sleep_label: None,
             volume_store: None,
             shuffle_seed: seed_from_clock(),
             latency: Latency::default(),
@@ -481,7 +507,23 @@ impl PlayerModel {
     /// `handle`, naming what the user did for the latency log (`None` = derived from the event).
     fn handle_as(&mut self, kind: Option<&'static str>, event: Event, cx: &mut Context<Self>) {
         self.trace(kind, &event);
-        self.checkpoint_now |= matches!(event, Event::Pause | Event::Seek { .. });
+        self.checkpoint_now |= matches!(
+            event,
+            Event::Pause | Event::OutputLost | Event::Seek { .. }
+        );
+        // Music wanted again after a sleep-timer fade: the volume is back before it starts.
+        if self.fade_held
+            && matches!(
+                event,
+                Event::Play
+                    | Event::PlayContext { .. }
+                    | Event::PlayEntry { .. }
+                    | Event::Next
+                    | Event::Previous
+            )
+        {
+            self.release_fade();
+        }
         if let Some(d) = self.driver.as_mut() {
             d.handle(event);
         }
@@ -715,15 +757,166 @@ impl PlayerModel {
         if self.muted {
             0
         } else {
-            self.volume
+            (f32::from(self.volume) * self.fade).round().clamp(0.0, 100.0) as u8
         }
     }
 
     fn push_volume(&mut self) {
         let v = self.effective_volume();
+        self.pushed_volume = Some(v);
         if let Some(d) = self.driver.as_mut() {
             d.engine.set_volume(v);
         }
+    }
+
+    // ---- the PC around the player ---------------------------------------------
+
+    /// The sound output went away or changed (headphones unplugged, Bluetooth dropped) or the PC
+    /// slept: pause where the track is. The queue and position stay, nothing skips, and the next
+    /// Play opens the track again so the sound comes out of whatever output exists by then.
+    pub fn output_lost(&mut self, cx: &mut Context<Self>) {
+        self.handle(Event::OutputLost, cx);
+    }
+
+    /// Another app has been playing sound for a while (a movie, a call): pause, if music is
+    /// playing. Nothing resumes by itself afterwards.
+    pub fn other_audio(&mut self, cx: &mut Context<Self>) {
+        let playing = self
+            .driver
+            .as_ref()
+            .is_some_and(|d| d.coordinator().intent() == Intent::Playing);
+        if playing {
+            self.handle(Event::Pause, cx);
+        }
+    }
+
+    // ---- sleep timer -----------------------------------------------------------
+
+    pub fn sleep_choice(&self) -> SleepChoice {
+        self.sleep.choice()
+    }
+
+    /// Start the sleep timer (or turn it off). Picking a length again restarts the countdown.
+    pub fn set_sleep(&mut self, choice: SleepChoice, cx: &mut Context<Self>) {
+        self.set_sleep_at(choice, Instant::now(), cx);
+    }
+
+    /// [`set_sleep`](Self::set_sleep) with the clock passed in, so tests need no sleeping.
+    #[doc(hidden)]
+    pub fn set_sleep_at(&mut self, choice: SleepChoice, now: Instant, cx: &mut Context<Self>) {
+        let was_fading = self.sleep.is_fading();
+        self.sleep.set(choice, now);
+        if was_fading {
+            self.fade = 1.0;
+            self.push_volume();
+        }
+        self.sleep_label = self.sleep.minutes_left(now);
+        if choice.is_on() {
+            self.ensure_sleep_ticker(cx);
+        }
+        cx.notify();
+    }
+
+    fn playhead(&self) -> Option<Playhead> {
+        let d = self.driver.as_ref()?;
+        let c = d.coordinator();
+        let current = c.queue().current();
+        Some(Playhead {
+            playing: c.intent() == Intent::Playing,
+            position_ms: c.position_ms(),
+            duration_ms: c
+                .duration_ms()
+                .or_else(|| current.and_then(|e| e.track.duration.map(|d| d.as_millis() as u64))),
+        })
+    }
+
+    fn ensure_sleep_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.sleep_ticking {
+            return;
+        }
+        self.sleep_ticking = true;
+        cx.spawn(async move |this, cx| loop {
+            let wait = this
+                .update(cx, |m, cx| m.sleep_tick(cx))
+                .ok()
+                .flatten();
+            let Some(wait) = wait else { break };
+            cx.background_executor().timer(wait).await;
+        })
+        .detach();
+    }
+
+    /// One look at the timer. Returns how long to wait before the next one, or `None` when the
+    /// timer is over and the ticker can stop.
+    fn sleep_tick(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
+        self.sleep_tick_at(Instant::now(), cx)
+    }
+
+    /// [`sleep_tick`](Self::sleep_tick) with the clock passed in, so tests need no sleeping.
+    #[doc(hidden)]
+    pub fn sleep_tick_at(&mut self, now: Instant, cx: &mut Context<Self>) -> Option<Duration> {
+        let head = self.playhead().unwrap_or(Playhead {
+            playing: false,
+            position_ms: 0,
+            duration_ms: None,
+        });
+        match self.sleep.tick(now, head) {
+            SleepStep::Idle => {}
+            SleepStep::Fade(factor) => {
+                self.fade = factor.clamp(0.0, 1.0);
+                if Some(self.effective_volume()) != self.pushed_volume {
+                    self.push_volume();
+                }
+            }
+            SleepStep::Done => {
+                // Silent: pause, and keep the volume down until music is wanted again.
+                self.fade = 0.0;
+                self.push_volume();
+                self.fade_held = true;
+                self.handle(Event::Pause, cx);
+            }
+            SleepStep::Cancelled => {
+                self.fade = 1.0;
+                self.push_volume();
+            }
+        }
+        let label = self.sleep.minutes_left(now);
+        if label != self.sleep_label {
+            self.sleep_label = label;
+            cx.notify();
+        }
+        if !self.sleep.choice().is_on() {
+            self.sleep_ticking = false;
+            cx.notify();
+            return None;
+        }
+        Some(if self.sleep.is_fading() || self.fade_possible(now, head) {
+            SLEEP_TICK_FAST
+        } else {
+            SLEEP_TICK_SLOW
+        })
+    }
+
+    /// Whether a fade could begin before the next slow look: a countdown in its last seconds, or
+    /// the last seconds of the track.
+    fn fade_possible(&self, now: Instant, head: Playhead) -> bool {
+        use crate::sleep_timer::FADE;
+        let soon = FADE * 2;
+        match self.sleep.choice() {
+            SleepChoice::Off => false,
+            SleepChoice::Minutes(_) => self.sleep.time_left(now).is_some_and(|left| left <= soon),
+            SleepChoice::EndOfTrack => head.playing
+                && head
+                    .duration_ms
+                    .is_some_and(|d| d.saturating_sub(head.position_ms) <= soon.as_millis() as u64),
+        }
+    }
+
+    /// Bring the volume back after a fade that ended in a pause.
+    fn release_fade(&mut self) {
+        self.fade_held = false;
+        self.fade = 1.0;
+        self.push_volume();
     }
 
     // ---- artwork -----------------------------------------------------------
@@ -745,6 +938,15 @@ impl PlayerModel {
     /// Reconcile derived state after anything changed: request artwork for a new current
     /// track, steer the accent crossfade, and repaint.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        // However music got wanted again, the sleep timer's fade does not outlive the pause.
+        if self.fade_held
+            && self
+                .driver
+                .as_ref()
+                .is_some_and(|d| d.coordinator().intent() == Intent::Playing)
+        {
+            self.release_fade();
+        }
         if let Some(id) = self.current_video() {
             if !self.art.contains_key(&id) {
                 self.art.insert(id.clone(), ArtSlot::Loading);
@@ -1021,6 +1223,8 @@ impl PlayerModel {
             volume: self.volume,
             muted: self.muted,
             error: None,
+            sleep: self.sleep.choice(),
+            sleep_minutes: self.sleep.minutes_left(Instant::now()),
             accent,
             accent_moving,
         };
