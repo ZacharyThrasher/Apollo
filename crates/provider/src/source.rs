@@ -714,7 +714,11 @@ impl InnerTubeSource {
     /// The library holds the song (`saved`) or not, learned some other way than by this source's
     /// own write (the caller read the library back).
     pub fn note_song_saved(&self, video_id: &str, saved: bool) {
-        self.marks.set(video_id, saved);
+        if saved {
+            self.marks.listed(video_id);
+        } else {
+            self.marks.set(video_id, false);
+        }
     }
 
     /// Remove one row (`set_video_id` is the row's own token) of a playlist the account owns.
