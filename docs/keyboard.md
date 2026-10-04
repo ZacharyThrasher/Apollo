@@ -7,7 +7,7 @@ The list is here, not in the app (Settings shows only the Global hotkeys switch)
 These work wherever focus is, **except** while a text field (Search) or a popup (the track menu,
 the playlist picker) has it, so typing "m" in Search types an "m". Where a more specific part of
 the screen binds the same key it wins: a focused slider steps with Left/Right, the queue list and
-Search results use Up/Down and L on their own cursor row.
+Search results use Up/Down and L on their own cursor row. The kind chips under the field are one Tab stop (Left/Right walk them, Enter picks); the Top result card, its Play button and each "Show all" are Tab stops too (Enter presses them).
 
 | Key | Does |
 |---|---|

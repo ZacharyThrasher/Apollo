@@ -17,6 +17,7 @@ pub mod keymap;
 pub mod latency;
 pub mod library;
 pub mod lyrics;
+pub mod related;
 pub mod loudness;
 pub mod motion;
 pub mod os_media;

@@ -15,7 +15,7 @@ use apollo_account::jar::CookieJar;
 use apollo_account::service::{AccountService, IdentityState};
 use apollo_domain::links::ExternalLink;
 use apollo_domain::listing::LoadFailure;
-use apollo_provider::{InnerTubeSource, LinkTarget, SearchResults};
+use apollo_provider::{InnerTubeSource, LinkTarget, SearchFilter, SearchPage, SearchResults};
 use apollo_services_common::{unix_now, SessionProvider, SessionUnavailable};
 
 use crate::search::SearchSource;
@@ -160,6 +160,18 @@ impl AccountSearch {
 impl SearchSource for AccountSearch {
     fn search(&self, query: &str) -> Result<SearchResults, LoadFailure> {
         self.with_session(async |source| source.search(query).await)
+    }
+
+    fn search_filtered(
+        &self,
+        query: &str,
+        filter: SearchFilter,
+    ) -> Result<SearchPage, LoadFailure> {
+        self.with_session(async |source| source.search_filtered(query, filter).await)
+    }
+
+    fn search_more(&self, token: &str) -> Result<SearchPage, LoadFailure> {
+        self.with_session(async |source| source.search_more(token).await)
     }
 
     fn suggest(&self, query: &str) -> Result<Vec<String>, LoadFailure> {
