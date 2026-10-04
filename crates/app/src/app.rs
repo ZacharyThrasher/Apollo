@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use apollo_lyrics::{Lrclib, LyricsCache, LyricsService, LyricsSource, SqliteCache};
 use gpui::{
-    px, size, App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowOptions,
+    px, size, App, AppContext, TitlebarOptions, WindowBackgroundAppearance, WindowHandle,
+    WindowOptions,
 };
 
 use crate::account::{AccountModel, AccountPorts};
@@ -21,10 +21,17 @@ use crate::settings::{
 };
 use crate::ui::shell::{self, Quit, Shell};
 use crate::url_thumbs::NoThumbs;
+use crate::window_state::{self, Constraints, Home};
 
 /// Smallest window that still fits the player bar's three columns at their minimum widths.
 const MIN_WIDTH: f32 = crate::ui::player_bar::MIN_BAR_WIDTH;
 const MIN_HEIGHT: f32 = 480.0;
+/// The main window's first size, and where it opens when nothing (or nothing reachable) was saved.
+const MAIN_PLACEMENT: Constraints = Constraints {
+    default_size: (1100.0, 720.0),
+    min_size: (MIN_WIDTH, MIN_HEIGHT),
+    home: Home::Center,
+};
 
 /// How often the system's animation setting is looked at while the app runs.
 pub const MOTION_POLL: Duration = Duration::from_secs(2);
@@ -53,6 +60,8 @@ struct Stores {
     gapless: Option<Arc<dyn GaplessStore>>,
     queue: Option<Arc<dyn QueueStore>>,
     lyrics_open: Option<Arc<dyn LyricsOpenStore>>,
+    /// Where the windows' sizes and positions are kept.
+    windows: Option<Arc<dyn SettingsBackend>>,
     related_open: Option<Arc<dyn RelatedOpenStore>>,
     library_sort: Option<Arc<dyn LibrarySortStore>>,
     /// The store's file, where the lyrics cache keeps its rows too.
@@ -68,6 +77,7 @@ impl Stores {
                 normalize: Some(db.clone()),
                 gapless: Some(db.clone()),
                 lyrics_open: Some(db.clone()),
+                windows: Some(db.clone()),
                 related_open: Some(db.clone()),
                 library_sort: Some(db.clone()),
                 db_path: Some(db.path().to_path_buf()),
@@ -115,6 +125,8 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
             SqliteSettings::default_location().map(|s| Arc::new(s) as Arc<dyn SettingsBackend>),
         )
     });
+    // The saved output device and equalizer, and any change to them later.
+    crate::audio::bind(&player, &settings, cx);
     // Plays are reported to YouTube Music only while "Add plays to history" is on.
     let reporter = mode.play_reporter(&ports.service);
     let history_on = settings.read(cx).get(&ADD_PLAYS_TO_HISTORY);
@@ -146,7 +158,15 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
         player.clone(),
         account.clone(),
         settings.clone(),
+        stores.windows.clone(),
         !start_hidden,
+    );
+    crate::mini::install(
+        cx,
+        window,
+        player.clone(),
+        settings.clone(),
+        stores.windows.clone(),
     );
     let lyrics = lyrics_service(&mode, stores.db_path.clone(), &ports);
     let _ = window.update(cx, |shell, _, cx| {
@@ -180,9 +200,7 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
         });
         cx.spawn(async move |cx| {
             while rx.recv().await.is_some() {
-                cx.update(|cx| {
-                    let _ = window.update(cx, |_, window, _| crate::tray_win::show(window));
-                });
+                cx.update(|cx| crate::mini::show_main(cx, window));
             }
         })
         .detach();
@@ -233,13 +251,15 @@ fn open_window(
     player: gpui::Entity<PlayerModel>,
     account: gpui::Entity<AccountModel>,
     settings: gpui::Entity<SettingsModel>,
+    windows: Option<Arc<dyn SettingsBackend>>,
     show: bool,
 ) -> WindowHandle<Shell> {
-    let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
+    // Where the window was left, kept on a monitor that still exists.
+    let place = window_state::restore(cx, windows.as_ref(), window_state::KEY_MAIN, &MAIN_PLACEMENT);
     let window = cx
         .open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(place.window_bounds()),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Apollo".into()),
                     appears_transparent: true,
@@ -257,6 +277,10 @@ fn open_window(
         .update(cx, |shell, window, cx| {
             shell.focus_root(window, cx);
             shell.install_window_hooks(window, cx);
+            // Size, position and maximized state are written down as they change.
+            let remembered =
+                window_state::remember(window, cx, windows, window_state::KEY_MAIN, true);
+            shell.keep(remembered);
         })
         .expect("focus root");
     window

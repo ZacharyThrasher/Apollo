@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use apollo_domain::audio::{self, AudioDevice, Equalizer};
 use apollo_domain::model::{QueueEntryId, Track};
 use apollo_domain::playback::{EngineEvent, Event, Failure, Intent, Phase};
 use apollo_domain::queue::{Queue, QueueEntry, Repeat};
@@ -55,6 +56,10 @@ const RADIO_RETRY: Duration = Duration::from_secs(30);
 /// How often the playing position is saved between queue changes.
 const CHECKPOINT_EVERY: Duration = Duration::from_secs(5);
 
+/// How often the list of output devices is looked at again, so the Output device row follows a
+/// headset being plugged in or pulled out. A read of what the engine already knows; the screen
+/// is only redrawn when the list changed.
+const DEVICE_REFRESH: Duration = Duration::from_secs(2);
 /// How often the sleep timer looks while a fade is possible (a countdown a long way off, or the
 /// end of a long track, is looked at once a second instead).
 const SLEEP_TICK_FAST: Duration = Duration::from_millis(50);
@@ -171,6 +176,12 @@ pub struct PlayerModel {
     /// Gapless playback (Settings > Playback): on by default.
     gapless: bool,
     gapless_store: Option<Arc<dyn GaplessStore>>,
+    /// Audio toolbox: the output device chosen (`None` = system default), the devices the engine
+    /// last saw, the equalizer and the playback speed (the speed is not saved: 1.0 each launch).
+    audio_device: Option<String>,
+    audio_devices: Vec<AudioDevice>,
+    equalizer: Equalizer,
+    speed: f32,
     /// Writes the queue and position down; present while someone is signed in.
     saver: Option<QueueSaver>,
     /// What the saved queue was made from, to tell a changed queue from a moved position.
@@ -227,6 +238,10 @@ impl PlayerModel {
             normalize_store: None,
             gapless: true,
             gapless_store: None,
+            audio_device: None,
+            audio_devices: Vec::new(),
+            equalizer: Equalizer::flat(),
+            speed: audio::NORMAL_SPEED,
             saver: None,
             saved_fp: None,
             saved_row: false,
@@ -286,6 +301,9 @@ impl PlayerModel {
         driver.engine.set_volume(self.effective_volume());
         driver.engine.set_normalization(self.normalize);
         driver.set_gapless(self.gapless);
+        driver.engine.set_audio_device(self.audio_device.clone());
+        driver.engine.set_equalizer(self.equalizer);
+        driver.engine.set_speed(self.speed);
         // The queue starts paused on its current track: have it ready so the first Play is instant.
         let first = driver.coordinator().queue().current().map(|e| e.track.clone());
         self.saved_fp = Some(queue_fingerprint(driver.coordinator().queue()));
@@ -296,6 +314,17 @@ impl PlayerModel {
         if let Some(track) = first {
             self.prefetch(&track);
         }
+        self.refresh_audio_devices(cx);
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(DEVICE_REFRESH).await;
+            if this
+                .update(cx, |m, cx| m.refresh_audio_devices(cx))
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
         self.sync(cx);
     }
 
@@ -506,6 +535,80 @@ impl PlayerModel {
         }
         if let Some(store) = self.gapless_store.clone() {
             std::thread::spawn(move || store.save(on));
+        }
+        cx.notify();
+    }
+
+    /// The output device chosen: `None` is the system default.
+    pub fn audio_device(&self) -> Option<&str> {
+        self.audio_device.as_deref()
+    }
+
+    /// The output devices the engine last saw, without the system default.
+    pub fn audio_devices(&self) -> &[AudioDevice] {
+        &self.audio_devices
+    }
+
+    /// What the Output device row shows: the device that is actually playing.
+    pub fn audio_device_label(&self) -> String {
+        audio::device_label(self.audio_device.as_deref(), &self.audio_devices)
+    }
+
+    /// Play on `device` (`None` = system default). The choice is kept while the device is
+    /// unplugged: the engine plays on the default meanwhile and moves back when it returns.
+    /// Saving it is the caller's (the Settings page's) business.
+    pub fn set_audio_device(&mut self, device: Option<String>, cx: &mut Context<Self>) {
+        if self.audio_device == device {
+            return;
+        }
+        self.audio_device = device.clone();
+        if let Some(d) = self.driver.as_mut() {
+            d.engine.set_audio_device(device);
+        }
+        cx.notify();
+    }
+
+    /// Looks at the engine's list of devices again and redraws only if it changed.
+    pub fn refresh_audio_devices(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.driver.as_ref() else { return };
+        let devices = d.engine.audio_devices();
+        if devices != self.audio_devices {
+            self.audio_devices = devices;
+            cx.notify();
+        }
+    }
+
+    pub fn equalizer(&self) -> Equalizer {
+        self.equalizer
+    }
+
+    /// Apply an equalizer (the switch and the curve) to the engine, live and without a click.
+    /// Saving it is the caller's business: dragging a slider calls this on every move.
+    pub fn set_equalizer(&mut self, eq: Equalizer, cx: &mut Context<Self>) {
+        let eq = eq.sanitized();
+        if self.equalizer == eq {
+            return;
+        }
+        self.equalizer = eq;
+        if let Some(d) = self.driver.as_mut() {
+            d.engine.set_equalizer(eq);
+        }
+        cx.notify();
+    }
+
+    /// Playback speed, one of [`audio::SPEEDS`]. Not saved: normal speed on every launch.
+    pub fn speed(&self) -> f32 {
+        self.speed
+    }
+
+    pub fn set_speed(&mut self, speed: f32, cx: &mut Context<Self>) {
+        let speed = audio::sanitize_speed(speed);
+        if self.speed == speed {
+            return;
+        }
+        self.speed = speed;
+        if let Some(d) = self.driver.as_mut() {
+            d.engine.set_speed(speed);
         }
         cx.notify();
     }
