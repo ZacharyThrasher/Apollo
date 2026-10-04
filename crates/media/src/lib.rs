@@ -8,6 +8,8 @@
 pub mod classify;
 pub mod coalesce;
 pub mod config;
+pub mod device;
+pub mod eq;
 pub mod ramp;
 #[cfg(windows)]
 mod engine;
