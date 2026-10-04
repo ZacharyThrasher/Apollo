@@ -8,18 +8,28 @@ pub mod assets;
 pub mod audio;
 pub mod autostart;
 pub mod backend;
+pub mod explore;
+pub mod discord;
 pub mod home;
+#[cfg(windows)]
+pub mod hotkeys_win;
+pub mod keymap;
 pub mod latency;
 pub mod library;
 pub mod lyrics;
 pub mod loudness;
 pub mod motion;
 pub mod os_media;
+pub mod pc_watch;
+#[cfg(windows)]
+pub mod pc_watch_win;
 pub mod persist;
 pub mod platform;
 pub mod player;
+pub mod reporting;
 pub mod search;
 pub mod settings;
+pub mod sleep_timer;
 #[cfg(windows)]
 pub mod single_instance;
 #[cfg(windows)]

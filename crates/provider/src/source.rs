@@ -2,18 +2,36 @@ use std::sync::Arc;
 
 use apollo_domain::account::{Validation, ValidationError};
 use apollo_domain::library::{Collection, CollectionKind, PlaylistTarget, WriteFailure};
+use apollo_domain::links::ExternalLink;
 use apollo_domain::listing::{LoadFailure, Page};
-use innertube::{Clients, InnerTube, Rating, Session, YouTubeClient, METADATA_CLIENT};
+use apollo_domain::model::BrowseId;
+use innertube::{
+    Clients, InnerTube, PlaybackTracking, Rating, Session, WatchtimePing, YouTubeClient,
+    METADATA_CLIENT,
+};
 use tokio::sync::Notify;
 
 use crate::artist::{page_from_artist, ArtistPage};
+use crate::explore::{explore_page, mood_playlists, worst, ExplorePage};
 use crate::home::{home_page, HomePage};
 use crate::map::{
-    account_validation, classify, classify_write, collections_from_grid, liked_from_rating,
-    page_from_album, page_from_continuation, page_from_playlist, target_from_option, track_from_song,
-    ListedTrack,
+    account_validation, classify, classify_write, collections_from_grid, history_days,
+    liked_from_rating, page_from_album, page_from_continuation, page_from_playlist, target_from_option, track_from_song,
+    HistoryDay, ListedTrack,
 };
-use crate::search::{search_results, SearchResults};
+use crate::search::{hit_from_item, search_results, Hit, SearchResults};
+
+/// What a pasted link points at, with enough about it to open it without a second lookup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    Track(ListedTrack),
+    Collection(Collection),
+    Artist {
+        id: BrowseId,
+        name: String,
+        thumbnail: Option<String>,
+    },
+}
 
 /// Network-backed metadata source. Every call is authenticated: there is no guest mode, and a
 /// rejected session is reported to the caller instead of being retried or healed here.
@@ -104,6 +122,31 @@ impl InnerTubeSource {
         Ok(collections_from_grid(&cards, CollectionKind::Album))
     }
 
+    /// The artists behind the songs and albums in the account's library (the Library's Artists
+    /// tab), in the service's order. A card with no id or title is dropped.
+    pub async fn library_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        let cards = self
+            .tube
+            .library_artists(&self.client)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(cards
+            .iter()
+            .filter(|c| c.kind == "artist")
+            .filter_map(hit_from_item)
+            .collect())
+    }
+
+    /// The play history in YouTube Music's own date buckets (the Library's History tab).
+    pub async fn history(&self) -> Result<Vec<HistoryDay>, LoadFailure> {
+        let groups = self
+            .tube
+            .history(&self.client)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(history_days(&groups))
+    }
+
     /// First page of a playlist (`VL…`) or any page that lists tracks. A bare playlist id
     /// (`PL…`) gets the `VL` the browse endpoint wants.
     pub async fn playlist(&self, browse_id: &str) -> Result<Page<ListedTrack>, LoadFailure> {
@@ -154,6 +197,53 @@ impl InnerTubeSource {
         home_page(&parsed)
     }
 
+    /// Explore: new releases, the song chart, chart shelves and the mood tiles. The four answers
+    /// it is made of are asked for together and any of them may fail or be refused (some are
+    /// not offered to every account or country); the page shows what came back. It fails only
+    /// when nothing could be shown, naming the worst failure, and a rejected session fails it
+    /// at once.
+    pub async fn explore(&self) -> Result<ExplorePage, LoadFailure> {
+        let (explore, charts, releases, moods) = tokio::join!(
+            self.tube.explore(&self.client),
+            self.tube.charts(&self.client),
+            self.tube.new_releases(&self.client),
+            self.tube.moods(&self.client),
+        );
+        let failures: Vec<LoadFailure> = [
+            explore.as_ref().err(),
+            charts.as_ref().err(),
+            releases.as_ref().err(),
+            moods.as_ref().err(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(classify)
+        .collect();
+        if failures.contains(&LoadFailure::Session) {
+            return Err(LoadFailure::Session);
+        }
+        let page = explore_page(
+            explore.as_ref().ok(),
+            charts.as_ref().ok(),
+            releases.as_deref().ok(),
+            moods.as_deref().ok(),
+        );
+        match worst(failures) {
+            Some(failure) if page.is_empty() => Err(failure),
+            _ => Ok(page),
+        }
+    }
+
+    /// The playlists of one mood or genre tile (`params` from the Explore page's tiles).
+    pub async fn mood_playlists(&self, params: &str) -> Result<Vec<Collection>, LoadFailure> {
+        let cards = self
+            .tube
+            .mood_playlists(&self.client, params)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(mood_playlists(&cards))
+    }
+
     pub async fn continuation(&self, token: &str) -> Result<Page<ListedTrack>, LoadFailure> {
         let page = self
             .tube
@@ -182,6 +272,74 @@ impl InnerTubeSource {
             return Err(LoadFailure::Parse);
         }
         Ok(results)
+    }
+
+    /// Typeahead for the search box: the query completions the service offers for `input`, in
+    /// its own order. Not written to the account's search history (unlike a search).
+    pub async fn suggestions(&self, input: &str) -> Result<Vec<String>, LoadFailure> {
+        let parsed = self
+            .tube
+            .search_suggestions(&self.client, input)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(parsed.queries.into_iter().map(|q| q.text).collect())
+    }
+
+    /// What a pasted link opens: the track (looked up through the panel `next` answers for it),
+    /// or the title and cover of the playlist, album or artist page it names.
+    pub async fn resolve_link(&self, link: &ExternalLink) -> Result<LinkTarget, LoadFailure> {
+        match link {
+            ExternalLink::Track { video, .. } => {
+                let next = self
+                    .tube
+                    .next(&self.client, Some(video.as_str()), None)
+                    .await
+                    .map_err(|e| classify(&e))?;
+                next.items
+                    .iter()
+                    .filter(|s| s.video_id == video.as_str())
+                    .find_map(track_from_song)
+                    .map(LinkTarget::Track)
+                    .ok_or(LoadFailure::Parse)
+            }
+            ExternalLink::Playlist(id) => {
+                let browse_id = playlist_browse_id(id.as_str());
+                let page = self
+                    .tube
+                    .playlist(&self.client, &browse_id, None)
+                    .await
+                    .map_err(|e| classify(&e))?;
+                Ok(LinkTarget::Collection(Collection {
+                    kind: CollectionKind::Playlist,
+                    id: BrowseId::new(browse_id),
+                    title: page.title.unwrap_or_else(|| "Playlist".to_owned()),
+                    subtitle: page.subtitle,
+                    thumbnail: page.thumbnail,
+                }))
+            }
+            ExternalLink::Album(id) => {
+                let page = self
+                    .tube
+                    .album(&self.client, id.as_str())
+                    .await
+                    .map_err(|e| classify(&e))?;
+                Ok(LinkTarget::Collection(Collection {
+                    kind: CollectionKind::Album,
+                    id: id.clone(),
+                    title: page.title.ok_or(LoadFailure::Parse)?,
+                    subtitle: page.subtitle,
+                    thumbnail: page.thumbnail,
+                }))
+            }
+            ExternalLink::Artist(id) => {
+                let page = self.artist(id.as_str()).await?;
+                Ok(LinkTarget::Artist {
+                    id: page.id,
+                    name: page.name,
+                    thumbnail: page.thumbnail,
+                })
+            }
+        }
     }
 
     /// Like or unlike a track on the account (`like/like`, `like/removelike`). Idempotent. A
@@ -233,6 +391,32 @@ impl InnerTubeSource {
         Ok(radio_tracks(&next.items, video_id))
     }
 
+    /// The tracks of a radio or mix playlist that has no seed song (`RDEM…` an artist's radio,
+    /// `RDAO…` its shuffle mix), as the `next` panel lists them. Repeats and unplayable rows are
+    /// left out.
+    pub async fn mix(&self, playlist_id: &str) -> Result<Vec<ListedTrack>, LoadFailure> {
+        let next = self
+            .tube
+            .next(&self.client, None, Some(playlist_id))
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(radio_tracks(&next.items, ""))
+    }
+
+    /// Subscribe to or unsubscribe from an artist's channel (`UC…`) as the signed-in account.
+    /// Sent once: a failure that says [`WriteFailure::outcome_unknown`] means the account may or
+    /// may not have changed, and the caller reads the artist page back to find out.
+    pub async fn set_subscribed(
+        &self,
+        channel_id: &str,
+        subscribed: bool,
+    ) -> Result<(), WriteFailure> {
+        self.tube
+            .subscribe(&self.client, channel_id, subscribed)
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
     /// The playlists the account can add `video_id` to, each flagged when it already holds it.
     pub async fn playlists_for(&self, video_id: &str) -> Result<Vec<PlaylistTarget>, LoadFailure> {
         let options = self
@@ -257,9 +441,18 @@ impl InnerTubeSource {
             .map_err(|e| classify_write(&e))
     }
 
+    /// YouTube Music's own lyrics for a track, as plain text. `Ok(None)` is an answer: the track
+    /// has no lyrics tab, or the tab is empty.
+    pub async fn lyrics_text(&self, video_id: &str) -> Result<Option<String>, LoadFailure> {
+        self.tube
+            .lyrics(&self.client, video_id)
+            .await
+            .map_err(|e| classify(&e))
+    }
+
     /// How loud YouTube measured a track (`loudnessDb`, dB against its reference level), from one
     /// metadata-only `player` request. `Ok(None)` is an answer: the service had no measurement for
-    /// the track. Nothing else in the response is read, and it carries no plays or history.
+    /// the track. Nothing else in the response is read.
     pub async fn loudness_db(&self, video_id: &str) -> Result<Option<f32>, LoadFailure> {
         let loudness = self
             .tube
@@ -267,6 +460,47 @@ impl InnerTubeSource {
             .await
             .map_err(|e| classify(&e))?;
         Ok(loudness.loudness_db)
+    }
+
+    /// Where a play of `video_id` is reported, from one metadata-only `player` request (the same
+    /// one [`loudness_db`](Self::loudness_db) makes). `Ok(None)` is an answer: the response had
+    /// no tracking URLs. Reporting itself is [`report_start`](Self::report_start) and
+    /// [`report_watchtime`](Self::report_watchtime).
+    pub async fn playback_tracking(
+        &self,
+        video_id: &str,
+    ) -> Result<Option<PlaybackTracking>, LoadFailure> {
+        self.tube
+            .player_tracking(&self.client, video_id)
+            .await
+            .map_err(|e| classify(&e))
+    }
+
+    /// Tell YouTube Music the playback `nonce` has started. One attempt; the caller decides what
+    /// a failure means (the app only logs it).
+    pub async fn report_start(
+        &self,
+        tracking: &PlaybackTracking,
+        nonce: &str,
+        position_ms: u64,
+    ) -> Result<(), LoadFailure> {
+        self.tube
+            .report_playback_start(&self.client, tracking, nonce, position_ms)
+            .await
+            .map_err(|e| classify(&e))
+    }
+
+    /// One watch-time ping for the playback `nonce`. One attempt.
+    pub async fn report_watchtime(
+        &self,
+        tracking: &PlaybackTracking,
+        nonce: &str,
+        ping: &WatchtimePing,
+    ) -> Result<(), LoadFailure> {
+        self.tube
+            .report_watchtime(&self.client, tracking, nonce, ping)
+            .await
+            .map_err(|e| classify(&e))
     }
 
     /// Best-effort `visitorData`, which the service expects alongside the cookie. A failure

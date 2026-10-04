@@ -29,6 +29,8 @@ macro_rules! icons {
 icons! {
     HomeRegular => "home-regular",
     HomeFilled => "home-filled",
+    CompassRegular => "compass-regular",
+    CompassFilled => "compass-filled",
     SearchRegular => "search-regular",
     SearchFilled => "search-filled",
     LibraryRegular => "library-regular",
@@ -74,6 +76,8 @@ icons! {
     Radio => "live-regular",
     QueueAdd => "queue-add-regular",
     PlayNext => "play-next-regular",
+    MoonRegular => "weather-moon-regular",
+    MoonFilled => "weather-moon-filled",
 }
 
 pub struct Assets;

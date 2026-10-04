@@ -1,7 +1,8 @@
 //! Lyrics for the track on screen.
 //!
-//! * [`LyricsSource`] is one place lyrics can come from; [`Lrclib`] is the only one for now.
-//!   Another source slots in by implementing the trait and joining the list given to
+//! * [`LyricsSource`] is one place lyrics can come from: [`Lrclib`] (synced, matched on title,
+//!   artist and length) and, in the app, YouTube Music's own plain lyrics behind it. Another
+//!   source slots in by implementing the trait and joining the list given to
 //!   [`LyricsService::new`] (first synced answer wins, plain text is the fallback).
 //! * [`LyricsService`] wraps the sources with a cache keyed by video id. A hit is kept for good;
 //!   "not found" is kept for a week; a failure to reach the source is never cached.
@@ -11,6 +12,7 @@
 mod cache;
 mod lrc;
 mod lrclib;
+mod normalize;
 
 use std::fmt;
 use std::sync::Arc;
@@ -69,6 +71,11 @@ impl std::error::Error for FetchError {}
 pub trait LyricsSource: Send + Sync {
     /// `Ok(None)` is a definite "this source has nothing for the track".
     fn fetch(&self, query: &LyricsQuery) -> Result<Option<Lyrics>, FetchError>;
+
+    /// A source that never has synced lyrics. It is not asked once plain text is in hand.
+    fn plain_only(&self) -> bool {
+        false
+    }
 }
 
 pub struct LyricsService {
@@ -96,6 +103,9 @@ impl LyricsService {
         let mut failure = None;
         let mut answered = false;
         for source in &self.sources {
+            if best.is_some() && source.plain_only() {
+                continue;
+            }
             match source.fetch(query) {
                 Ok(Some(found @ Lyrics::Synced(_))) => {
                     best = Some(found);
@@ -215,6 +225,36 @@ mod tests {
 
         let service = LyricsService::new(vec![a, c], None);
         assert_eq!(service.lookup(&query("y")).unwrap(), Some(plain));
+    }
+
+    #[test]
+    fn a_plain_only_source_is_not_asked_once_there_is_text() {
+        struct PlainOnly(Arc<Fixed>);
+        impl LyricsSource for PlainOnly {
+            fn fetch(&self, q: &LyricsQuery) -> Result<Option<Lyrics>, FetchError> {
+                self.0.fetch(q)
+            }
+            fn plain_only(&self) -> bool {
+                true
+            }
+        }
+        let first = Fixed::new(Ok(Some(Lyrics::Plain("from the first".into()))));
+        let behind = Fixed::new(Ok(Some(Lyrics::Plain("from behind".into()))));
+        let service = LyricsService::new(vec![first, Arc::new(PlainOnly(behind.clone()))], None);
+        assert_eq!(
+            service.lookup(&query("a")).unwrap(),
+            Some(Lyrics::Plain("from the first".into()))
+        );
+        assert_eq!(behind.calls(), 0);
+
+        // With nothing found before it, it is asked and its text is used.
+        let nothing = Fixed::new(Ok(None));
+        let service = LyricsService::new(vec![nothing, Arc::new(PlainOnly(behind.clone()))], None);
+        assert_eq!(
+            service.lookup(&query("b")).unwrap(),
+            Some(Lyrics::Plain("from behind".into()))
+        );
+        assert_eq!(behind.calls(), 1);
     }
 
     #[test]

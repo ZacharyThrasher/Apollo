@@ -232,7 +232,7 @@ fn saved_eq(page: &Page, vcx: &mut VisualTestContext) -> Equalizer {
 fn nothing_saved_means_the_default_device_a_flat_off_equalizer_and_normal_speed(
     cx: &mut TestAppContext,
 ) {
-    let (page, vcx) = setup(cx, &[]);
+    let (page, _vcx) = setup(cx, &[]);
     let told = page.told.lock().unwrap();
     assert_eq!(told.devices, [None]);
     assert_eq!(told.equalizers, [Equalizer::flat()]);

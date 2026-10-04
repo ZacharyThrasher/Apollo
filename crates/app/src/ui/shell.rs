@@ -11,16 +11,23 @@ use gpui::{
 };
 
 use crate::account::AccountModel;
+use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::library::{LibraryWrites, Notice, Target};
 use crate::lyrics::LyricsModel;
+use crate::keymap::{
+    LikeCurrent, SeekBack, SeekForward, ToggleLyrics, ToggleMute, VolumeDown, VolumeUp,
+    SEEK_STEP_MS, VOLUME_STEP,
+};
 use crate::motion::PanelSlide;
+use crate::os_media::OsCommand;
 use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
 use crate::settings::SettingsModel;
-use crate::settings::LyricsOpenStore;
+use crate::settings::{LibrarySortStore, LyricsOpenStore};
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
+use crate::ui::explore_page::{self, ExploreView};
 use crate::ui::home_page::{self, HomeView};
 use crate::ui::library::{self, LibraryView};
 use crate::ui::lyrics_pane::LyricsPane;
@@ -37,6 +44,7 @@ use crate::ui::settings_page::{self, SettingsPage};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
 use crate::ui::titlebar::TitleBar;
 use crate::ui::toast::{self, toast, Fade};
+use crate::ui::sleep_menu::{SleepMenu, SleepMenuHandle};
 use crate::ui::track_menu::{self, MenuHandle, TrackMenu};
 use crate::url_thumbs::{ThumbSource, ThumbStore};
 
@@ -71,12 +79,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("left", StepBack, Some(crate::ui::slider::KEY_CONTEXT)),
         KeyBinding::new("right", StepForward, Some(crate::ui::slider::KEY_CONTEXT)),
     ]);
+    crate::keymap::bind_keys(cx);
     crate::ui::queue_panel::bind_keys(cx);
     crate::ui::text_field::bind_keys(cx);
     crate::ui::card::bind_keys(cx);
     search_page::bind_keys(cx);
     library::bind_keys(cx);
     home_page::bind_keys(cx);
+    explore_page::bind_keys(cx);
     playlist_picker::bind_keys(cx);
     track_menu::bind_keys(cx);
     choice_menu::bind_keys(cx);
@@ -100,6 +110,8 @@ pub struct Shell {
     /// What the account allows Home to do, as of the last account change.
     home_access: Access,
     home_epoch: u64,
+    explore: Entity<ExploreModel>,
+    explore_page: Entity<ExploreView>,
     /// Likes and playlist adds, and the short error a failed one leaves.
     writes: Entity<LibraryWrites>,
     picker: Entity<PlaylistPicker>,
@@ -107,6 +119,8 @@ pub struct Shell {
     menu: Entity<TrackMenu>,
     /// The pick-one popover of the Output device row and the speed button.
     choices: Entity<ChoiceMenu>,
+    /// The sleep timer popover the moon button in Now Playing opens.
+    sleep_menu: Entity<SleepMenu>,
     /// The error on screen: it outlives the notice by the length of its fade-out.
     toast: Option<ToastShown>,
     /// Where a page opened from another route (a Search card) returns to when Back closes the
@@ -117,6 +131,8 @@ pub struct Shell {
     /// Whether the account could serve the library when it was last looked at; the library is
     /// loaded again when it becomes able to (see [`account_usable`]).
     library_usable: bool,
+    /// An account was signed in since the shell started: signing out then forgets its recents.
+    search_account_live: bool,
     /// The first time the account turns out to be signed out, the window opens on Settings.
     routed_to_sign_in: bool,
     /// Keeps the window-activation hook that dismisses tooltips alive.
@@ -136,7 +152,7 @@ pub struct Shell {
     search_model: Entity<SearchModel>,
     thumbs: Entity<ThumbStore>,
     nav_toggle: FocusHandle,
-    nav_items: [FocusHandle; 4],
+    nav_items: [FocusHandle; 5],
     bar: BarFocus,
     progress: Entity<SliderState>,
     volume: Entity<SliderState>,
@@ -174,7 +190,15 @@ impl Shell {
             cx.focus_handle().tab_index(index).tab_stop(true)
         };
         let nav_toggle = stop(cx, 1);
-        let nav_items = [stop(cx, 2), stop(cx, 3), stop(cx, 4), stop(cx, 5)];
+        // Explore shares Search's index: the page's own stops start at 5 and Search's field is one
+        // of them, so the rail cannot grow past 5; stops with one index keep the rail's order.
+        let nav_items = [
+            stop(cx, 2),
+            stop(cx, 3),
+            stop(cx, 3),
+            stop(cx, 4),
+            stop(cx, 5),
+        ];
         // Nav 1-5, Now Playing 6-12, queue panel 13-17, then the player bar.
         let bar = BarFocus {
             now_playing: stop(cx, 19),
@@ -219,6 +243,9 @@ impl Shell {
         let choices = cx.new(ChoiceMenu::new);
         cx.observe(&choices, |_, _, cx| cx.notify()).detach();
         cx.set_global(ChoiceHandle(choices.clone()));
+        let sleep_menu = cx.new(|cx| SleepMenu::new(player.clone(), cx));
+        cx.observe(&sleep_menu, |_, _, cx| cx.notify()).detach();
+        cx.set_global(SleepMenuHandle(sleep_menu.clone()));
         let queue_panel = cx.new(|cx| {
             QueuePanel::new(
                 player.clone(),
@@ -252,14 +279,15 @@ impl Shell {
             )
         });
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
-        let playback_page = cx.new(|cx| PlaybackPage::new(player.clone(), cx));
+        let playback_page =
+            cx.new(|cx| PlaybackPage::new(player.clone(), settings.clone(), cx));
         let audio_page = cx.new(|cx| AudioPage::new(player.clone(), settings.clone(), cx));
         let settings_page = cx.new(|cx| {
             SettingsPage::new(
                 account_page,
                 playback_page,
                 audio_page,
-                settings,
+                settings.clone(),
                 player.clone(),
                 cx,
             )
@@ -296,6 +324,9 @@ impl Shell {
         cx.observe(&progress, |_, _, cx| cx.notify()).detach();
         cx.observe(&volume, |_, _, cx| cx.notify()).detach();
         let search_model = cx.new(|_| SearchModel::new());
+        if let Some(backend) = settings.read(cx).backend() {
+            search_model.update(cx, |m, cx| m.install_recents(backend, cx));
+        }
         let thumbs = cx.new(|_| ThumbStore::new());
         let search = cx.new(|cx| {
             SearchPage::new(
@@ -304,6 +335,7 @@ impl Shell {
                 picker.clone(),
                 search_model.clone(),
                 thumbs.clone(),
+                settings.clone(),
                 root_focus.clone(),
                 {
                     let weak = weak.clone();
@@ -335,6 +367,27 @@ impl Shell {
                 cx,
             )
         });
+        let explore = cx.new(|cx| ExploreModel::new(player.clone(), cx));
+        let explore_page = cx.new(|cx| {
+            ExploreView::new(
+                player.clone(),
+                explore.clone(),
+                thumbs.clone(),
+                {
+                    let weak = weak.clone();
+                    move |target, window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.open_target(target, window, cx));
+                    }
+                },
+                {
+                    let weak = weak.clone();
+                    move |_, cx| {
+                        let _ = weak.update(cx, |s, cx| s.show_route(Route::Settings, cx));
+                    }
+                },
+                cx,
+            )
+        });
         let mut shell = Self {
             player,
             account,
@@ -344,14 +397,18 @@ impl Shell {
             home_page,
             home_access: Access::Waiting,
             home_epoch: 0,
+            explore,
+            explore_page,
             writes,
             picker,
             menu,
             choices,
+            sleep_menu,
             toast: None,
             detail_origin: None,
             library_epoch: 0,
             library_usable: false,
+            search_account_live: false,
             routed_to_sign_in: false,
             _activation: None,
             route: Route::Home,
@@ -395,18 +452,29 @@ impl Shell {
             self.writes.update(cx, |w, cx| w.reset(cx));
             self.picker.update(cx, |p, cx| p.reset(cx));
             self.menu.update(cx, |m, cx| m.reset(cx));
+            self.sleep_menu.update(cx, |m, cx| m.reset(cx));
         }
         let model = self.account.read(cx);
         let (signed_out, by_choice) = (model.is_signed_out(), model.is_signed_out_by_choice());
+        if matches!(model.screen(), crate::account::Screen::SignedIn { .. }) {
+            self.search_account_live = true;
+        } else if by_choice && self.search_account_live {
+            // What the account searched for goes with its session.
+            self.search_account_live = false;
+            self.search_model.update(cx, |m, cx| m.forget_account(cx));
+        }
         let access = home_access(&view, signed_out, by_choice, self.home_access);
         if access != self.home_access || epoch != self.home_epoch {
             if epoch != self.home_epoch {
                 self.home_page.update(cx, |h, cx| h.rewind(cx));
+                self.explore_page.update(cx, |e, cx| e.rewind(cx));
             }
             self.home_access = access;
             self.home_epoch = epoch;
             self.home
                 .update(cx, |h, cx| h.set_access(access, epoch, cx));
+            self.explore
+                .update(cx, |e, cx| e.set_access(access, epoch, cx));
         }
         self.library
             .update(cx, |l, cx| l.set_signed_out(by_choice, cx));
@@ -426,7 +494,13 @@ impl Shell {
     /// page and panels in between own theirs. For the tab-order tests.
     pub fn tab_stops(&self) -> Vec<(&'static str, FocusHandle)> {
         let mut stops = vec![("nav-toggle", self.nav_toggle.clone())];
-        for (name, handle) in ["nav-home", "nav-search", "nav-library", "nav-settings"]
+        for (name, handle) in [
+            "nav-home",
+            "nav-explore",
+            "nav-search",
+            "nav-library",
+            "nav-settings",
+        ]
             .into_iter()
             .zip(&self.nav_items)
         {
@@ -462,12 +536,29 @@ impl Shell {
         &self.home_page
     }
 
+    pub fn explore(&self) -> &Entity<ExploreModel> {
+        &self.explore
+    }
+
+    pub fn explore_page(&self) -> &Entity<ExploreView> {
+        &self.explore_page
+    }
+
     pub fn writes(&self) -> &Entity<LibraryWrites> {
         &self.writes
     }
 
     pub fn picker(&self) -> &Entity<PlaylistPicker> {
         &self.picker
+    }
+
+    /// The app's settings (the model the Settings page edits).
+    pub fn settings(&self, cx: &App) -> Entity<SettingsModel> {
+        self.settings_page.read(cx).settings().clone()
+    }
+
+    pub fn sleep_menu(&self) -> &Entity<SleepMenu> {
+        &self.sleep_menu
     }
 
     pub fn menu(&self) -> &Entity<TrackMenu> {
@@ -502,6 +593,9 @@ impl Shell {
         if route == Route::Home {
             self.home.update(cx, |h, cx| h.show(Instant::now(), cx));
         }
+        if route == Route::Explore {
+            self.explore.update(cx, |e, cx| e.show(Instant::now(), cx));
+        }
         cx.notify();
     }
 
@@ -520,6 +614,10 @@ impl Shell {
         if route == Route::Library && self.route == Route::Library {
             self.detail_origin = None;
             self.library.update(cx, |l, cx| l.go_home(window, cx));
+        }
+        // Choosing Explore while on it returns to its tiles, whatever mood page is open.
+        if route == Route::Explore && self.route == Route::Explore {
+            self.explore_page.update(cx, |e, cx| e.back(window, cx));
         }
         if route == Route::Search {
             self.open_search(window, cx);
@@ -563,6 +661,9 @@ impl Shell {
         self.route = origin;
         if origin == Route::Home {
             self.home.update(cx, |h, cx| h.show(Instant::now(), cx));
+        }
+        if origin == Route::Explore {
+            self.explore.update(cx, |e, cx| e.show(Instant::now(), cx));
         }
         if origin == Route::Search {
             self.search.update(cx, |s, cx| s.restore_focus(window, cx));
@@ -627,6 +728,23 @@ impl Shell {
             let _ = pane.update(cx, |p, cx| p.restore_open(saved, cx));
         })
         .detach();
+    }
+
+    /// Where the Library tabs' sort choices are remembered.
+    pub fn install_library_sort(
+        &mut self,
+        store: Option<Arc<dyn LibrarySortStore>>,
+        cx: &mut Context<Self>,
+    ) {
+        let model = self.library.read(cx).model().clone();
+        model.update(cx, |m, cx| m.install_sort_store(store, cx));
+    }
+
+    /// The L key: like the playing song, or take the like back (the heart's own toggle).
+    fn like_current(&mut self, cx: &mut Context<Self>) {
+        if let Some(video) = self.player.read(cx).current_video() {
+            self.writes.update(cx, |w, cx| w.toggle_like(&video, cx));
+        }
     }
 
     pub fn toggle_queue(&mut self, cx: &mut Context<Self>) {
@@ -907,6 +1025,9 @@ impl Render for Shell {
         let page = match self.route {
             Route::Search if !self.now_playing_open => self.search.clone().into_any_element(),
             Route::Home if !self.now_playing_open => self.home_page.clone().into_any_element(),
+            Route::Explore if !self.now_playing_open => {
+                self.explore_page.clone().into_any_element()
+            }
             _ => page.into_any_element(),
         };
 
@@ -967,6 +1088,11 @@ impl Render for Shell {
         let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
         let menu = self.menu.read(cx).is_open().then(|| self.menu.clone());
         let choices = self.choices.read(cx).is_open().then(|| self.choices.clone());
+        let sleep_menu = self
+            .sleep_menu
+            .read(cx)
+            .is_open()
+            .then(|| self.sleep_menu.clone());
 
         let fonts = cx.global::<style::Fonts>().text.clone();
         div()
@@ -988,6 +1114,25 @@ impl Render for Shell {
                     this.focus_root(window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ToggleMute, _, cx| {
+                this.player.update(cx, |m, cx| m.toggle_mute(cx));
+            }))
+            .on_action(cx.listener(|this, _: &VolumeUp, _, cx| {
+                this.player.update(cx, |m, cx| m.nudge_volume(VOLUME_STEP, cx));
+            }))
+            .on_action(cx.listener(|this, _: &VolumeDown, _, cx| {
+                this.player.update(cx, |m, cx| m.nudge_volume(-VOLUME_STEP, cx));
+            }))
+            .on_action(cx.listener(|this, _: &SeekBack, _, cx| {
+                this.player
+                    .update(cx, |m, cx| m.os_command(OsCommand::SeekBy(-SEEK_STEP_MS), cx));
+            }))
+            .on_action(cx.listener(|this, _: &SeekForward, _, cx| {
+                this.player
+                    .update(cx, |m, cx| m.os_command(OsCommand::SeekBy(SEEK_STEP_MS), cx));
+            }))
+            .on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_lyrics(cx)))
+            .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| this.like_current(cx)))
             .on_action(cx.listener(|_, _: &FocusNextControl, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &FocusPreviousControl, window, cx| window.focus_prev(cx)))
             .on_action(
@@ -1018,6 +1163,7 @@ impl Render for Shell {
             .children(picker)
             .children(menu)
             .children(choices)
+            .children(sleep_menu)
     }
 }
 

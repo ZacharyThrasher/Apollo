@@ -262,7 +262,8 @@ impl Harness {
             38..=43 => self.apply(Event::Seek {
                 position_ms: rng.next() % 400_000,
             }),
-            44..=45 => self.apply(Event::Stop),
+            44 => self.apply(Event::Stop),
+            45 => self.apply(Event::OutputLost),
             46 => self.apply(Event::Logout),
             47..=54 => {
                 let kind = rng.below(7);

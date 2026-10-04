@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use apollo_lyrics::{Lrclib, LyricsCache, LyricsService, SqliteCache};
+use apollo_lyrics::{Lrclib, LyricsCache, LyricsService, LyricsSource, SqliteCache};
 use gpui::{
     px, size, App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
     WindowHandle, WindowOptions,
@@ -15,8 +15,8 @@ use crate::lyrics::SimLyrics;
 use crate::player::PlayerModel;
 use crate::search::Unavailable;
 use crate::settings::{
-    AutoplayStore, GaplessStore, LyricsOpenStore, NormalizeStore, QueueStore, SettingsBackend,
-    SettingsModel, SqliteSettings, VolumeStore,
+    AutoplayStore, GaplessStore, LibrarySortStore, LyricsOpenStore, NormalizeStore, QueueStore,
+    SettingsBackend, SettingsModel, SqliteSettings, VolumeStore, ADD_PLAYS_TO_HISTORY,
 };
 use crate::ui::shell::{self, Quit, Shell};
 use crate::url_thumbs::NoThumbs;
@@ -52,6 +52,7 @@ struct Stores {
     gapless: Option<Arc<dyn GaplessStore>>,
     queue: Option<Arc<dyn QueueStore>>,
     lyrics_open: Option<Arc<dyn LyricsOpenStore>>,
+    library_sort: Option<Arc<dyn LibrarySortStore>>,
     /// The store's file, where the lyrics cache keeps its rows too.
     db_path: Option<std::path::PathBuf>,
 }
@@ -65,6 +66,7 @@ impl Stores {
                 normalize: Some(db.clone()),
                 gapless: Some(db.clone()),
                 lyrics_open: Some(db.clone()),
+                library_sort: Some(db.clone()),
                 db_path: Some(db.path().to_path_buf()),
                 queue: Some(db),
             },
@@ -107,6 +109,21 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     });
     // The saved output device and equalizer, and any change to them later.
     crate::audio::bind(&player, &settings, cx);
+    // Plays are reported to YouTube Music only while "Add plays to history" is on.
+    let reporter = mode.play_reporter(&ports.service);
+    let history_on = settings.read(cx).get(&ADD_PLAYS_TO_HISTORY);
+    player.update(cx, |m, _| {
+        m.set_play_reporter(reporter);
+        m.set_report_plays(history_on);
+    });
+    {
+        let player = player.clone();
+        cx.observe(&settings, move |settings, cx| {
+            let on = settings.read(cx).get(&ADD_PLAYS_TO_HISTORY);
+            player.update(cx, |m, _| m.set_report_plays(on));
+        })
+        .detach();
+    }
     // The tray first: with one, "Start minimized to tray" opens the window hidden (no flash),
     // and without one the window always opens.
     #[cfg(windows)]
@@ -125,9 +142,10 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
         settings.clone(),
         !start_hidden,
     );
-    let lyrics = lyrics_service(&mode, stores.db_path.clone());
+    let lyrics = lyrics_service(&mode, stores.db_path.clone(), &ports);
     let _ = window.update(cx, |shell, _, cx| {
-        shell.install_lyrics(lyrics, stores.lyrics_open.clone(), cx)
+        shell.install_lyrics(lyrics, stores.lyrics_open.clone(), cx);
+        shell.install_library_sort(stores.library_sort.clone(), cx);
     });
     // Media keys and the SMTC overlay, on the window just opened.
     #[cfg(windows)]
@@ -137,6 +155,14 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     if let Some(tray) = tray {
         crate::tray_win::install(cx, window, tray, player.clone(), settings.clone());
     }
+    // The PC around the player: the output device going away, sleep and wake, other apps playing.
+    #[cfg(windows)]
+    crate::pc_watch_win::install(cx, player.clone(), settings.clone());
+    // Optional system-wide hotkeys (Settings > Keyboard).
+    #[cfg(windows)]
+    crate::hotkeys_win::install(cx, settings.clone(), player.clone());
+    // Discord Rich Presence (Settings > Discord); inert until the Discord application id is set.
+    crate::discord::install(cx, player.clone(), settings.clone());
     // A second launch asks this window to come forward, whether it is hidden in the tray,
     // minimized or behind others.
     #[cfg(windows)]
@@ -173,13 +199,26 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     window
 }
 
-/// Where lyrics come from: LRCLIB with the SQLite cache, or the fixtures under the simulation.
-fn lyrics_service(mode: &Mode, db_path: Option<std::path::PathBuf>) -> Arc<LyricsService> {
+/// Where lyrics come from: LRCLIB, then YouTube Music's own plain lyrics, with the SQLite cache;
+/// or the fixtures under the simulation.
+fn lyrics_service(
+    mode: &Mode,
+    db_path: Option<std::path::PathBuf>,
+    ports: &AccountPorts,
+) -> Arc<LyricsService> {
     if matches!(mode, Mode::Sim | Mode::SimSignedOut) {
         return Arc::new(LyricsService::new(vec![Arc::new(SimLyrics)], None));
     }
     let cache = db_path.map(|path| Arc::new(SqliteCache::at(path)) as Arc<dyn LyricsCache>);
-    Arc::new(LyricsService::new(vec![Arc::new(Lrclib::new())], cache))
+    let mut sources: Vec<Arc<dyn LyricsSource>> = vec![Arc::new(Lrclib::new())];
+    #[cfg(feature = "real-services")]
+    match crate::backend::real_lyrics::AccountLyrics::new(ports.service.clone()) {
+        Ok(source) => sources.push(Arc::new(source)),
+        Err(err) => eprintln!("YouTube Music lyrics unavailable: {err}"),
+    }
+    #[cfg(not(feature = "real-services"))]
+    let _ = ports;
+    Arc::new(LyricsService::new(sources, cache))
 }
 
 fn open_window(

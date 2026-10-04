@@ -532,9 +532,9 @@ fn press_enter(vcx: &mut VisualTestContext) {
 #[gpui::test]
 fn the_tab_order_reaches_sign_in_and_enter_presses_it(cx: &mut TestAppContext) {
     let (r, vcx) = rig(cx, Scripted::new(vec![], valid(0)), FakeSource::ok(), true);
-    // Signed out: Settings is open. Tab walks the nav (toggle, four items) and then lands on
+    // Signed out: Settings is open. Tab walks the nav (toggle, five items) and then lands on
     // the page's first control, Sign in; Enter presses it.
-    vcx.simulate_keystrokes("tab tab tab tab tab tab");
+    vcx.simulate_keystrokes("tab tab tab tab tab tab tab");
     press_enter(vcx);
     vcx.run_until_parked();
     assert!(matches!(screen(&r, vcx), Screen::SignedIn { .. }));
@@ -638,7 +638,9 @@ fn the_attention_dot_names_its_reason(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn settings_shows_the_window_switches_and_a_click_flips_one(cx: &mut TestAppContext) {
-    use apollo_app::settings::{SettingsBackend, SettingsModel, CLOSE_TO_TRAY};
+    use apollo_app::settings::{
+        SettingsBackend, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS,
+    };
 
     #[derive(Default)]
     struct Memory(Mutex<std::collections::HashMap<String, String>>);
@@ -673,15 +675,35 @@ fn settings_shows_the_window_switches_and_a_click_flips_one(cx: &mut TestAppCont
     shell.update(vcx, |s, cx| s.show_route(Route::Settings, cx));
     vcx.run_until_parked();
 
-    for id in ["setting-close-to-tray", "setting-start-minimized"] {
+    for id in [
+        "setting-close-to-tray",
+        "setting-start-minimized",
+        "setting-discord-presence",
+        "setting-global-hotkeys",
+    ] {
         assert!(vcx.debug_bounds(id).is_some(), "{id} is on the page");
     }
+    // Discord comes after Window and before Keyboard, the last section; both switches start off.
+    let discord = vcx.debug_bounds("setting-discord-presence").unwrap();
+    let hotkeys = vcx.debug_bounds("setting-global-hotkeys").unwrap();
+    assert!(discord.origin.y > vcx.debug_bounds("setting-start-minimized").unwrap().origin.y);
+    assert!(hotkeys.origin.y > discord.origin.y);
+    assert!(!settings.read_with(vcx, |m, _| m.get(&DISCORD_PRESENCE)));
+    assert!(!settings.read_with(vcx, |m, _| m.get(&GLOBAL_HOTKEYS)));
     assert!(
         settings.read_with(vcx, |m, _| m.get(&CLOSE_TO_TRAY)),
         "on by default"
     );
 
+    // The page is taller than the window now: bring the row clear of the player bar.
+    vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: gpui::point(gpui::px(600.0), gpui::px(400.0)),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-400.0))),
+        ..Default::default()
+    });
+    vcx.run_until_parked();
     let row = vcx.debug_bounds("setting-close-to-tray").unwrap();
+    assert!(row.bottom() < gpui::px(1000.0), "{row:?} is above the player bar");
     vcx.simulate_click(row.center(), gpui::Modifiers::none());
     vcx.run_until_parked();
     assert!(!settings.read_with(vcx, |m, _| m.get(&CLOSE_TO_TRAY)));
