@@ -1,8 +1,11 @@
 pub mod account_page;
 pub mod anchor;
 pub mod art_tile;
+pub mod audio_page;
 pub mod button;
 pub mod card;
+pub mod choice_menu;
+pub mod equalizer_panel;
 pub mod explore_page;
 pub mod home_page;
 pub mod library;
@@ -37,3 +40,4 @@ pub mod toast;
 pub mod track_menu;
 pub mod tooltip;
 pub mod transport;
+pub mod vslider;

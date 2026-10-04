@@ -1,18 +1,24 @@
 //! Building blocks of the Settings screen: a titled section holding a card of 48px rows, each a
 //! label on the left and the app's switch pill on the right. No helper text. A row is one focus stop and one
 //! click target; Enter toggles it (Space stays the global play/pause key).
+//!
+//! Two variants share the row: [`SettingsRow::select`] shows the current choice and a chevron
+//! on the right and opens a popover when pressed, and [`SettingsRow::action`] puts a control
+//! (a text button) beside a switch; pressing the control does not flip the switch.
 
 use std::time::Instant;
 
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
-    div, prelude::*, px, AnyElement, App, ElementId, FocusHandle, KeyboardButton, SharedString,
-    Window,
+    div, prelude::*, px, AnyElement, App, ElementId, FocusHandle, KeyboardButton, MouseButton,
+    SharedString, Window,
 };
 
+use crate::assets::Icon;
 use crate::motion::HoverFade;
 use crate::style::{self, color};
+use crate::ui::anchor;
 use crate::ui::button::keyboard_focused;
 use crate::ui::switch;
 
@@ -71,6 +77,12 @@ impl RenderOnce for SettingsSection {
     }
 }
 
+/// Where a select row's popover hangs from: the key its choice and chevron record their bounds
+/// under (see `ui::anchor`).
+pub fn anchor_key(id: &str) -> String {
+    format!("{id}-anchor")
+}
+
 /// What a row remembers between frames: the pointer tint, 120 ms like the other controls.
 struct RowState {
     hover: HoverFade,
@@ -79,13 +91,20 @@ struct RowState {
 /// Called with the value the owner asked for.
 type Toggle = Box<dyn Fn(bool, &mut Window, &mut App) + 'static>;
 
-/// One setting: label left, switch right.
+/// The widest the current choice of a select row is shown before it is cut with an ellipsis.
+const SELECT_VALUE_MAX_WIDTH: f32 = 320.0;
+
+/// One setting: label left, switch right (or, for a select row, the current choice and a chevron).
 #[derive(IntoElement)]
 pub struct SettingsRow {
     id: &'static str,
     focus: FocusHandle,
     label: SharedString,
     on: bool,
+    /// Set for a select row: the current choice, shown with a chevron instead of a switch.
+    value: Option<SharedString>,
+    /// A control shown before the switch.
+    action: Option<AnyElement>,
     ring: gpui::Hsla,
     accent: Accent,
     on_toggle: Option<Toggle>,
@@ -104,10 +123,39 @@ impl SettingsRow {
             focus: focus.clone(),
             label: label.into(),
             on,
+            value: None,
+            action: None,
             ring: color::accent(accent),
             accent,
             on_toggle: None,
         }
+    }
+
+    /// A row that shows `value` (the current choice) and a chevron, and opens a popover when
+    /// pressed: see [`SettingsRow::on_open`] and [`anchor_key`], the place the popover hangs
+    /// from.
+    pub fn select(
+        id: &'static str,
+        focus: &FocusHandle,
+        label: impl Into<SharedString>,
+        value: impl Into<SharedString>,
+        accent: Accent,
+    ) -> Self {
+        let mut row = Self::switch(id, focus, label, false, accent);
+        row.value = Some(value.into());
+        row
+    }
+
+    /// Called when a select row is pressed (a click, or Enter on the focused row).
+    pub fn on_open(self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_toggle(move |_, window, cx| handler(window, cx))
+    }
+
+    /// A control beside the switch, for a row that has more to do than flip. It takes its own
+    /// clicks: pressing it does not flip the row.
+    pub fn action(mut self, control: impl IntoElement) -> Self {
+        self.action = Some(control.into_any_element());
+        self
     }
 
     /// Called with the value the owner asked for (the opposite of what is shown).
@@ -131,6 +179,13 @@ impl RenderOnce for SettingsRow {
         let ring = keyboard_focused(&self.focus, window);
         let handler = self.on_toggle;
         let hover_state = state.clone();
+        let id = self.id;
+        let value = self.value.clone();
+        let is_select = value.is_some();
+        let accessible = match &value {
+            Some(value) => SharedString::from(format!("{}, {}", self.label, value)),
+            None => self.label.clone(),
+        };
 
         div()
             .id(self.id)
@@ -144,12 +199,18 @@ impl RenderOnce for SettingsRow {
             .h(px(ROW_HEIGHT))
             .px(px(spacing::S4))
             .track_focus(&self.focus.clone().tab_stop(true))
-            .role(gpui::Role::Switch)
-            .aria_label(self.label.clone())
-            .aria_toggled(if on {
-                gpui::Toggled::True
+            .role(if is_select {
+                gpui::Role::Button
             } else {
-                gpui::Toggled::False
+                gpui::Role::Switch
+            })
+            .aria_label(accessible)
+            .when(!is_select, |d| {
+                d.aria_toggled(if on {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                })
             })
             .cursor_pointer()
             .bg(color::state_hover().opacity(tint))
@@ -174,11 +235,47 @@ impl RenderOnce for SettingsRow {
                     .text_color(color::text_primary())
                     .child(self.label),
             )
-            .child(
-                div()
-                    .debug_selector(|| format!("{}-switch", self.id))
-                    .child(switch::pill(on, true, self.accent)),
-            )
+            .when(!is_select, |d| {
+                d.children(self.action.map(|control| {
+                    // The control's own clicks stay its own: stopped here, the row never sees
+                    // the press and so does not flip.
+                    div()
+                        .flex_none()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(control)
+                }))
+                .child(
+                    div()
+                        .debug_selector(|| format!("{}-switch", id))
+                        .child(switch::pill(on, true, self.accent)),
+                )
+            })
+            .when_some(value, |d, value| {
+                // The popover hangs from the choice and the chevron, right edges lined up.
+                d.child(anchor::anchored(
+                    anchor_key(id),
+                    div()
+                        .debug_selector(|| format!("{}-value", id))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(spacing::S2))
+                        .child(
+                            style::text_style(div(), typography::BODY, cx)
+                                .max_w(px(SELECT_VALUE_MAX_WIDTH))
+                                .truncate()
+                                .text_color(color::text_secondary())
+                                .child(value),
+                        )
+                        .child(
+                            gpui::svg()
+                                .path(Icon::ChevronRight.path())
+                                .size(px(layout::ICON_SIZE))
+                                .flex_none()
+                                .text_color(color::text_secondary()),
+                        ),
+                ))
+            })
             // Inside the row: a ring drawn outside would spill past the card's edge.
             .when(ring, |d| {
                 d.child(
