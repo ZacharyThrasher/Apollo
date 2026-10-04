@@ -16,7 +16,8 @@ use crate::player::PlayerModel;
 use crate::search::Unavailable;
 use crate::settings::{
     AutoplayStore, GaplessStore, LibrarySortStore, LyricsOpenStore, NormalizeStore, QueueStore,
-    SettingsBackend, SettingsModel, SqliteSettings, VolumeStore, ADD_PLAYS_TO_HISTORY,
+    RelatedOpenStore, SettingsBackend, SettingsModel, SqliteSettings, VolumeStore,
+    ADD_PLAYS_TO_HISTORY,
 };
 use crate::ui::shell::{self, Quit, Shell};
 use crate::url_thumbs::NoThumbs;
@@ -61,6 +62,7 @@ struct Stores {
     lyrics_open: Option<Arc<dyn LyricsOpenStore>>,
     /// Where the windows' sizes and positions are kept.
     windows: Option<Arc<dyn SettingsBackend>>,
+    related_open: Option<Arc<dyn RelatedOpenStore>>,
     library_sort: Option<Arc<dyn LibrarySortStore>>,
     /// The store's file, where the lyrics cache keeps its rows too.
     db_path: Option<std::path::PathBuf>,
@@ -76,6 +78,7 @@ impl Stores {
                 gapless: Some(db.clone()),
                 lyrics_open: Some(db.clone()),
                 windows: Some(db.clone()),
+                related_open: Some(db.clone()),
                 library_sort: Some(db.clone()),
                 db_path: Some(db.path().to_path_buf()),
                 queue: Some(db),
@@ -161,6 +164,7 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     let lyrics = lyrics_service(&mode, stores.db_path.clone(), &ports);
     let _ = window.update(cx, |shell, _, cx| {
         shell.install_lyrics(lyrics, stores.lyrics_open.clone(), cx);
+        shell.install_related(stores.related_open.clone(), cx);
         shell.install_library_sort(stores.library_sort.clone(), cx);
     });
     // Media keys and the SMTC overlay, on the window just opened.

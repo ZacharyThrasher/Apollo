@@ -19,7 +19,9 @@ use crate::map::{
     liked_from_rating, page_from_album, page_from_continuation, page_from_playlist, target_from_option, track_from_song,
     HistoryDay, ListedTrack,
 };
-use crate::search::{hit_from_item, search_results, Hit, SearchResults};
+use crate::search::{
+    hit_from_item, search_page, search_results, Hit, SearchFilter, SearchPage, SearchResults,
+};
 
 /// What a pasted link points at, with enough about it to open it without a second lookup.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +199,17 @@ impl InnerTubeSource {
         home_page(&parsed)
     }
 
+    /// The Related tab of a track: related songs, then album, artist and playlist shelves.
+    /// Read-only. A track YouTube gives no related tab for comes back with no shelves.
+    pub async fn related(&self, video_id: &str) -> Result<HomePage, LoadFailure> {
+        let parsed = self
+            .tube
+            .related(&self.client, video_id)
+            .await
+            .map_err(|e| classify(&e))?;
+        home_page(&parsed)
+    }
+
     /// Explore: new releases, the song chart, chart shelves and the mood tiles. The four answers
     /// it is made of are asked for together and any of them may fail or be refused (some are
     /// not offered to every account or country); the page shows what came back. It fails only
@@ -272,6 +285,35 @@ impl InnerTubeSource {
             return Err(LoadFailure::Parse);
         }
         Ok(results)
+    }
+
+    /// First page of one kind of result (the service's own search tabs). Carries the account,
+    /// like [`Self::search`]; an anonymous filtered search answers "No results".
+    pub async fn search_filtered(
+        &self,
+        query: &str,
+        filter: SearchFilter,
+    ) -> Result<SearchPage, LoadFailure> {
+        let parsed = self
+            .tube
+            .search_filtered(&self.client, query, filter.params())
+            .await
+            .map_err(|e| classify(&e))?;
+        let page = search_page(&parsed);
+        if page.results.is_empty() && page.results.skipped > 0 {
+            return Err(LoadFailure::Parse);
+        }
+        Ok(page)
+    }
+
+    /// The page after one [`Self::search_filtered`] answered, by its token.
+    pub async fn search_more(&self, token: &str) -> Result<SearchPage, LoadFailure> {
+        let parsed = self
+            .tube
+            .search_continuation(&self.client, token)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(search_page(&parsed))
     }
 
     /// Typeahead for the search box: the query completions the service offers for `input`, in

@@ -797,12 +797,31 @@ fn bucket_item(li: &Value, r: &mut SearchResults) {
     }
 }
 
-/// Parse a filtered (album/artist/playlist) search into a flat card list — the "Show more" pages.
-pub fn parse_search_cards(root: &Value) -> Vec<BrowseItem> {
-    find_all(root, "musicResponsiveListItemRenderer")
+/// One page of a filtered search: the rows in order, and the token for the page after it.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPage {
+    pub items: Vec<BrowseItem>,
+    pub continuation: Option<String>,
+}
+
+/// Parse a filtered search, first page or continuation. The token is read off the results shelf
+/// alone: a token from anywhere else in the tree would page something that is not the list.
+pub fn parse_search_page(root: &Value) -> SearchPage {
+    let shelf = find_all(root, "musicShelfContinuation")
         .into_iter()
-        .filter_map(list_item_to_browse_item)
-        .collect()
+        .next()
+        .or_else(|| find_all(root, "musicShelfRenderer").into_iter().next());
+    let Some(shelf) = shelf else {
+        return SearchPage::default();
+    };
+    SearchPage {
+        items: find_all(shelf, "musicResponsiveListItemRenderer")
+            .into_iter()
+            .filter_map(list_item_to_browse_item)
+            .collect(),
+        continuation: continuation_token(shelf),
+    }
 }
 
 /// A search-result list row → a card. Album/artist/playlist rows navigate (item-level
@@ -2087,6 +2106,53 @@ mod tests {
         assert!(s.queries[0].history);
     }
 
+    fn filtered_song_row(id: &str) -> serde_json::Value {
+        json!({ "musicResponsiveListItemRenderer": {
+            "playlistItemData": { "videoId": id },
+            "flexColumns": [
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "A Song" }] } } },
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                    { "text": "An Artist", "navigationEndpoint": { "browseEndpoint": { "browseId": "UCart" } } },
+                    { "text": " • " }, { "text": "3:02" }] } } }
+            ]
+        } })
+    }
+
+    #[test]
+    fn a_filtered_search_page_reads_its_rows_and_the_shelfs_own_token() {
+        let root = json!({ "contents": { "tabbedSearchResultsRenderer": { "tabs": [{ "tabRenderer": { "content": {
+            "sectionListRenderer": { "contents": [{ "musicShelfRenderer": {
+                "contents": [filtered_song_row("vid00000001"), filtered_song_row("vid00000002")],
+                "continuations": [{ "nextContinuationData": { "continuation": "SHELF_TOKEN" } }]
+            } }],
+              // A token elsewhere in the tree is not the list's.
+              "continuations": [{ "nextContinuationData": { "continuation": "OTHER" } }] }
+        } } }] } } });
+        let page = parse_search_page(&root);
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].id, "vid00000001");
+        assert_eq!(page.continuation.as_deref(), Some("SHELF_TOKEN"));
+    }
+
+    #[test]
+    fn a_search_continuation_reads_the_modern_and_legacy_tokens_and_the_last_page_has_none() {
+        let modern = json!({ "continuationContents": { "musicShelfContinuation": {
+            "contents": [filtered_song_row("vid00000003"),
+                { "continuationItemRenderer": { "continuationEndpoint": { "continuationCommand": { "token": "NEXT" } } } }]
+        } } });
+        let page = parse_search_page(&modern);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.continuation.as_deref(), Some("NEXT"));
+
+        let last = json!({ "continuationContents": { "musicShelfContinuation": {
+            "contents": [filtered_song_row("vid00000004")]
+        } } });
+        let page = parse_search_page(&last);
+        assert_eq!((page.items.len(), page.continuation), (1, None));
+
+        assert!(parse_search_page(&json!({})).items.is_empty());
+    }
+
     #[test]
     fn an_artist_cards_song_rows_take_the_cards_artist() {
         // Real shape: the card's rows say "Song • 4:35" (no artist), the card is the artist.
@@ -2733,5 +2799,51 @@ mod tests {
         } }] });
         let c = parse_playlist_continuation(&modern);
         assert_eq!((c.items.len(), c.skipped), (1, 2));
+    }
+
+    /// The Related tab is read like the home feed: a shelf of song rows, then album and artist
+    /// cards. The "About the artist" description shelf is not read and is counted, not hidden.
+    #[test]
+    fn a_related_page_reads_songs_then_albums_and_artists() {
+        let song = |id: &str, title: &str| {
+            json!({ "musicResponsiveListItemRenderer": {
+                "playlistItemData": { "videoId": id },
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": title }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "The Artist" }, { "text": " • " }, { "text": "3:47" }
+                    ] } } }
+                ]
+            } })
+        };
+        let card = |title: &str, browse_id: &str| {
+            json!({ "musicTwoRowItemRenderer": {
+                "title": { "runs": [{ "text": title }] },
+                "subtitle": { "runs": [{ "text": "Somebody" }] },
+                "navigationEndpoint": { "browseEndpoint": { "browseId": browse_id } }
+            } })
+        };
+        let shelf = |title: &str, contents: Vec<Value>| {
+            json!({ "musicCarouselShelfRenderer": {
+                "header": { "musicCarouselShelfBasicHeaderRenderer": {
+                    "title": { "runs": [{ "text": title }] } } },
+                "contents": contents
+            } })
+        };
+        let root = json!({ "contents": { "sectionListRenderer": { "contents": [
+            shelf("You might also like", vec![song("aaaaaaaaaaa", "One"), song("bbbbbbbbbbb", "Two")]),
+            shelf("Recommended albums", vec![card("An Album", "MPREb_one")]),
+            shelf("Similar artists", vec![card("Someone", "UCone")]),
+            { "musicDescriptionShelfRenderer": { "description": { "runs": [{ "text": "About" }] } } }
+        ] } } });
+        let page = parse_home(&root);
+        let titles: Vec<&str> = page.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["You might also like", "Recommended albums", "Similar artists"]);
+        assert_eq!(page.sections[0].items.len(), 2);
+        assert_eq!(page.sections[0].items[0].kind, "song");
+        assert_eq!(page.sections[1].items[0].kind, "album");
+        assert_eq!(page.sections[2].items[0].kind, "artist");
+        assert_eq!(page.skipped_shelves, 1);
+        assert_eq!(page.continuation, None);
     }
 }
