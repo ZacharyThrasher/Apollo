@@ -4,9 +4,11 @@
 
 use std::time::Duration;
 
+use apollo_domain::library::{Collection, CollectionKind};
+use apollo_domain::links::ExternalLink;
 use apollo_domain::listing::LoadFailure;
 use apollo_domain::model::{BrowseId, Track};
-use apollo_provider::{Hit, ListedTrack, SearchResults};
+use apollo_provider::{Hit, LinkTarget, ListedTrack, SearchResults};
 
 use super::sim::{track_of, Fixture, FIXTURES};
 use crate::art::{DecodedArt, SyntheticArt};
@@ -100,6 +102,49 @@ impl SearchSource for SimSearch {
             }
         }
         Ok(out)
+    }
+
+    fn suggest(&self, query: &str) -> Result<Vec<String>, LoadFailure> {
+        std::thread::sleep(LATENCY / 4);
+        let q = query.to_lowercase();
+        if q.contains("error") {
+            return Err(LoadFailure::Network);
+        }
+        let mut out: Vec<String> = Vec::new();
+        for f in FIXTURES {
+            for text in [f.title, f.artist, f.album] {
+                if contains(text, &q) && !out.iter().any(|o| o == text) {
+                    out.push(text.to_owned());
+                }
+            }
+        }
+        out.truncate(8);
+        Ok(out)
+    }
+
+    fn resolve_link(&self, link: &ExternalLink) -> Result<LinkTarget, LoadFailure> {
+        std::thread::sleep(LATENCY);
+        match link {
+            ExternalLink::Track { video, .. } => FIXTURES
+                .iter()
+                .find(|f| track_of(f).video_id == *video)
+                .map(|f| LinkTarget::Track(song(f)))
+                .ok_or(LoadFailure::Other),
+            ExternalLink::Playlist(id) => PLAYLISTS
+                .iter()
+                .find(|(pid, ..)| pid.strip_prefix("VL") == Some(id.as_str()))
+                .map(|(pid, title, owner, art)| {
+                    LinkTarget::Collection(Collection {
+                        kind: CollectionKind::Playlist,
+                        id: BrowseId::new(*pid),
+                        title: (*title).to_owned(),
+                        subtitle: Some((*owner).to_owned()),
+                        thumbnail: thumb_url(Some(*art)),
+                    })
+                })
+                .ok_or(LoadFailure::Other),
+            ExternalLink::Album(_) | ExternalLink::Artist(_) => Err(LoadFailure::Other),
+        }
     }
 }
 

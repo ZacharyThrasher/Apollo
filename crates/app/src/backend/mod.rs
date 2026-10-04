@@ -27,6 +27,8 @@ pub mod real;
 #[cfg(feature = "real-services")]
 pub mod real_loudness;
 #[cfg(feature = "real-services")]
+pub mod real_lyrics;
+#[cfg(feature = "real-services")]
 pub mod real_search;
 pub mod sim;
 mod sim_search;

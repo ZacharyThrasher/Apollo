@@ -556,10 +556,12 @@ fn search_songs_have_the_same_actions(cx: &mut TestAppContext) {
         s.choose_route(Route::Search, window, cx);
     });
     let search = page.shell.read_with(vcx, |s, _| s.search_model().clone());
-    search.update(vcx, |m, cx| {
-        m.set_query("anything", cx);
-        m.submit(cx);
-    });
+    // Typed, as a person would: a field left empty offers its recent searches under it.
+    let field = page
+        .shell
+        .read_with(vcx, |s, cx| s.search_page().read(cx).field().clone());
+    field.update(vcx, |f, cx| f.set_text("anything", cx));
+    search.update(vcx, |m, cx| m.submit(cx));
     vcx.run_until_parked();
     // Down from the field selects the first song.
     vcx.simulate_keystrokes("down");

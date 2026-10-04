@@ -44,6 +44,13 @@ pub const START_MINIMIZED_TO_TRAY: BoolSetting = BoolSetting::new("start_minimiz
 /// Window > Keep mini player on top: the mini player floats above other windows.
 pub const MINI_PLAYER_ON_TOP: BoolSetting = BoolSetting::new("mini_player_on_top", true);
 
+/// Discord > Show what I'm playing: the track shows as Rich Presence in the Discord client.
+pub const DISCORD_PRESENCE: BoolSetting = BoolSetting::new("discord_presence", false);
+
+/// Keyboard > Global hotkeys: Ctrl+Alt shortcuts (play/pause, next, previous, volume) that work
+/// while Apollo is not focused.
+pub const GLOBAL_HOTKEYS: BoolSetting = BoolSetting::new("global_hotkeys", false);
+
 /// Where settings are kept. Blocking: the model only calls it off the UI thread for writes.
 pub trait SettingsBackend: Send + Sync {
     fn get(&self, key: &str) -> Option<String>;
@@ -102,6 +109,11 @@ impl SettingsModel {
         }
     }
 
+    /// Where the settings are kept, for state that is not a switch (the recent searches).
+    pub fn backend(&self) -> Option<Arc<dyn SettingsBackend>> {
+        self.backend.clone()
+    }
+
     pub fn get(&self, setting: &BoolSetting) -> bool {
         if let Some(value) = self.cache.borrow().get(setting.key) {
             return *value;
@@ -150,6 +162,13 @@ pub trait NormalizeStore: Send + Sync {
 pub trait LyricsOpenStore: Send + Sync {
     fn load(&self) -> Option<bool>;
     fn save(&self, on: bool);
+}
+
+/// How each Library tab is sorted, by tab name (`playlists`, `albums`, `artists`) and sort name
+/// (`recent`, `title`, `artist`). Blocking: call off the UI thread.
+pub trait LibrarySortStore: Send + Sync {
+    fn load(&self, tab: &str) -> Option<String>;
+    fn save(&self, tab: &str, sort: &str);
 }
 
 /// Whether gapless playback is on. Blocking: call off the UI thread.
@@ -274,6 +293,24 @@ impl LyricsOpenStore for SqliteSettings {
         if let Some(store) = self.open() {
             if let Err(err) = store.set_setting(KEY_LYRICS_OPEN, if on { "on" } else { "off" }) {
                 eprintln!("could not save the lyrics choice: {err}");
+            }
+        }
+    }
+}
+
+fn library_sort_key(tab: &str) -> String {
+    format!("library_sort_{tab}")
+}
+
+impl LibrarySortStore for SqliteSettings {
+    fn load(&self, tab: &str) -> Option<String> {
+        self.open()?.get_setting(&library_sort_key(tab)).ok()?
+    }
+
+    fn save(&self, tab: &str, sort: &str) {
+        if let Some(store) = self.open() {
+            if let Err(err) = store.set_setting(&library_sort_key(tab), sort) {
+                eprintln!("could not save the library sort: {err}");
             }
         }
     }
