@@ -15,8 +15,8 @@ use crate::lyrics::SimLyrics;
 use crate::player::PlayerModel;
 use crate::search::Unavailable;
 use crate::settings::{
-    AutoplayStore, GaplessStore, LibrarySortStore, LyricsOpenStore, NormalizeStore, QueueStore, SettingsBackend,
-    SettingsModel, SqliteSettings, VolumeStore,
+    AutoplayStore, GaplessStore, LibrarySortStore, LyricsOpenStore, NormalizeStore, QueueStore,
+    SettingsBackend, SettingsModel, SqliteSettings, VolumeStore, ADD_PLAYS_TO_HISTORY,
 };
 use crate::ui::shell::{self, Quit, Shell};
 use crate::url_thumbs::NoThumbs;
@@ -107,6 +107,21 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
             SqliteSettings::default_location().map(|s| Arc::new(s) as Arc<dyn SettingsBackend>),
         )
     });
+    // Plays are reported to YouTube Music only while "Add plays to history" is on.
+    let reporter = mode.play_reporter(&ports.service);
+    let history_on = settings.read(cx).get(&ADD_PLAYS_TO_HISTORY);
+    player.update(cx, |m, _| {
+        m.set_play_reporter(reporter);
+        m.set_report_plays(history_on);
+    });
+    {
+        let player = player.clone();
+        cx.observe(&settings, move |settings, cx| {
+            let on = settings.read(cx).get(&ADD_PLAYS_TO_HISTORY);
+            player.update(cx, |m, _| m.set_report_plays(on));
+        })
+        .detach();
+    }
     // The tray first: with one, "Start minimized to tray" opens the window hidden (no flash),
     // and without one the window always opens.
     #[cfg(windows)]

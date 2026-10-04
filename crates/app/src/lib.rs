@@ -25,6 +25,7 @@ pub mod pc_watch_win;
 pub mod persist;
 pub mod platform;
 pub mod player;
+pub mod reporting;
 pub mod search;
 pub mod settings;
 pub mod sleep_timer;
