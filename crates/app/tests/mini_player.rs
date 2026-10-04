@@ -2,16 +2,21 @@
 //! hides nothing it should not, going back works every way it should, the keyboard and the
 //! always-on-top choice reach it, and sizes and positions are written down once they settle.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use apollo_app::art::{ArtSource, DecodedArt, SyntheticArt};
 use apollo_app::backend::{LibraryTrack, Ports, Prepared};
+use apollo_app::hud::{DIM, HOLD};
 use apollo_app::mini;
 use apollo_app::player::PlayerModel;
 use apollo_app::search::Unavailable;
-use apollo_app::settings::{SettingsBackend, SettingsModel, MINI_PLAYER_ON_TOP};
+use apollo_app::settings::{
+    SettingsBackend, SettingsModel, HUD_AUTO_HIDE, MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP,
+};
 use apollo_app::style::Fonts;
 use apollo_app::ui::mini_player::{self, MiniPlayer};
 use apollo_app::ui::shell::{self, Shell};
@@ -350,4 +355,200 @@ fn a_window_that_stops_moving_is_written_down_once(cx: &mut TestAppContext) {
     vcx.executor().advance_clock(Duration::from_secs(2));
     vcx.run_until_parked();
     assert_eq!(store.writes_of(KEY_MAIN).len(), 1);
+}
+
+// ---- HUD mode -------------------------------------------------------------------------------
+
+/// A clock the test moves by hand, and a pointer it places by hand.
+struct Hand {
+    base: Instant,
+    offset: Rc<Cell<Duration>>,
+    inside: Rc<Cell<bool>>,
+}
+
+impl Hand {
+    fn new() -> Self {
+        Self {
+            base: Instant::now(),
+            offset: Rc::new(Cell::new(Duration::ZERO)),
+            inside: Rc::new(Cell::new(false)),
+        }
+    }
+
+    /// Hands the clock and the pointer to the HUD.
+    fn attach(&self, handle: WindowHandle<MiniPlayer>, cx: &mut TestAppContext) {
+        let (base, offset, inside) = (self.base, self.offset.clone(), self.inside.clone());
+        handle
+            .update(cx, move |view, _, cx| {
+                view.set_clock(move || base + offset.get(), cx);
+                view.set_pointer_probe(move |_| inside.get());
+            })
+            .unwrap();
+    }
+
+    /// Lets `seconds` pass, a poll at a time.
+    fn pass(&self, seconds: f32, cx: &mut TestAppContext) {
+        let ticks = (seconds / 0.05).round() as u32;
+        for _ in 0..ticks {
+            self.offset
+                .set(self.offset.get() + Duration::from_millis(50));
+            cx.executor().advance_clock(mini_player::POLL);
+            cx.run_until_parked();
+        }
+    }
+}
+
+fn open_hud(
+    cx: &mut TestAppContext,
+    store: Option<Arc<dyn SettingsBackend>>,
+) -> (World, WindowHandle<MiniPlayer>, Hand) {
+    let world = setup(cx, store);
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_PLAYER_HUD, true, cx));
+    cx.update(mini::open);
+    cx.run_until_parked();
+    let handle = cx.update(|cx| mini::window(cx)).expect("opened");
+    let hand = Hand::new();
+    hand.attach(handle, cx);
+    (world, handle, hand)
+}
+
+#[gpui::test]
+fn the_hud_setting_opens_the_hud_click_through_and_off_by_default(cx: &mut TestAppContext) {
+    // Off: an ordinary mini player.
+    let _world = setup(cx, None);
+    let (plain, _vcx) = open_mini(cx);
+    assert!(!plain.read_with(cx, |m, _| m.is_hud()).unwrap());
+    assert_eq!(
+        plain
+            .read_with(cx, |m, _| m.click_through_requested())
+            .unwrap(),
+        None
+    );
+    cx.update(mini::dismiss);
+
+    // On: a HUD that lets clicks through.
+    let (_world, handle, _hand) = open_hud(cx, None);
+    assert!(handle.read_with(cx, |m, _| m.is_hud()).unwrap());
+    assert_eq!(
+        handle
+            .read_with(cx, |m, _| m.click_through_requested())
+            .unwrap(),
+        Some(true)
+    );
+}
+
+#[gpui::test]
+fn the_hud_is_solid_and_clickable_only_while_the_pointer_is_over_it(cx: &mut TestAppContext) {
+    let (_world, handle, hand) = open_hud(cx, None);
+    let through = |cx: &mut TestAppContext| {
+        handle
+            .read_with(cx, |m, _| m.click_through_requested())
+            .unwrap()
+    };
+    hand.pass(0.2, cx);
+    assert_eq!(through(cx), Some(true));
+
+    hand.inside.set(true);
+    hand.pass(0.2, cx);
+    assert_eq!(
+        through(cx),
+        Some(false),
+        "clicks land on the HUD under the pointer"
+    );
+    assert!(handle.read_with(cx, |m, _| m.expand_visible()).unwrap());
+
+    hand.inside.set(false);
+    hand.pass(0.2, cx);
+    assert_eq!(
+        through(cx),
+        Some(true),
+        "and fall through again when it leaves"
+    );
+}
+
+#[gpui::test]
+fn auto_hide_dims_the_hud_after_a_hold_and_a_new_track_brings_it_back(cx: &mut TestAppContext) {
+    let (world, handle, hand) = open_hud(cx, None);
+    let level = |cx: &mut TestAppContext| handle.read_with(cx, |m, _| m.hud_level()).unwrap();
+    hand.pass(HOLD.as_secs_f32() - 0.5, cx);
+    assert_eq!(level(cx), 1.0, "solid through the hold");
+    hand.pass(1.5, cx);
+    assert!(
+        (level(cx) - DIM).abs() < 1e-3,
+        "dim after it: {}",
+        level(cx)
+    );
+
+    // The pointer over it makes it solid, leaving lets it dim again.
+    hand.inside.set(true);
+    hand.pass(0.5, cx);
+    assert_eq!(level(cx), 1.0);
+    hand.inside.set(false);
+    hand.pass(1.0, cx);
+    assert!((level(cx) - DIM).abs() < 1e-3);
+
+    // A track change pops it back for the hold.
+    world.player.update(cx, |m, cx| m.next(cx));
+    hand.pass(0.5, cx);
+    assert_eq!(level(cx), 1.0, "a new song wakes it");
+    hand.pass(HOLD.as_secs_f32() + 1.0, cx);
+    assert!((level(cx) - DIM).abs() < 1e-3);
+}
+
+#[gpui::test]
+fn with_auto_hide_off_the_hud_stays_solid(cx: &mut TestAppContext) {
+    let (world, handle, hand) = open_hud(cx, None);
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&HUD_AUTO_HIDE, false, cx));
+    hand.pass(HOLD.as_secs_f32() + 5.0, cx);
+    assert_eq!(handle.read_with(cx, |m, _| m.hud_level()).unwrap(), 1.0);
+}
+
+#[gpui::test]
+fn the_hud_snaps_to_the_nearest_corner_once_it_sits_still(cx: &mut TestAppContext) {
+    // Left near the bottom-right corner of the 1920x1080 test display.
+    let store = MemoryStore::with(&[(KEY_MINI, "1500,950,360,96,0")]);
+    let (_world, handle, hand) = open_hud(cx, Some(store));
+    hand.pass(0.3, cx);
+    assert_eq!(
+        handle.read_with(cx, |m, _| m.last_snap()).unwrap(),
+        None,
+        "not yet settled"
+    );
+    hand.pass(0.5, cx);
+    let snap = handle
+        .read_with(cx, |m, _| m.last_snap())
+        .unwrap()
+        .expect("snapped");
+    assert_eq!(
+        (snap.x, snap.y),
+        (1920.0 - 360.0 - 16.0, 1080.0 - 96.0 - 16.0),
+        "16px in from the corner"
+    );
+}
+
+#[gpui::test]
+fn the_hud_hotkey_shows_and_hides_without_closing_the_mini_player(cx: &mut TestAppContext) {
+    let _world = setup(cx, None);
+    // Not open: the hotkey opens it.
+    cx.update(mini::toggle_visibility);
+    cx.run_until_parked();
+    assert!(cx.update(|cx| mini::is_open(cx)));
+    assert!(!cx.update(|cx| mini::is_hidden(cx)));
+    cx.update(mini::toggle_visibility);
+    assert!(cx.update(|cx| mini::is_open(cx)), "hiding keeps the window");
+    assert!(cx.update(|cx| mini::is_hidden(cx)));
+    cx.update(mini::toggle_visibility);
+    assert!(!cx.update(|cx| mini::is_hidden(cx)));
+    // Hidden and then asked to open (button, tray): it comes back.
+    cx.update(mini::toggle_visibility);
+    cx.update(mini::open);
+    assert!(!cx.update(|cx| mini::is_hidden(cx)));
+    // Closing resets it.
+    cx.update(mini::toggle_visibility);
+    cx.update(mini::dismiss);
+    assert!(!cx.update(|cx| mini::is_hidden(cx)));
 }

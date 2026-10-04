@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use crate::player::PlayerModel;
-use crate::settings::{SettingsBackend, SettingsModel};
+use crate::settings::{SettingsBackend, SettingsModel, MINI_PLAYER_HUD};
 use crate::ui::mini_player::{self, MiniPlayer};
 use crate::ui::shell::Shell;
 use crate::window_state::{self, Constraints, Home, KEY_MINI};
@@ -35,6 +35,8 @@ struct Host {
     settings: Entity<SettingsModel>,
     store: Option<Arc<dyn SettingsBackend>>,
     mini: Option<WindowHandle<MiniPlayer>>,
+    /// The mini player is open but hidden (the HUD hotkey).
+    hidden: bool,
 }
 
 impl Global for Host {}
@@ -54,6 +56,7 @@ pub fn install(
         settings,
         store,
         mini: None,
+        hidden: false,
     });
 }
 
@@ -71,7 +74,15 @@ pub fn is_open(cx: &App) -> bool {
 /// Opens the mini player and hides the main window; with it already open, brings it forward.
 pub fn open(cx: &mut App) {
     if let Some(mini) = window(cx) {
-        let _ = mini.update(cx, |_, window, _| window.activate_window());
+        if cx.global::<Host>().hidden {
+            set_hidden(cx, false);
+        } else {
+            let _ = mini.update(cx, |view, window, _| {
+                if !view.is_hud() {
+                    window.activate_window();
+                }
+            });
+        }
         return;
     }
     let Some(host) = cx.try_global::<Host>() else {
@@ -83,6 +94,7 @@ pub fn open(cx: &mut App) {
         host.settings.clone(),
         host.store.clone(),
     );
+    let hud = settings.read(cx).get(&MINI_PLAYER_HUD);
     let place = window_state::restore(cx, store.as_ref(), KEY_MINI, &PLACEMENT);
     let opened = cx.open_window(
         WindowOptions {
@@ -91,16 +103,25 @@ pub fn open(cx: &mut App) {
             // Floating above other windows and off the taskbar; the always-on-top setting
             // takes it back down.
             kind: WindowKind::PopUp,
-            window_background: WindowBackgroundAppearance::MicaBackdrop,
+            // The HUD is see-through and draws its own rounded fill; the plain mini player sits
+            // on Mica like the main window.
+            window_background: if hud {
+                WindowBackgroundAppearance::Transparent
+            } else {
+                WindowBackgroundAppearance::MicaBackdrop
+            },
             is_movable: true,
             is_resizable: false,
             is_minimizable: false,
-            focus: true,
+            // The HUD must never take the keyboard from a game.
+            focus: !hud,
             show: true,
             ..Default::default()
         },
         |_, cx| {
-            cx.new(|cx| MiniPlayer::new(player, settings, |_, cx| cx.defer(return_to_main), cx))
+            cx.new(|cx| {
+                MiniPlayer::new(player, settings, hud, |_, cx| cx.defer(return_to_main), cx)
+            })
         },
     );
     let mini = match opened {
@@ -112,7 +133,11 @@ pub fn open(cx: &mut App) {
         }
     };
     let _ = mini.update(cx, |view, window, cx| {
-        view.focus_root(window, cx);
+        if hud {
+            view.start_hud(window, cx);
+        } else {
+            view.focus_root(window, cx);
+        }
         // Closing it any other way (Alt+F4) still brings the main window back.
         window.on_window_should_close(cx, |_, cx| {
             cx.defer(return_to_main);
@@ -128,6 +153,37 @@ pub fn open(cx: &mut App) {
     let _ = main.update(cx, |_, window, _| crate::platform::hide_window(window));
 }
 
+/// Shows or hides the mini player in place (the HUD hotkey), leaving the main window alone;
+/// opens it when it is not open at all.
+pub fn toggle_visibility(cx: &mut App) {
+    if !is_open(cx) {
+        open(cx);
+        return;
+    }
+    let hidden = cx.global::<Host>().hidden;
+    set_hidden(cx, !hidden);
+}
+
+/// Whether the mini player is open but hidden.
+pub fn is_hidden(cx: &App) -> bool {
+    cx.try_global::<Host>().is_some_and(|h| h.hidden) && is_open(cx)
+}
+
+fn set_hidden(cx: &mut App, hidden: bool) {
+    let Some(mini) = window(cx) else { return };
+    let _ = mini.update(cx, |view, window, _| {
+        if hidden {
+            crate::platform::hide_window(window);
+        } else if view.is_hud() {
+            // Back without taking the keyboard from whatever has it.
+            crate::platform::show_window_inactive(window);
+        } else {
+            crate::platform::show_window(window);
+        }
+    });
+    cx.global_mut::<Host>().hidden = hidden;
+}
+
 /// Closes the mini player, leaving the main window as it is.
 pub fn dismiss(cx: &mut App) {
     let Some(mini) = window(cx) else {
@@ -135,7 +191,9 @@ pub fn dismiss(cx: &mut App) {
     };
     let _ = mini.update(cx, |_, window, _| window.remove_window());
     if cx.has_global::<Host>() {
-        cx.global_mut::<Host>().mini = None;
+        let host = cx.global_mut::<Host>();
+        host.mini = None;
+        host.hidden = false;
     }
 }
 

@@ -21,6 +21,7 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Ctrl+L | Show / hide lyrics (opens Now Playing) |
 | L | Like / unlike the playing song |
 | Esc | Close Now Playing |
+| F11 | Fullscreen while Now Playing is open (leaves fullscreen when Now Playing closes) |
 
 Media keys are the OS's (SMTC) and are untouched.
 
@@ -34,6 +35,7 @@ hidden in the tray or something else has focus:
 | Ctrl+Alt+Space | Play / pause |
 | Ctrl+Alt+Right / Left | Next / previous |
 | Ctrl+Alt+Up / Down | Volume +5 / -5 |
+| Ctrl+Alt+H | Show / hide the mini player HUD (only does anything while the mini player is open) |
 
 A combination another program already owns is skipped quietly (one line on stderr, e.g.
 `hotkeys: could not register VolumeUp: ...`); the others still work. Windows does not repeat a
