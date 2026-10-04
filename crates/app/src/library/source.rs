@@ -5,7 +5,7 @@ use apollo_domain::library::{bare_playlist_id, Collection, CollectionKind, PageM
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{BrowseId, Track};
 use apollo_provider::{
-    ArtistSection, ExplorePage, HistoryDay, HomePage, Hit, ListedTrack, RelatedArtist,
+    ArtistSection, ExplorePage, HistoryDay, HomePage, HomeShelf, Hit, ListedTrack, RelatedArtist,
 };
 
 use crate::art::DecodedArt;
@@ -112,6 +112,12 @@ pub trait LibrarySource: Send + Sync {
 
     /// The batch of home shelves after the one a token came from.
     fn home_more(&self, _token: &str) -> Result<HomePage, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
+    /// The Related tab of a track: its related songs first, then album, artist and playlist
+    /// shelves, in the service's order. A track the service has no related tab for gives none.
+    fn related(&self, _video_id: &str) -> Result<Vec<HomeShelf>, LoadFailure> {
         Err(LoadFailure::Other)
     }
 
