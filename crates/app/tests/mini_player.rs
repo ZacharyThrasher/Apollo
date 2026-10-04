@@ -970,6 +970,110 @@ fn the_current_synced_line_shows_under_the_artist_when_lyrics_are_on(cx: &mut Te
     assert_eq!(line(cx), None, "track 1 has no lyrics");
 }
 
+/// One long line (too wide for the window), then a short one.
+const LONG_LINE: &str = "Call it morning driving through the south in a rented car with the windows down and the radio loud";
+struct LongScript;
+impl LyricsSource for LongScript {
+    fn fetch(&self, q: &LyricsQuery) -> Result<Option<Lyrics>, FetchError> {
+        Ok((q.video_id == "track000000").then(|| {
+            Lyrics::Synced(vec![
+                Line {
+                    start_ms: 5_000,
+                    text: LONG_LINE.into(),
+                },
+                Line {
+                    start_ms: 15_000,
+                    text: "Short".into(),
+                },
+            ])
+        }))
+    }
+}
+
+fn with_long_lyrics(world: &World, cx: &mut TestAppContext) {
+    let service = Arc::new(LyricsService::new(vec![Arc::new(LongScript)], None));
+    world
+        .main
+        .update(cx, |shell, _, cx| {
+            shell.lyrics().update(cx, |l, cx| l.install(service, cx))
+        })
+        .unwrap();
+    cx.run_until_parked();
+}
+
+/// What the lyric line shows at each of `positions`, in order, with repeats folded away.
+fn pages_over(
+    world: &World,
+    handle: WindowHandle<MiniPlayer>,
+    cx: &mut TestAppContext,
+    positions: &[u64],
+) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for &at in positions {
+        play_at(world, cx, at);
+        let line = handle
+            .read_with(cx, |m, _| m.lyric_line().map(str::to_owned))
+            .unwrap()
+            .unwrap_or_default();
+        if seen.last() != Some(&line) {
+            seen.push(line);
+        }
+    }
+    seen
+}
+
+#[gpui::test]
+fn a_long_lyric_line_is_shown_in_pages_over_the_time_it_is_sung(cx: &mut TestAppContext) {
+    let (world, handle, _hand) = open_plain(cx);
+    with_long_lyrics(&world, cx);
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_SHOW_LYRICS, true, cx));
+    // Every half second across the line's ten seconds.
+    let positions: Vec<u64> = (0..20).map(|i| 5_000 + i * 500).collect();
+    let pages = pages_over(&world, handle, cx, &positions);
+    assert!(pages.len() >= 2, "too long for one line: {pages:?}");
+    assert!(
+        pages
+            .iter()
+            .all(|p| !p.is_empty() && p.len() < LONG_LINE.len()),
+        "each page is part of the line: {pages:?}"
+    );
+    assert_eq!(
+        pages.join(" "),
+        LONG_LINE,
+        "in order, every word once, none lost"
+    );
+    // Before the line's first page ends, it is the first page.
+    play_at(&world, cx, 5_100);
+    let first = handle
+        .read_with(cx, |m, _| m.lyric_line().map(str::to_owned))
+        .unwrap();
+    assert_eq!(first.as_deref(), Some(pages[0].as_str()));
+    // The next line is short: one page, as it is.
+    play_at(&world, cx, 15_500);
+    assert_eq!(
+        handle
+            .read_with(cx, |m, _| m.lyric_line().map(str::to_owned))
+            .unwrap()
+            .as_deref(),
+        Some("Short")
+    );
+}
+
+#[gpui::test]
+fn the_hud_pages_long_lyric_lines_too(cx: &mut TestAppContext) {
+    let (world, handle, _hand) = open_hud(cx, None);
+    with_long_lyrics(&world, cx);
+    world
+        .settings
+        .update(cx, |m, cx| m.set(&MINI_SHOW_LYRICS, true, cx));
+    let positions: Vec<u64> = (0..20).map(|i| 5_000 + i * 500).collect();
+    let pages = pages_over(&world, handle, cx, &positions);
+    assert!(pages.len() >= 2, "the HUD pages it too: {pages:?}");
+    assert_eq!(pages.join(" "), LONG_LINE);
+}
+
 #[gpui::test]
 fn the_hud_shows_the_lyric_line_too(cx: &mut TestAppContext) {
     let (world, handle, _hand) = open_hud(cx, None);

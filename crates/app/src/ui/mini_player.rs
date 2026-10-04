@@ -30,9 +30,10 @@ use std::time::{Duration, Instant};
 use apollo_lyrics::Lyrics;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use gpui::{
-    actions, canvas, div, prelude::*, px, relative, white, AnyElement, App, ClickEvent, Context, DispatchPhase, Div, Entity, FocusHandle, Focusable,
-    IntoElement, KeyBinding, ParentElement, Render, RenderImage, ScrollDelta, ScrollWheelEvent,
-    SharedString, Styled, Subscription, Window, WindowControlArea,
+    actions, canvas, div, prelude::*, px, relative, white, AnyElement, App, ClickEvent, Context,
+    DispatchPhase, Div, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, ParentElement,
+    Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Styled, Subscription, Window,
+    WindowControlArea,
 };
 
 use crate::assets::Icon;
@@ -40,7 +41,9 @@ use crate::hud::{
     wheel_steps, HudFade, IdleFade, LineFade, Swap, SETTLE, SWAP_SLIDE, WHEEL_VOLUME_STEP,
 };
 use crate::library::LibraryWrites;
-use crate::lyrics::{current_line, LyricsModel, LyricsState};
+use crate::lyrics::{
+    current_line, page_chunks, page_index, page_window_ms, LyricsModel, LyricsState,
+};
 use crate::player::{PlayerModel, Status};
 use crate::settings::{
     SettingsModel, HUD_AUTO_HIDE, MINI_DIM, MINI_FADE_CONTROLS, MINI_PLAYER_ON_TOP,
@@ -76,6 +79,8 @@ const VOLUME_WIDTH: f32 = 72.0;
 const CONTROLS_W: f32 = 2.0 * SIDE_BUTTON + PLAY_BUTTON + 2.0 * spacing::S1;
 /// One line of lyrics: 12px type, so a 16px row.
 const LYRIC_LINE_H: f32 = 16.0;
+/// Room kept back from a lyric line's width, so a page that just fits never gets an ellipsis.
+const LYRIC_SLACK: f32 = 6.0;
 /// How often the HUD looks at where the pointer is (clicks fall through it, so it gets no
 /// mouse events to tell it).
 pub const POLL: Duration = Duration::from_millis(50);
@@ -124,6 +129,28 @@ enum Region {
 #[derive(Clone, Default)]
 struct LyricParts {
     lines: Vec<(SharedString, f32)>,
+}
+
+/// What the pages of a lyric line were worked out for: change any and they are worked out again.
+#[derive(Clone, PartialEq, Eq)]
+struct PagesKey {
+    video: String,
+    line: usize,
+    room: i32,
+}
+
+/// The width of one line of `text` in the lyric style: the letters' advances added up. (Kerning
+/// is ignored, hence [`LYRIC_SLACK`].)
+fn text_width(cx: &App, text: &str) -> f32 {
+    let system = cx.text_system();
+    let family = cx
+        .global::<style::Fonts>()
+        .family_for(typography::HUD_ARTIST);
+    let font = system.resolve_font(&gpui::font(family));
+    let size = px(typography::HUD_ARTIST.size_px);
+    text.chars()
+        .map(|c| f32::from(system.layout_width(font, size, c)))
+        .sum()
 }
 
 /// What the HUD shows of a track, kept so a change can cross-fade from the last one.
@@ -187,6 +214,9 @@ pub struct MiniPlayer {
     lyric: Option<SharedString>,
     lyric_prev: Option<SharedString>,
     lyric_fade: LineFade,
+    /// The pages the current line was last split into, for the track, line and width they were
+    /// worked out for.
+    lyric_pages: Option<(PagesKey, Vec<String>)>,
     /// Where the window has sat still since when, and the spot it was last snapped for.
     settle: Option<(Rect, Instant)>,
     snapped: Option<Rect>,
@@ -261,6 +291,7 @@ impl MiniPlayer {
             lyric: None,
             lyric_prev: None,
             lyric_fade: LineFade::default(),
+            lyric_pages: None,
             lyrics,
             pointer_inside: false,
             pointer: Rc::new(|window| crate::platform::pointer_over(window, 0.0)),
@@ -294,20 +325,76 @@ impl MiniPlayer {
         this
     }
 
+    /// The room a lyric line has: the text column's width, less a little for shaping that
+    /// differs from the sum of the letters. The column is narrower while the buttons are
+    /// showing.
+    fn lyric_room(&self) -> f32 {
+        let (text_left, controls_showing, controls_w) = if self.hud {
+            (
+                2.0 * HUD_EDGE + HUD_ART + spacing::S3,
+                self.fade.solid() > 0.0,
+                HUD_CONTROLS_W,
+            )
+        } else {
+            (
+                2.0 * spacing::S2 + ART + spacing::S3,
+                self.idle.controls() > 0.0,
+                CONTROLS_W,
+            )
+        };
+        let width = if self.hud { HUD_PANEL_W } else { WIDTH };
+        let reserve = if controls_showing {
+            controls_w + spacing::S3
+        } else {
+            0.0
+        };
+        width - text_left - reserve - LYRIC_SLACK
+    }
+
     /// The synced lyric line being sung now, if the track has synced lyrics and a line has
-    /// started. A blank line (an instrumental gap) shows nothing.
-    fn current_lyric(&self, cx: &App) -> Option<SharedString> {
-        let player = self.player.read(cx);
-        let video = player.current_video()?;
+    /// started. A blank line (an instrumental gap) shows nothing. A line too long for the room
+    /// is shown in pages, one after another over the time it is sung (`lyrics::page_*`).
+    fn current_lyric(&mut self, cx: &App) -> Option<SharedString> {
+        let (video, position_ms) = {
+            let player = self.player.read(cx);
+            (player.current_video()?, player.view().position_ms)
+        };
         let LyricsState::Ready(lyrics) = self.lyrics.read(cx).state(Some(video.as_str())) else {
             return None;
         };
         let Lyrics::Synced(lines) = &*lyrics else {
             return None;
         };
-        let line = lines.get(current_line(lines, player.view().position_ms)?)?;
+        let index = current_line(lines, position_ms)?;
+        let line = &lines[index];
         let text = line.text.trim();
-        (!text.is_empty()).then(|| SharedString::from(text.to_owned()))
+        if text.is_empty() {
+            return None;
+        }
+        let room = self.lyric_room();
+        let key = PagesKey {
+            video,
+            line: index,
+            room: room.round() as i32,
+        };
+        if self.lyric_pages.as_ref().map(|(k, _)| k) != Some(&key) {
+            let pages = page_chunks(text, |candidate| text_width(cx, candidate) <= room);
+            self.lyric_pages = Some((key, pages));
+        }
+        let pages = &self.lyric_pages.as_ref()?.1;
+        let shown = match pages.len() {
+            0 | 1 => text,
+            _ => {
+                let window = page_window_ms(
+                    text.chars().count(),
+                    line.start_ms,
+                    lines.get(index + 1).map(|next| next.start_ms),
+                );
+                let elapsed = position_ms.saturating_sub(line.start_ms);
+                &pages[page_index(pages, window, elapsed)]
+            }
+        };
+        Some(SharedString::from(shown.to_owned()))
     }
 
     /// Follows the lyrics to the current line, cross-fading when it changes.
@@ -442,6 +529,8 @@ impl MiniPlayer {
         }
         if !self.hud {
             changed |= self.step_idle(now, cx);
+            // The buttons coming or going changes how much room a lyric line has.
+            self.sync_lyric(cx);
             if changed {
                 cx.notify();
             }
@@ -451,6 +540,7 @@ impl MiniPlayer {
         self.fade.set_auto_hide(auto_hide, now);
         self.fade.set_animated(!cx.reduce_motion());
         changed |= self.fade.step(now);
+        self.sync_lyric(cx);
         // The change-over of a new track is drawn from the clock; keep it coming.
         if self.swap.is_running() {
             let _ = self.swap.progress(now, !cx.reduce_motion());
