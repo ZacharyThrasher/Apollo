@@ -97,6 +97,9 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     cx.on_action(|_: &Quit, cx| cx.quit());
 
     let stores = Stores::default_location();
+    // Pages cached between runs (Home, the library, album, artist and playlist pages), kept in
+    // the app's SQLite file; memory only without one.
+    crate::page_cache::PageCache::new(stores.db_path.clone()).install(cx);
     let player = cx.new(|_| PlayerModel::new());
     player.update(cx, |m, _| {
         m.set_volume_store(stores.volume.clone());

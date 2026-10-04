@@ -23,6 +23,7 @@ use apollo_domain::library::{PlaylistTarget, WriteFailure};
 use gpui::{Context, Entity, EventEmitter, SharedString};
 
 use super::source::LibrarySource;
+use crate::page_cache::PageCache;
 use crate::player::PlayerModel;
 
 /// How long an error stays on screen.
@@ -236,6 +237,10 @@ impl LibraryWrites {
         }
         entry.shown = liked;
         let idle = entry.inflight.is_none();
+        // Liked Music is about to change: a cached copy must not be drawn meanwhile.
+        if let Some(cache) = PageCache::try_global(cx) {
+            cache.invalidate_liked_music();
+        }
         cx.notify();
         if idle {
             self.send_like(video_id, liked, cx);
@@ -290,6 +295,11 @@ impl LibraryWrites {
         e.inflight = None;
         e.confirmed = Some(sent);
         let wish = e.shown;
+        // Dropped again now that the service holds the change: a page fetched while the write
+        // was out may predate it, and must not be what the next visit draws.
+        if let Some(cache) = PageCache::try_global(cx) {
+            cache.invalidate_liked_music();
+        }
         cx.emit(WritesEvent::LikeSettled {
             video_id: video_id.to_owned(),
             liked: sent,
@@ -378,6 +388,10 @@ impl LibraryWrites {
         }
         let key = (playlist.id.clone(), video_id.to_owned());
         self.added.insert(key.clone());
+        // The playlist's page and the library list (its track count) are about to change.
+        if let Some(cache) = PageCache::try_global(cx) {
+            cache.invalidate_collection(&playlist.id);
+        }
         cx.notify();
         let Some(source) = self.source(cx) else {
             self.add_failed(&key, WriteFailure::Unsupported, cx);
@@ -414,6 +428,10 @@ impl LibraryWrites {
             let _ = this.update(cx, |m, cx| {
                 if m.generation != generation {
                     return;
+                }
+                // Landed or not, a page fetched while the write was out may predate it.
+                if let Some(cache) = PageCache::try_global(cx) {
+                    cache.invalidate_collection(&key.0);
                 }
                 if let Err(failure) = result {
                     m.add_failed(&key, failure, cx);

@@ -346,6 +346,17 @@ pub fn open(subject: Subject, anchor: Anchor, window: &mut Window, cx: &mut App)
     handle.update(cx, |menu, cx| menu.open(subject, anchor, window, cx));
 }
 
+/// Run one of the menu's commands on `subject` without opening it (a card's own Play button).
+/// Does nothing where there is no shell.
+pub fn run_now(command: Command, subject: Subject, window: &mut Window, cx: &mut App) {
+    let Some(handle) = cx.try_global::<MenuHandle>().map(|h| h.0.clone()) else {
+        return;
+    };
+    // Only Add to playlist reads the place; the commands run directly have no use for it.
+    let nowhere = At { left: 0.0, top: 0.0 };
+    handle.update(cx, |menu, cx| menu.run(command, subject, nowhere, window, cx));
+}
+
 /// Make right-clicking `el` open the menu at the pointer.
 pub fn on_context_menu<E: InteractiveElement>(el: E, subject: Subject) -> E {
     el.on_mouse_down(MouseButton::Right, move |event, window, cx| {

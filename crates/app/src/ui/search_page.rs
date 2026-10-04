@@ -1,4 +1,8 @@
-//! The Search page: a field, then results grouped as songs, albums, artists and playlists.
+//! The Search page: a field, a row of kind chips, then results.
+//!
+//! "All" is the mixed answer: a Top result card beside the top songs, then albums, artists and
+//! playlists, each group with a "Show all" that jumps to its chip. The other chips are the
+//! service's filtered searches: one kind of row, paged by scrolling.
 //!
 //! Songs play or queue; album, artist and playlist cards open their pages. Keyboard:
 //! Ctrl+K or Ctrl+F opens the page with the field focused; Down moves from the field into the
@@ -9,7 +13,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use apollo_domain::library::{Collection, CollectionKind};
-use apollo_provider::{Hit, LinkTarget, ListedTrack, SearchResults};
+use apollo_provider::{Hit, LinkTarget, ListedTrack, SearchResults, TopResult};
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
@@ -23,18 +27,20 @@ use crate::library::writes::LibraryWrites;
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::search::{
-    as_link, failure_text, normalise, SearchEvent, SearchModel, SearchState, BAD_LINK_TEXT,
-    HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES,
+    as_link, failure_text, normalise, More, SearchChip, SearchEvent, SearchModel, SearchState,
+    BAD_LINK_TEXT, HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES,
 };
 use crate::settings::SettingsModel;
 use crate::style::{self, color};
 use crate::ui::anchor;
 use crate::ui::button::{focus_ring, keyboard_focused, IconButton};
-use crate::ui::card::{grid, heading, tile, Card};
+use crate::ui::card::{self, grid, tile, Card};
 use crate::ui::playlist_picker::PlaylistPicker;
 use crate::ui::row_actions::{heart_action, more_slot, playlist_action, ACTION_SIZE};
+use crate::ui::search_chips::ChipRow;
 use crate::ui::search_popover::{self, SearchPopover};
-use crate::ui::track_menu::{self, Subject};
+use crate::ui::top_result::{self, TopCard};
+use crate::ui::track_menu::{self, Command, Subject};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{self, TextField, TextFieldEvent};
@@ -62,6 +68,7 @@ pub const RESULTS_CONTEXT: &str = "SearchResults";
 
 pub fn bind_keys(cx: &mut App) {
     use gpui::KeyBinding;
+    crate::ui::search_chips::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new("down", FocusResults, Some(text_field::KEY_CONTEXT)),
         KeyBinding::new("up", PreviousSuggestion, Some(text_field::KEY_CONTEXT)),
@@ -79,6 +86,16 @@ pub fn bind_keys(cx: &mut App) {
 const ROW_HEIGHT: f32 = 56.0;
 const ROW_ART: f32 = 40.0;
 const SKELETON_ROWS: usize = 6;
+/// Songs the All view lists (beside the Top result card); the rest are behind "Show all".
+const ALL_SONGS: usize = 4;
+/// Rows of skeleton under a filtered list while its next page loads.
+const MORE_SKELETON_ROWS: usize = 3;
+const SKELETON_CARDS: usize = 4;
+/// Distance from the end of a filtered list at which the next page is asked for.
+const LOAD_MORE_MARGIN: f32 = 600.0;
+/// Tab stops the All view's own controls take beyond its cards: the Top result card and its
+/// Play button, and one "Show all" per group.
+const EXTRA_STOPS: usize = 2 + 4;
 const SELECTED_MARKER_WIDTH: f32 = 3.0;
 /// Scrim over a row's artwork while it is the play target.
 const ART_SCRIM: f32 = 0.6;
@@ -100,6 +117,10 @@ pub struct SearchPage {
     root_focus: FocusHandle,
     /// Tab stops of the cards, grown to the most cards any result had.
     card_focus: Vec<FocusHandle>,
+    /// One tab stop per chip, in [`SearchChip::ROW`] order.
+    chip_focus: Vec<FocusHandle>,
+    /// What the list on show was for: when it changes the list starts again at the top.
+    shown: (String, SearchChip),
     on_open: OpenTarget,
     scroll: ScrollHandle,
     /// The keyboard-selected song, shown only while the list holds focus.
@@ -168,8 +189,17 @@ impl SearchPage {
         })
         .detach();
         let initial = settings.clone();
-        cx.observe(&model, |this, _, cx| {
+        cx.observe(&model, |this, model, cx| {
             this.selected = None;
+            let view = {
+                let m = model.read(cx);
+                (m.query().to_owned(), m.chip())
+            };
+            if view != this.shown {
+                // Another query or kind: the list starts at its top.
+                this.shown = view;
+                this.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            }
             this.request_thumbs(cx);
             cx.notify();
         })
@@ -188,6 +218,10 @@ impl SearchPage {
             action_focus,
             root_focus,
             card_focus: Vec::new(),
+            chip_focus: (0..SearchChip::ROW.len())
+                .map(|_| cx.focus_handle().tab_index(6).tab_stop(true))
+                .collect(),
+            shown: (String::new(), SearchChip::All),
             on_open,
             scroll: ScrollHandle::new(),
             selected: None,
@@ -223,17 +257,47 @@ impl SearchPage {
         &self.field
     }
 
+    /// The chip holding keyboard focus, if any (tests and diagnostics).
+    pub fn focused_chip(&self, window: &Window) -> Option<SearchChip> {
+        SearchChip::ROW
+            .into_iter()
+            .zip(&self.chip_focus)
+            .find(|(_, focus)| focus.is_focused(window))
+            .map(|(chip, _)| chip)
+    }
+
     /// The index of the keyboard-selected song, if any (tests and diagnostics).
     pub fn selected(&self) -> Option<usize> {
         self.selected
     }
 
+    /// The songs on show (and so the keyboard's): the first few beside the Top result on All,
+    /// every one of a filtered Songs list.
     fn songs(&self, cx: &App) -> Vec<ListedTrack> {
-        self.model
-            .read(cx)
+        let model = self.model.read(cx);
+        let cap = match model.chip() {
+            SearchChip::All => ALL_SONGS,
+            _ => usize::MAX,
+        };
+        model
             .results()
-            .map(|r| r.songs.clone())
+            .map(|r| r.songs.iter().take(cap).cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// The scroll container's child that holds song `index`: All lists its songs in its first
+    /// row, a Songs list has one child per song.
+    fn song_child(&self, index: usize, cx: &App) -> usize {
+        match self.model.read(cx).chip() {
+            SearchChip::All => 0,
+            _ => index,
+        }
+    }
+
+    /// A chip was picked: its list starts at the top with nothing selected.
+    fn select_chip(&mut self, chip: SearchChip, cx: &mut Context<Self>) {
+        self.selected = None;
+        self.model.update(cx, |m, cx| m.set_chip(chip, cx));
     }
 
     fn request_thumbs(&mut self, cx: &mut Context<Self>) {
@@ -383,8 +447,7 @@ impl SearchPage {
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         self.selected = Some(index);
         self.hint_selected(cx);
-        // The songs' heading is child 0 of the list, so song `i` is child `i + 1`.
-        self.scroll.scroll_to_item(index + 1);
+        self.scroll.scroll_to_item(self.song_child(index, cx));
         cx.notify();
     }
 
@@ -514,13 +577,19 @@ impl Render for SearchPage {
         let accent = self.player.read(cx).view().accent;
         let model = self.model.read(cx);
         let state = model.state();
+        let chip = model.chip();
         let query: SharedString = model.query().to_owned().into();
         let results = model.results().cloned();
         let confirmed_empty = model.is_confirmed_empty();
+        let more = model.more();
+        let show_chips = matches!(
+            state,
+            SearchState::Loading | SearchState::Ready | SearchState::Failed(_)
+        ) && as_link(&query).is_none();
 
-        let cards = results
-            .as_ref()
-            .map_or(0, |r| r.albums.len() + r.artists.len() + r.playlists.len());
+        let cards = results.as_ref().map_or(0, |r| {
+            r.albums.len() + r.artists.len() + r.playlists.len() + EXTRA_STOPS
+        });
         while self.card_focus.len() < cards {
             self.card_focus
                 .push(cx.focus_handle().tab_index(7).tab_stop(true));
@@ -537,12 +606,17 @@ impl Render for SearchPage {
         self.field_was_focused = field_focused;
         let list_focused = self.results_focus.is_focused(window);
         let popover = self.popover(cx);
+        if chip != SearchChip::All && state == SearchState::Ready {
+            self.ask_for_more(cx);
+        }
 
-        let body: AnyElement = match (state, results) {
-            (SearchState::Idle, _) => div().into_any_element(),
+        // Every item is its own child of the scroll container, so a keyboard selection can
+        // scroll to it.
+        let body: Vec<AnyElement> = match (state, results) {
+            (SearchState::Idle, _) => Vec::new(),
             (SearchState::BadLink, _) => {
                 let field = self.field.clone();
-                self.message(
+                vec![self.message(
                     BAD_LINK_TEXT.into(),
                     "Clear",
                     accent,
@@ -551,22 +625,22 @@ impl Render for SearchPage {
                         text_field::focus(&field, window, cx);
                     },
                     cx,
-                )
+                )]
             }
             (SearchState::Failed(failure), _) => {
                 let model = self.model.clone();
-                self.message(
+                vec![self.message(
                     failure_text(failure).into(),
                     "Retry",
                     accent,
                     move |_, cx| model.update(cx, |m, cx| m.retry(cx)),
                     cx,
-                )
+                )]
             }
             (SearchState::Ready, Some(_)) if confirmed_empty => {
                 let text: SharedString = format!("No results for \u{201C}{query}\u{201D}").into();
                 let field = self.field.clone();
-                self.message(
+                vec![self.message(
                     text,
                     "Clear",
                     accent,
@@ -575,13 +649,19 @@ impl Render for SearchPage {
                         text_field::focus(&field, window, cx);
                     },
                     cx,
-                )
+                )]
             }
-            (_, Some(results)) => self.results_list(&results, list_focused, accent, cx),
-            (SearchState::Loading, None) => skeletons(cx),
+            (_, Some(results)) => self.results_list(&results, chip, more, list_focused, accent, cx),
+            (SearchState::Loading, None) => vec![skeletons(chip, cx)],
             // Ready without results cannot happen; show nothing rather than guess.
-            (SearchState::Ready, None) => div().into_any_element(),
+            (SearchState::Ready, None) => Vec::new(),
         };
+        let chips = show_chips.then(|| {
+            let page = cx.entity();
+            ChipRow::new(chip, accent, &self.chip_focus, move |chip, _, cx| {
+                page.update(cx, |p, cx| p.select_chip(chip, cx))
+            })
+        });
 
         let fields_focus = self.results_focus.clone();
         div()
@@ -626,6 +706,7 @@ impl Render for SearchPage {
                         .with_priority(1)
                     })),
             )
+            .children(chips.map(|chips| div().flex_none().mt(px(spacing::S4)).child(chips)))
             .child(
                 div()
                     .id("search-results")
@@ -645,9 +726,11 @@ impl Render for SearchPage {
                     .min_h_0()
                     .mt(px(spacing::S4))
                     .pb(px(spacing::S6))
+                    .flex()
+                    .flex_col()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .child(body),
+                    .children(body.into_iter().map(|item| div().flex_none().child(item))),
             )
     }
 }
@@ -746,136 +829,415 @@ fn playlist_anchor(index: usize) -> String {
 }
 
 impl SearchPage {
+    /// Asks for the next page of a filtered list once it is nearly scrolled to its end (or does
+    /// not fill the window yet).
+    fn ask_for_more(&self, cx: &mut Context<Self>) {
+        let model = self.model.read(cx);
+        if !model.has_more() || model.more() != More::Idle {
+            return;
+        }
+        let left = f32::from(self.scroll.max_offset().y) + f32::from(self.scroll.offset().y);
+        if left < LOAD_MORE_MARGIN {
+            self.model.update(cx, |m, cx| m.load_more(cx));
+        }
+    }
+
+    /// The chip a group's "Show all" opens. Search's mixed answer does not say which of its
+    /// playlists are the service's own and which are the community's, so the first one's byline
+    /// decides.
+    fn playlists_chip(hits: &[Hit]) -> SearchChip {
+        let featured = hits.first().is_some_and(|h| {
+            h.subtitle
+                .as_deref()
+                .is_some_and(|s| s.contains("YouTube Music"))
+        });
+        if featured {
+            SearchChip::Playlists
+        } else {
+            SearchChip::CommunityPlaylists
+        }
+    }
+
     fn results_list(
         &self,
         results: &SearchResults,
+        chip: SearchChip,
+        more: More,
         list_focused: bool,
         accent: Accent,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Vec<AnyElement> {
+        let mut items: Vec<AnyElement> = Vec::new();
+        let page = cx.entity();
+        let show_all = |id: &'static str, to: SearchChip, stop: usize| {
+            let page = page.clone();
+            div()
+                .debug_selector(move || id.into())
+                .child(
+                    TextButton::new(id, &self.card_focus[stop], "Show all", accent)
+                        .on_click(move |_, cx| page.update(cx, |p, cx| p.select_chip(to, cx))),
+                )
+                .into_any_element()
+        };
+        // Tab stops are taken in reading order across the Top result, the "Show all" buttons
+        // and the cards.
+        let mut stop = 0;
+        let mut next_stop = || {
+            stop += 1;
+            stop - 1
+        };
+
+        match chip {
+            SearchChip::All => {
+                let songs: Vec<&ListedTrack> = results.songs.iter().take(ALL_SONGS).collect();
+                if results.top.is_some() || !songs.is_empty() {
+                    let mut row = div().flex().flex_row().items_start().gap(px(spacing::S6));
+                    if let Some(top) = &results.top {
+                        let (card_stop, play_stop) = (next_stop(), next_stop());
+                        row = row.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_none()
+                                .w(px(top_result::WIDTH))
+                                .child(group_header("Top result", false, None, cx))
+                                .child(self.top_card(
+                                    top,
+                                    results,
+                                    &songs,
+                                    card_stop,
+                                    play_stop,
+                                    accent,
+                                    cx,
+                                )),
+                        );
+                    }
+                    if !songs.is_empty() {
+                        let all = show_all("show-all-songs", SearchChip::Songs, next_stop());
+                        let mut column = div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(group_header("Songs", false, Some(all), cx));
+                        for (index, song) in songs.iter().enumerate() {
+                            column = column.child(self.song_row(
+                                index,
+                                song,
+                                list_focused,
+                                accent,
+                                cx,
+                            ));
+                        }
+                        row = row.child(column);
+                    }
+                    items.push(row.into_any_element());
+                }
+                // The Top result is also the first row of its own group; it is not shown twice.
+                let top_hit = match &results.top {
+                    Some(TopResult::Album(h) | TopResult::Artist(h) | TopResult::Playlist(h)) => {
+                        Some(&h.id)
+                    }
+                    _ => None,
+                };
+                let playlists_to = Self::playlists_chip(&results.playlists);
+                let groups: [(&'static str, &'static str, &Vec<Hit>, SearchChip, &'static str); 3] = [
+                    ("Albums", "album", &results.albums, SearchChip::Albums, "show-all-albums"),
+                    ("Artists", "artist", &results.artists, SearchChip::Artists, "show-all-artists"),
+                    ("Playlists", "playlist", &results.playlists, playlists_to, "show-all-playlists"),
+                ];
+                for (title, kind, hits, to, id) in groups {
+                    let shown: Vec<&Hit> = hits.iter().filter(|h| Some(&h.id) != top_hit).collect();
+                    if shown.is_empty() {
+                        continue;
+                    }
+                    let all = show_all(id, to, next_stop());
+                    items.push(group_header(title, !items.is_empty(), Some(all), cx));
+                    let cards: Vec<Card> = shown
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, hit)| {
+                            self.hit_card(kind, index, hit, next_stop(), accent, cx)
+                        })
+                        .collect();
+                    items.push(grid().children(cards).into_any_element());
+                }
+            }
+            SearchChip::Songs => {
+                for (index, song) in results.songs.iter().enumerate() {
+                    items.push(self.song_row(index, song, list_focused, accent, cx));
+                }
+                if more == More::Loading {
+                    items.push(row_skeletons(MORE_SKELETON_ROWS, "search-more-skeleton", cx));
+                }
+            }
+            SearchChip::Albums | SearchChip::Artists | SearchChip::Playlists
+            | SearchChip::CommunityPlaylists => {
+                let (kind, hits) = match chip {
+                    SearchChip::Albums => ("album", &results.albums),
+                    SearchChip::Artists => ("artist", &results.artists),
+                    _ => ("playlist", &results.playlists),
+                };
+                let cards: Vec<Card> = hits
+                    .iter()
+                    .enumerate()
+                    .map(|(index, hit)| self.hit_card(kind, index, hit, next_stop(), accent, cx))
+                    .collect();
+                items.push(grid().children(cards).into_any_element());
+                if more == More::Loading {
+                    items.push(card_skeletons("search-more-skeleton", cx));
+                }
+            }
+        }
+        if let More::Failed(_) = more {
+            let model = self.model.clone();
+            items.push(self.message(
+                "Couldn't load more".into(),
+                "Retry",
+                accent,
+                move |_, cx| model.update(cx, |m, cx| m.retry_more(cx)),
+                cx,
+            ));
+        }
+        items
+    }
+
+    /// One album, artist or playlist card (the focus stop is `stop` of the card handles).
+    fn hit_card(
+        &self,
+        kind: &'static str,
+        index: usize,
+        hit: &Hit,
+        stop: usize,
+        accent: Accent,
+        cx: &App,
+    ) -> Card {
+        let thumb = match &hit.thumbnail {
+            Some(url) => self.thumbs.read(cx).get(url),
+            None => Thumb::Missing,
+        };
+        let (target, on_open) = (target_of(kind, hit), self.on_open.clone());
+        Card::new(
+            format!("search-{kind}-{index}"),
+            hit.title.clone(),
+            hit.subtitle.clone().map(Into::into),
+            thumb,
+            &self.card_focus[stop],
+            accent,
+            move |window, cx| on_open(target.clone(), window, cx),
+        )
+        .circular(kind == "artist")
+        .map_menu(Subject::of_target(&target_of(kind, hit)))
+    }
+
+    /// The Top result card for `top`. Play does what the kind implies: a song plays, an album
+    /// or playlist plays through, an artist plays the songs listed beside the card.
+    #[allow(clippy::too_many_arguments)]
+    fn top_card(
+        &self,
+        top: &TopResult,
+        results: &SearchResults,
+        songs: &[&ListedTrack],
+        card_stop: usize,
+        play_stop: usize,
+        accent: Accent,
+        cx: &App,
+    ) -> TopCard {
         let thumbs = self.thumbs.read(cx);
         let thumb_of = |url: &Option<String>| match url {
             Some(url) => thumbs.get(url),
             None => Thumb::Missing,
         };
-        // The scroll container's direct children are what `ScrollHandle` can scroll to:
-        // the songs' heading first, then one child per song row.
-        let mut children: Vec<AnyElement> = Vec::new();
-        if !results.songs.is_empty() {
-            children.push(heading("Songs", false, cx));
-            for (index, song) in results.songs.iter().enumerate() {
-                children.push(
-                    SongRow {
-                        index,
-                        title: song.track.title.clone().into(),
-                        artists: artists_line(song),
-                        duration: song
-                            .track
-                            .duration
-                            .map(|d| format_time(d.as_millis() as u64)),
-                        thumb: thumb_of(&song.thumbnail),
-                        selected: list_focused && self.selected == Some(index),
-                        accent,
-                        liked: self.writes.read(cx).is_liked(song.track.video_id.as_str()),
-                        menu: Subject::track(song.track.clone(), song.thumbnail.clone()),
-                        on_like: {
-                            let (writes, video) =
-                                (self.writes.clone(), song.track.video_id.as_str().to_owned());
-                            Box::new(move |_, cx| {
-                                writes.update(cx, |w, cx| w.toggle_like(&video, cx))
-                            })
-                        },
-                        on_playlist: {
-                            let (picker, track) = (self.picker.clone(), song.track.clone());
-                            Box::new(move |window, cx| {
-                                picker.update(cx, |p, cx| {
-                                    p.open_at(
-                                        track.video_id.as_str(),
-                                        track.title.clone(),
-                                        &playlist_anchor(index),
-                                        window,
-                                        cx,
-                                    )
-                                })
-                            })
-                        },
-                        on_play: {
-                            let (player, track, thumb) = (
-                                self.player.clone(),
-                                song.track.clone(),
-                                song.thumbnail.clone(),
-                            );
-                            Box::new(move |_, cx| {
-                                player.update(cx, |m, cx| {
-                                    m.hint_art(track.video_id.as_str(), thumb.as_deref());
-                                    m.play_now(track.clone(), cx)
-                                })
-                            })
-                        },
-                        on_queue: {
-                            let (player, track, thumb) = (
-                                self.player.clone(),
-                                song.track.clone(),
-                                song.thumbnail.clone(),
-                            );
-                            Box::new(move |_, cx| {
-                                player.update(cx, |m, cx| {
-                                    m.hint_art(track.video_id.as_str(), thumb.as_deref());
-                                    m.add_to_queue(track.clone(), cx)
-                                })
-                            })
-                        },
-                        on_intent: {
-                            let (player, track) = (self.player.clone(), song.track.clone());
-                            Box::new(move |_, cx| {
-                                player.update(cx, |m, cx| m.hint_play(&track, cx))
-                            })
-                        },
-                    }
-                    .into_any_element(),
-                );
+        let detail = |kind: &str, rest: Option<&str>| -> SharedString {
+            match rest.filter(|r| !r.trim().is_empty()) {
+                Some(rest) => format!("{kind} \u{2022} {rest}").into(),
+                None => kind.to_owned().into(),
+            }
+        };
+        let (card_focus, play_focus) = (&self.card_focus[card_stop], &self.card_focus[play_stop]);
+        match top {
+            TopResult::Song(song) => {
+                let kind = if results.video_ids.contains(song.track.video_id.as_str()) {
+                    "Video"
+                } else {
+                    "Song"
+                };
+                let artists = artists_line(song);
+                let play = {
+                    let (player, track, thumb) =
+                        (self.player.clone(), song.track.clone(), song.thumbnail.clone());
+                    Rc::new(move |_: &mut Window, cx: &mut App| {
+                        player.update(cx, |m, cx| {
+                            m.hint_art(track.video_id.as_str(), thumb.as_deref());
+                            m.play_now(track.clone(), cx)
+                        })
+                    })
+                };
+                let (open, play_button) = (play.clone(), play);
+                let intent = {
+                    let (player, track) = (self.player.clone(), song.track.clone());
+                    move |cx: &mut App| player.update(cx, |m, cx| m.hint_play(&track, cx))
+                };
+                TopCard::new(
+                    song.track.title.clone(),
+                    detail(kind, Some(&artists)),
+                    thumb_of(&song.thumbnail),
+                    card_focus,
+                    play_focus,
+                    accent,
+                    move |w, cx| open(w, cx),
+                    move |w, cx| play_button(w, cx),
+                )
+                .on_intent(intent)
+                .menu(Some(Subject::track(song.track.clone(), song.thumbnail.clone())))
+            }
+            TopResult::Album(hit) | TopResult::Playlist(hit) => {
+                let kind = if matches!(top, TopResult::Album(_)) {
+                    "album"
+                } else {
+                    "playlist"
+                };
+                let target = target_of(kind, hit);
+                let on_open = self.on_open.clone();
+                let open_target = target.clone();
+                let subject = Subject::of_target(&target);
+                let play_subject = subject.clone();
+                TopCard::new(
+                    hit.title.clone(),
+                    detail(
+                        if kind == "album" { "Album" } else { "Playlist" },
+                        hit.subtitle.as_deref(),
+                    ),
+                    thumb_of(&hit.thumbnail),
+                    card_focus,
+                    play_focus,
+                    accent,
+                    move |w, cx| on_open(open_target.clone(), w, cx),
+                    move |w, cx| {
+                        if let Some(subject) = play_subject.clone() {
+                            track_menu::run_now(Command::Play, subject, w, cx);
+                        }
+                    },
+                )
+                .menu(subject)
+            }
+            TopResult::Artist(hit) => {
+                let target = target_of("artist", hit);
+                let on_open = self.on_open.clone();
+                let tracks: Vec<_> = songs.iter().map(|s| s.track.clone()).collect();
+                let player = self.player.clone();
+                TopCard::new(
+                    hit.title.clone(),
+                    detail("Artist", hit.subtitle.as_deref()),
+                    thumb_of(&hit.thumbnail),
+                    card_focus,
+                    play_focus,
+                    accent,
+                    move |w, cx| on_open(target.clone(), w, cx),
+                    move |_, cx| {
+                        let tracks = tracks.clone();
+                        player.update(cx, |m, cx| m.play_tracks(tracks, Some(0), None, cx))
+                    },
+                )
+                .circular(true)
             }
         }
-        let groups: [(&'static str, &'static str, &Vec<Hit>); 3] = [
-            ("Albums", "album", &results.albums),
-            ("Artists", "artist", &results.artists),
-            ("Playlists", "playlist", &results.playlists),
-        ];
-        // Cards take their tab stops in reading order across the three groups.
-        let mut stop = 0;
-        for (title, kind, hits) in groups {
-            if hits.is_empty() {
-                continue;
-            }
-            children.push(heading(title, !children.is_empty(), cx));
-            let cards: Vec<Card> = hits
-                .iter()
-                .enumerate()
-                .map(|(index, hit)| {
-                    let focus = &self.card_focus[stop];
-                    stop += 1;
-                    let (target, on_open) = (target_of(kind, hit), self.on_open.clone());
-                    Card::new(
-                        format!("search-{kind}-{index}"),
-                        hit.title.clone(),
-                        hit.subtitle.clone().map(Into::into),
-                        thumb_of(&hit.thumbnail),
-                        focus,
-                        accent,
-                        move |window, cx| on_open(target.clone(), window, cx),
-                    )
-                    .circular(kind == "artist")
-                    .map_menu(Subject::of_target(&target_of(kind, hit)))
-                })
-                .collect();
-            children.push(grid().children(cards).into_any_element());
-        }
-        div()
-            .flex()
-            .flex_col()
-            .children(children)
-            .into_any_element()
     }
+
+    fn song_row(
+        &self,
+        index: usize,
+        song: &ListedTrack,
+        list_focused: bool,
+        accent: Accent,
+        cx: &App,
+    ) -> AnyElement {
+        let thumb = match &song.thumbnail {
+            Some(url) => self.thumbs.read(cx).get(url),
+            None => Thumb::Missing,
+        };
+        SongRow {
+            index,
+            title: song.track.title.clone().into(),
+            artists: artists_line(song),
+            duration: song
+                .track
+                .duration
+                .map(|d| format_time(d.as_millis() as u64)),
+            thumb,
+            selected: list_focused && self.selected == Some(index),
+            accent,
+            liked: self.writes.read(cx).is_liked(song.track.video_id.as_str()),
+            menu: Subject::track(song.track.clone(), song.thumbnail.clone()),
+            on_like: {
+                let (writes, video) = (self.writes.clone(), song.track.video_id.as_str().to_owned());
+                Box::new(move |_, cx| writes.update(cx, |w, cx| w.toggle_like(&video, cx)))
+            },
+            on_playlist: {
+                let (picker, track) = (self.picker.clone(), song.track.clone());
+                Box::new(move |window, cx| {
+                    picker.update(cx, |p, cx| {
+                        p.open_at(
+                            track.video_id.as_str(),
+                            track.title.clone(),
+                            &playlist_anchor(index),
+                            window,
+                            cx,
+                        )
+                    })
+                })
+            },
+            on_play: {
+                let (player, track, thumb) =
+                    (self.player.clone(), song.track.clone(), song.thumbnail.clone());
+                Box::new(move |_, cx| {
+                    player.update(cx, |m, cx| {
+                        m.hint_art(track.video_id.as_str(), thumb.as_deref());
+                        m.play_now(track.clone(), cx)
+                    })
+                })
+            },
+            on_queue: {
+                let (player, track, thumb) =
+                    (self.player.clone(), song.track.clone(), song.thumbnail.clone());
+                Box::new(move |_, cx| {
+                    player.update(cx, |m, cx| {
+                        m.hint_art(track.video_id.as_str(), thumb.as_deref());
+                        m.add_to_queue(track.clone(), cx)
+                    })
+                })
+            },
+            on_intent: {
+                let (player, track) = (self.player.clone(), song.track.clone());
+                Box::new(move |_, cx| player.update(cx, |m, cx| m.hint_play(&track, cx)))
+            },
+        }
+        .into_any_element()
+    }
+}
+
+/// A group's heading with, on the right, its "Show all".
+fn group_header(
+    title: &'static str,
+    spaced: bool,
+    show_all: Option<AnyElement>,
+    cx: &App,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .h(px(layout::MIN_HIT_TARGET))
+        .when(spaced, |d| d.mt(px(spacing::S6)))
+        .mb(px(spacing::S2))
+        .child(
+            style::text_style(div(), typography::SECTION, cx)
+                .text_color(color::text_primary())
+                .child(title),
+        )
+        .children(show_all)
+        .into_any_element()
 }
 
 /// The page a search card opens.
@@ -910,44 +1272,72 @@ fn artists_line(song: &ListedTrack) -> SharedString {
         .into()
 }
 
-/// Skeleton blocks at the final size of a song row, so nothing shifts when results arrive.
-fn skeletons(cx: &App) -> AnyElement {
-    let block = |w: gpui::Length, h: f32| {
+/// Skeleton blocks at the final size of what the chip on show lists, so nothing shifts when
+/// results arrive.
+fn skeletons(chip: SearchChip, cx: &App) -> AnyElement {
+    match chip {
+        SearchChip::All | SearchChip::Songs => row_skeletons(SKELETON_ROWS, "search-skeleton", cx),
+        _ => card_skeletons("search-skeleton", cx),
+    }
+}
+
+fn skeleton_block(w: gpui::Length, h: f32) -> gpui::Div {
+    div()
+        .w(w)
+        .h(px(h))
+        .rounded(px(radius::SMALL))
+        .bg(color::skeleton())
+}
+
+fn row_skeletons(rows: usize, id: &'static str, cx: &App) -> AnyElement {
+    let column = div().flex().flex_col().children((0..rows).map(|_| {
         div()
-            .w(w)
-            .h(px(h))
-            .rounded(px(radius::SMALL))
-            .bg(color::skeleton())
-    };
-    let column = div()
-        .flex()
-        .flex_col()
-        .children((0..SKELETON_ROWS).map(|_| {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(spacing::S3))
-                .h(px(ROW_HEIGHT))
-                .px(px(spacing::S2))
-                .child(
-                    div()
-                        .size(px(ROW_ART))
-                        .flex_none()
-                        .rounded(px(radius::MEDIUM))
-                        .bg(color::skeleton()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(spacing::S2))
-                        .flex_1()
-                        .child(block(gpui::relative(0.4).into(), 12.0))
-                        .child(block(gpui::relative(0.25).into(), 10.0)),
-                )
-        }));
-    skeleton::pulse(column, "search-skeleton", !cx.reduce_motion())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(spacing::S3))
+            .h(px(ROW_HEIGHT))
+            .px(px(spacing::S2))
+            .child(
+                div()
+                    .size(px(ROW_ART))
+                    .flex_none()
+                    .rounded(px(radius::MEDIUM))
+                    .bg(color::skeleton()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(spacing::S2))
+                    .flex_1()
+                    .child(skeleton_block(gpui::relative(0.4).into(), 12.0))
+                    .child(skeleton_block(gpui::relative(0.25).into(), 10.0)),
+            )
+    }));
+    skeleton::pulse(column, id, !cx.reduce_motion())
+}
+
+/// A row of card-sized blocks: the artwork square and two lines.
+fn card_skeletons(id: &'static str, cx: &App) -> AnyElement {
+    let row = grid().children((0..SKELETON_CARDS).map(|_| {
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .gap(px(spacing::S1))
+            .w(px(card::WIDTH))
+            .p(px(card::INSET))
+            .child(
+                div()
+                    .size(px(card::ART))
+                    .rounded(px(radius::MEDIUM))
+                    .bg(color::skeleton()),
+            )
+            .child(skeleton_block(gpui::relative(0.7).into(), 12.0))
+            .child(skeleton_block(gpui::relative(0.45).into(), 10.0))
+    }));
+    skeleton::pulse(row, id, !cx.reduce_motion())
 }
 
 type RowAction = Box<dyn Fn(&mut Window, &mut App) + 'static>;

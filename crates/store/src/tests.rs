@@ -312,6 +312,47 @@ fn schema_has_no_secret_bearing_columns() {
     }
 }
 
+#[test]
+fn pages_are_kept_per_account_and_replaced_in_place() {
+    let store = Store::open_in_memory().unwrap();
+    store.put_page("a", "home", "{\"v\":1}", 100).unwrap();
+    store.put_page("a", "home", "{\"v\":2}", 200).unwrap();
+    store.put_page("b", "home", "other", 150).unwrap();
+    let page = store.get_page("a", "home").unwrap().expect("stored");
+    assert_eq!((page.body.as_str(), page.fetched_at), ("{\"v\":2}", 200));
+    assert_eq!(store.pages_for("a").unwrap().len(), 1);
+    assert!(store.get_page("a", "nope").unwrap().is_none());
+    assert!(store.get_page("c", "home").unwrap().is_none());
+
+    store.delete_page("a", "home").unwrap();
+    assert!(store.get_page("a", "home").unwrap().is_none());
+    assert!(store.get_page("b", "home").unwrap().is_some(), "other accounts are untouched");
+}
+
+#[test]
+fn another_account_or_a_sign_out_purges_the_pages() {
+    let store = Store::open_in_memory().unwrap();
+    store.put_page("a", "home", "x", 1).unwrap();
+    store.put_page("b", "home", "y", 1).unwrap();
+    store.clear_pages_except("b").unwrap();
+    assert!(store.pages_for("a").unwrap().is_empty());
+    assert_eq!(store.pages_for("b").unwrap().len(), 1);
+    store.clear_pages().unwrap();
+    assert!(store.pages_for("b").unwrap().is_empty());
+}
+
+#[test]
+fn the_oldest_pages_go_past_the_cap() {
+    let store = Store::open_in_memory().unwrap();
+    for n in 0..(crate::pages::MAX_PAGES_PER_ACCOUNT as i64 + 5) {
+        store.put_page("a", &format!("p{n}"), "x", n).unwrap();
+    }
+    let kept = store.pages_for("a").unwrap();
+    assert_eq!(kept.len(), crate::pages::MAX_PAGES_PER_ACCOUNT);
+    assert!(store.get_page("a", "p0").unwrap().is_none(), "oldest dropped");
+    assert!(store.get_page("a", "p164").unwrap().is_some(), "newest kept");
+}
+
 // ---- the Crate -------------------------------------------------------------------------------
 
 fn crate_row(id: &str, added_ms: i64) -> crate::CrateRow {

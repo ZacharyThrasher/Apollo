@@ -81,6 +81,21 @@ Migration {
 }, Migration {
     version: 4,
     sql: "
+        -- The last answer for a page (Home, the library lists, an album, artist or playlist), so
+        -- reopening one draws at once and refreshes behind it. `body` is the page serialized by
+        -- the app; the store never reads it. Rows belong to one account and are purged when the
+        -- account changes or signs out.
+        CREATE TABLE page_cache (
+            account_key TEXT    NOT NULL,
+            page_key    TEXT    NOT NULL,
+            body        TEXT    NOT NULL,
+            fetched_at  INTEGER NOT NULL,
+            PRIMARY KEY (account_key, page_key)
+        );
+    ",
+}, Migration {
+    version: 5,
+    sql: "
         -- The Crate: songs set aside to remember, per account. Track fields only.
         CREATE TABLE crate_items (
             account_key TEXT    NOT NULL,
