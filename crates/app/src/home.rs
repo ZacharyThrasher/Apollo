@@ -91,6 +91,14 @@ pub struct HomeModel {
     fresh_seen: bool,
     /// The account whose cached feed was asked for since the last `clear`.
     restoring: Option<String>,
+    /// Home > Personal shelves: "On repeat" and "Forgotten favourites" are shown.
+    personal_on: bool,
+    /// The personal shelves worked out from the play log, with the account they are for. They
+    /// are local: they come and go with the switch and are not part of the feed or its cache.
+    personal: Vec<Arc<HomeShelf>>,
+    personal_for: Option<String>,
+    /// Bumped by every personal refresh and drop; an older answer is dropped.
+    personal_rev: u64,
 }
 
 impl HomeModel {
@@ -115,6 +123,10 @@ impl HomeModel {
             cached_for: None,
             fresh_seen: false,
             restoring: None,
+            personal_on: true,
+            personal: Vec::new(),
+            personal_for: None,
+            personal_rev: 0,
         };
         model.try_start(cx);
         model
@@ -140,6 +152,85 @@ impl HomeModel {
 
     pub fn shelves(&self) -> &[Arc<HomeShelf>] {
         &self.shelves
+    }
+
+    /// What Home draws: the feed's shelves with the personal shelves right after the first of
+    /// them. Without a feed there is nothing to put them in.
+    pub fn display_shelves(&self) -> Vec<Arc<HomeShelf>> {
+        let mut shown = self.shelves.clone();
+        if self.personal_on && !shown.is_empty() {
+            let at = 1.min(shown.len());
+            shown.splice(at..at, self.personal.iter().cloned());
+        }
+        shown
+    }
+
+    /// The personal shelves worked out so far (tests).
+    pub fn personal_shelves(&self) -> &[Arc<HomeShelf>] {
+        &self.personal
+    }
+
+    /// Home > Personal shelves, on or off. Turning it on works the shelves out again.
+    pub fn set_personal_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.personal_on == on {
+            return;
+        }
+        self.personal_on = on;
+        if on {
+            self.refresh_personal(cx);
+        } else {
+            self.personal_rev += 1;
+        }
+        cx.notify();
+    }
+
+    /// Works the personal shelves out from the play log, off the UI thread, and swaps them in
+    /// when they are ready. They stay as they were until then. Cheap and local: asked for at
+    /// launch, whenever the account is chosen and every time Home is opened.
+    pub fn refresh_personal(&mut self, cx: &mut Context<Self>) {
+        if !self.personal_on {
+            return;
+        }
+        let Some(log) = crate::stats::PlayLog::try_global(cx) else {
+            return;
+        };
+        let Some(account) = PageCache::try_global(cx).and_then(|c| c.account()) else {
+            return;
+        };
+        if self.personal_for.as_deref() != Some(account.as_str()) {
+            // Another account's shelves must not show while its own are worked out.
+            self.personal.clear();
+            self.personal_for = Some(account.clone());
+        }
+        self.personal_rev += 1;
+        let rev = self.personal_rev;
+        cx.spawn(async move |this, cx| {
+            let asked = account.clone();
+            let shelves = cx
+                .background_executor()
+                .spawn(async move {
+                    let now = apollo_services_common::unix_now() as i64;
+                    let recent = log.totals(
+                        &asked,
+                        Some(now - crate::stats::report::ON_REPEAT_DAYS * 24 * 60 * 60),
+                    );
+                    let all = log.totals(&asked, None);
+                    crate::stats::report::personal_shelves(&recent, &all, now)
+                })
+                .await;
+            let _ = this.update(cx, |m, cx| {
+                let current = PageCache::try_global(cx).and_then(|c| c.account());
+                if m.personal_rev != rev || current.as_deref() != Some(account.as_str()) {
+                    return;
+                }
+                let shelves: Vec<Arc<HomeShelf>> = shelves.into_iter().map(Arc::new).collect();
+                if shelves != m.personal {
+                    m.personal = shelves;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The shelves on screen are the page cache's, not yet replaced by the service's.
@@ -236,6 +327,7 @@ impl HomeModel {
     /// Home was opened (the nav, Back from a page opened over it): a failure is tried again, and
     /// a feed older than [`STALE_AFTER`] is fetched again in the background.
     pub fn show(&mut self, now: Instant, cx: &mut Context<Self>) {
+        self.refresh_personal(cx);
         if self.source.is_none() || self.access != Access::Open || self.loading {
             return;
         }
@@ -276,6 +368,7 @@ impl HomeModel {
     /// The shell calls it once the cache knows the account, which is before the session has
     /// been confirmed, so launch shows Home at once.
     pub fn restore_cached(&mut self, cx: &mut Context<Self>) {
+        self.refresh_personal(cx);
         let Some(cache) = PageCache::try_global(cx) else {
             return;
         };

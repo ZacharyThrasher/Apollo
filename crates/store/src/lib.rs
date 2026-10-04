@@ -17,6 +17,7 @@ mod lyrics;
 mod loudness;
 mod migrations;
 mod pages;
+mod plays;
 mod queue;
 
 use std::fmt;
@@ -29,6 +30,7 @@ pub use lyrics::CachedLyrics;
 pub use loudness::LoudnessRow;
 pub use migrations::{Migration, MIGRATIONS};
 pub use pages::CachedPage;
+pub use plays::{NewPlay, PlayTotal, MAX_PLAYS_PER_ACCOUNT};
 
 #[derive(Debug)]
 pub enum StoreError {

@@ -30,12 +30,14 @@ use crate::search::local::LocalIndex;
 use super::writes::{LibraryWrites, WritesEvent};
 
 mod artist;
+mod stats;
 pub use artist::MixKind;
 use crate::art::{sized_thumbnail, DecodedArt};
 use crate::page_cache::{keys, PageCache, Ticket};
 use crate::player::{PlayerModel, Status};
 use crate::queue_source;
 use crate::settings::LibrarySortStore;
+use crate::stats::report::{Period, StatsReport};
 use crate::url_thumbs::Thumb as ThumbView;
 
 /// Cover downloads running at once. Fast scrolling queues many; the newest request goes first.
@@ -57,10 +59,18 @@ pub enum Tab {
     Albums,
     Artists,
     History,
+    /// What Apollo itself played: local stats (see `crate::stats`).
+    Stats,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Playlists, Tab::Albums, Tab::Artists, Tab::History];
+    pub const ALL: [Tab; 5] = [
+        Tab::Playlists,
+        Tab::Albums,
+        Tab::Artists,
+        Tab::History,
+        Tab::Stats,
+    ];
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -323,6 +333,10 @@ pub struct LibraryModel {
     /// The History tab: the play history in the service's date buckets.
     history: Load<Vec<HistoryGroup>>,
     history_rev: u64,
+    /// The Stats tab: the report for the chosen period, worked out from the local play log.
+    stats: Load<Arc<StatsReport>>,
+    stats_period: Period,
+    stats_rev: u64,
     sorts: HashMap<Tab, SortKey>,
     sort_store: Option<Arc<dyn LibrarySortStore>>,
     shown: Shown,
@@ -375,6 +389,9 @@ impl LibraryModel {
             artists_rev: 0,
             history: Load::Idle,
             history_rev: 0,
+            stats: Load::Idle,
+            stats_period: Period::default(),
+            stats_rev: 0,
             sorts: HashMap::new(),
             sort_store: None,
             shown: Shown::default(),
@@ -520,6 +537,9 @@ impl LibraryModel {
         self.artists = Load::Idle;
         self.history_rev += 1;
         self.history = Load::Idle;
+        self.stats_rev += 1;
+        self.stats = Load::Idle;
+        self.stats_period = Period::default();
         self.liked_rev += 1;
         self.liked_songs = Load::Idle;
         self.liked_stale = false;
@@ -613,6 +633,7 @@ impl LibraryModel {
         match tab {
             Tab::Artists if matches!(self.artists, Load::Idle) => self.load_artists(cx),
             Tab::History => self.load_history(cx),
+            Tab::Stats => self.load_stats(cx),
             _ => {}
         }
     }

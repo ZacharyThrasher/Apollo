@@ -27,7 +27,7 @@ use crate::page_cache::PageCache;
 use crate::player::PlayerModel;
 use crate::related::RelatedModel;
 use crate::search::{SearchModel, SearchSource};
-use crate::settings::SettingsModel;
+use crate::settings::{SettingsModel, PERSONAL_SHELVES};
 use crate::settings::{LibrarySortStore, LyricsOpenStore, RelatedOpenStore};
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
@@ -454,6 +454,17 @@ impl Shell {
             )
         });
         let home = cx.new(|cx| HomeModel::new(player.clone(), cx));
+        // Home > Personal shelves follows its Settings switch.
+        let personal_on = settings.read(cx).get(&PERSONAL_SHELVES);
+        home.update(cx, |h, cx| h.set_personal_enabled(personal_on, cx));
+        {
+            let home = home.clone();
+            cx.observe(&settings, move |_, settings, cx| {
+                let on = settings.read(cx).get(&PERSONAL_SHELVES);
+                home.update(cx, |h, cx| h.set_personal_enabled(on, cx));
+            })
+            .detach();
+        }
         let home_page = cx.new(|cx| {
             HomeView::new(
                 player.clone(),

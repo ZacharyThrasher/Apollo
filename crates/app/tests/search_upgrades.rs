@@ -514,6 +514,8 @@ fn the_search_section_of_settings_has_its_two_switches_with_the_stated_defaults(
     cx: &mut TestAppContext,
 ) {
     let (page, vcx) = setup(cx, "");
+    // Tall enough that every row is on screen however many sections Settings has.
+    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(1800.0)));
     page.shell
         .update(vcx, |s, cx| s.show_route(Route::Settings, cx));
     vcx.run_until_parked();
