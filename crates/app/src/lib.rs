@@ -19,11 +19,15 @@ pub mod loudness;
 pub mod motion;
 pub mod os_media;
 pub mod page_cache;
+pub mod pc_watch;
+#[cfg(windows)]
+pub mod pc_watch_win;
 pub mod persist;
 pub mod platform;
 pub mod player;
 pub mod search;
 pub mod settings;
+pub mod sleep_timer;
 #[cfg(windows)]
 pub mod single_instance;
 #[cfg(windows)]
