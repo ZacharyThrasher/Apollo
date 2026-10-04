@@ -217,6 +217,47 @@ fn fit_inside(rect: Rect, display: &Rect, c: &Constraints) -> Rect {
     Rect::new(x, y, w, h)
 }
 
+/// Gap a snapped window keeps from the monitor edge.
+pub const SNAP_MARGIN: f32 = 16.0;
+/// How near an edge a window must be dropped to snap to it.
+pub const SNAP_REACH: f32 = 48.0;
+
+/// Where a window dropped at `rect` ends up: against any monitor edge it is within
+/// [`SNAP_REACH`] of, [`SNAP_MARGIN`] in from it (both axes at once make a corner), and
+/// otherwise where it is. Only the monitor showing most of it counts; a window on no monitor
+/// is left alone. `displays` should be the usable area (the primary's without the taskbar).
+pub fn snap(rect: Rect, displays: &[Rect]) -> Rect {
+    let area = |d: &Rect| {
+        let (w, h) = rect.overlap(d);
+        w * h
+    };
+    let Some(d) = displays
+        .iter()
+        .filter(|d| area(d) > 0.0)
+        .max_by(|a, b| area(a).total_cmp(&area(b)))
+    else {
+        return rect;
+    };
+    // Close enough to a side to jump to its margin line; the nearer side wins a tie.
+    let axis = |pos: f32, len: f32, lo: f32, hi: f32| {
+        let (near, far) = (lo + SNAP_MARGIN, hi - SNAP_MARGIN - len);
+        let (to_near, to_far) = ((pos - near).abs(), (pos - far).abs());
+        if to_near <= SNAP_REACH && to_near <= to_far {
+            near
+        } else if to_far <= SNAP_REACH {
+            far
+        } else {
+            pos
+        }
+    };
+    Rect::new(
+        axis(rect.x, rect.w, d.x, d.right()),
+        axis(rect.y, rect.h, d.y, d.bottom()),
+        rect.w,
+        rect.h,
+    )
+}
+
 // ---- GPUI side -------------------------------------------------------------------------------
 
 impl Rect {
@@ -286,6 +327,21 @@ pub fn restore(
         .collect();
     let primary = cx.primary_display().map(|d| Rect::from_bounds(d.bounds()));
     place(saved, &displays, primary, c)
+}
+
+/// The monitors' usable areas for snapping: their bounds, with the primary's taskbar taken off
+/// where the platform says how big it is.
+pub fn usable_displays(cx: &App, scale: f32) -> Vec<Rect> {
+    let primary = cx.primary_display().map(|d| Rect::from_bounds(d.bounds()));
+    let work = crate::platform::primary_work_area(scale).map(|(x, y, w, h)| Rect::new(x, y, w, h));
+    cx.displays()
+        .iter()
+        .map(|d| Rect::from_bounds(d.bounds()))
+        .map(|bounds| match (primary, work) {
+            (Some(p), Some(work)) if p == bounds => work,
+            _ => bounds,
+        })
+        .collect()
 }
 
 /// What the recorder has seen and not yet written.
@@ -541,5 +597,50 @@ mod tests {
         assert_eq!(Some(p), want);
         let p = place(None, &[], None, &MAIN);
         assert_eq!(p.rect, Rect::new(0.0, 0.0, 1100.0, 720.0));
+    }
+
+    #[test]
+    fn a_window_dropped_near_a_corner_snaps_to_it_with_the_margin() {
+        let hud = Rect::new(1500.0, 950.0, 360.0, 96.0);
+        // 1920-360-16 = 1544, 1080-96-16 = 968.
+        assert_eq!(snap(hud, &[PRIMARY]), Rect::new(1544.0, 968.0, 360.0, 96.0));
+        let top_left = Rect::new(30.0, 40.0, 360.0, 96.0);
+        assert_eq!(
+            snap(top_left, &[PRIMARY]),
+            Rect::new(16.0, 16.0, 360.0, 96.0)
+        );
+    }
+
+    #[test]
+    fn a_window_near_one_edge_snaps_on_that_axis_only() {
+        let hud = Rect::new(800.0, 20.0, 360.0, 96.0);
+        assert_eq!(snap(hud, &[PRIMARY]), Rect::new(800.0, 16.0, 360.0, 96.0));
+        let hud = Rect::new(1560.0, 500.0, 360.0, 96.0);
+        assert_eq!(snap(hud, &[PRIMARY]), Rect::new(1544.0, 500.0, 360.0, 96.0));
+    }
+
+    #[test]
+    fn a_window_far_from_every_edge_stays_where_it_was_dropped() {
+        let hud = Rect::new(700.0, 400.0, 360.0, 96.0);
+        assert_eq!(snap(hud, &[PRIMARY]), hud);
+        // Off every monitor: left alone.
+        let lost = Rect::new(5000.0, 5000.0, 360.0, 96.0);
+        assert_eq!(snap(lost, &[PRIMARY]), lost);
+    }
+
+    #[test]
+    fn snapping_uses_the_monitor_the_window_is_mostly_on() {
+        // On the second monitor, whose left edge is at -1280.
+        let hud = Rect::new(-1270.0, 600.0, 360.0, 96.0);
+        assert_eq!(
+            snap(hud, &[PRIMARY, LEFT]),
+            Rect::new(-1264.0, 600.0, 360.0, 96.0)
+        );
+    }
+
+    #[test]
+    fn snapping_twice_changes_nothing() {
+        let once = snap(Rect::new(1500.0, 950.0, 360.0, 96.0), &[PRIMARY]);
+        assert_eq!(snap(once, &[PRIMARY]), once);
     }
 }

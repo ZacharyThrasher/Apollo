@@ -19,6 +19,7 @@ use gpui::Context;
 use super::{LibraryModel, Load, PlayRequest};
 use crate::library::source::TrackRow;
 use crate::page_cache::PageCache;
+use crate::queue_source;
 
 /// What a mix (a playlist with no seed song) is being fetched for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,9 +152,13 @@ impl LibraryModel {
                     start: Some(0),
                     shuffle: None,
                 };
-                self.play_tracks(rows, request, cx);
+                let source = self.artist_mut(id).map(|d| queue_source::radio(d.name()));
+                self.play_tracks(rows, request, source, cx);
             }
-            (MixKind::Shuffle, false) => self.play_tracks(rows, PlayRequest::SHUFFLE, cx),
+            (MixKind::Shuffle, false) => {
+                let source = self.artist_mut(id).map(|d| queue_source::of_artist(&d.target));
+                self.play_tracks(rows, PlayRequest::SHUFFLE, source, cx)
+            }
             // The mix could not be had: the top songs are a fair shuffle.
             (MixKind::Shuffle, true) => self.play_artist(id, PlayRequest::SHUFFLE, cx),
             (MixKind::Radio, true) => self.raise(RADIO_FAILED, cx),
@@ -172,6 +177,10 @@ impl LibraryModel {
             return;
         };
         let video = seed.track.video_id.as_str().to_owned();
+        let radio_of = self
+            .artist_mut(id)
+            .map(|d| d.name().to_owned())
+            .unwrap_or_else(|| seed.track.title.clone());
         self.player.update(cx, |p, cx| {
             p.hint_art(&video, seed.thumbnail.as_deref());
             p.start_radio(seed.track, cx);
@@ -197,7 +206,9 @@ impl LibraryModel {
                                 r.track
                             })
                             .collect();
-                        m.player.update(cx, |p, cx| p.finish_radio(tracks, cx));
+                        m.player.update(cx, |p, cx| {
+                            p.finish_radio(tracks, queue_source::radio(radio_of), cx)
+                        });
                     }
                     _ => m.raise(RADIO_FAILED, cx),
                 }

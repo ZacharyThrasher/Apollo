@@ -75,7 +75,8 @@ Applied to the queue panel (`ui/queue_panel.rs`) and Now Playing (`ui/now_playin
 5. **Clear:** clears up next only, with no confirmation; the playing track keeps playing.
 6. **No-art glyph:** 20px on tiles up to 56px; a quarter of the tile size above that.
 7. **Now Playing:** opened from the player bar's art/title block, closed with Esc, the chevron, or navigating. Art `min(50vh, 480px)`, title in the 40px style, then one line of artist name(s) and album separated by " · " at 18px regular in text.secondary, 8px below the title, truncating with an ellipsis. The progress row and transport sit below, shared with the player bar. Ambient art is blurred at 15% opacity (inside the 12-18% range) and sits only behind this view.
-8. **Autoplay switch:** right-aligned in the queue header, after shuffle, repeat and clear: a compact 28x16 switch (accent track when on, `border.strong` when off, 12px knob) with the label "Autoplay" in body text.secondary. On by default and remembered. When up next is down to one track (or none) while something plays, a song radio seeded by the last track is appended; repeat-all takes priority. Radio rows look like any other queue row.
+8. **Autoplay switch:** a compact 28x16 switch (accent track when on, `border.strong` when off, 12px knob) with the label "Autoplay" in body text.secondary, right-aligned on the "Playing from" row under the header (item 9). On by default and remembered. When up next is down to one track (or none) while something plays, a song radio seeded by the last track is appended; repeat-all takes priority. Radio rows look like any other queue row.
+9. **Playing from (coordinator, 2026-10-04):** a 48px row between the header and the list: a 32px rounded art tile (the place's cover, else the music-note tile), then "Playing from" in caption text.secondary over the place's name in body-strong text.primary (truncating, full name in a tooltip), and the Autoplay switch at the right. The place is a playlist, album, artist, "Liked songs", "<seed> radio", "Search: <query>", a named shelf or chart, or "Your queue" when nothing gave the queue a place. Past the place, once playback reaches autoplay's songs, the caption reads "Autoplay" and the name is the song autoplay was seeded from. Where the place has a page (playlist, album, artist, Liked songs) the row is a link: underline on the name when hovered, a Tab stop, and it opens the page (leaving Now Playing). The place is saved with the queue. Built choice: the coordinator asked for 12px and 14px text; the type scale has 11 and 13, so the row uses caption and body-strong rather than adding sizes.
 
 ## Library decisions (coordinator, 2026-10-03)
 Applied to the Library page (`ui/library.rs`).
@@ -220,6 +221,15 @@ Applied to the dialog, menus, popover and Library page (`ui/playlist_dialog.rs`,
 7. **Library toggle:** "Save to library" (Fluent library, outline) or "Remove from library" (filled) sits between Start radio and Copy link on album cards and pages and on other people's playlists that can be saved (`PL…` and curated `RDCLAK…` lists, and anything already in the library). Never on your own playlists, Liked Music, or radios and mixes.
 8. **Feedback:** success is silent. Failures use the existing error toast, six words or fewer: "Couldn't create playlist", "Couldn't rename playlist", "Couldn't delete playlist", "Couldn't remove song", "Couldn't move song", "Couldn't save to library", "Couldn't remove from library", or "Sign-in expired". A write whose reply is lost is read back before anything is said or retried.
 9. **After a delete:** a playlist page that is open closes and the card leaves the list.
+
+## HUD mode decisions (coordinator brief, 2026-10-04)
+Applied to the mini player (`ui/mini_player.rs`, `mini.rs`, `hud.rs`). Settings > Window: "HUD mode for mini player" (off), "Auto-hide HUD" (on).
+1. **Look:** the same 360x96 layout, painted on `bg.overlay` at 85% with the medium radius over a transparent window (no Mica). Never takes keyboard focus; always on top.
+2. **Pointer:** click-through while the pointer is away (the app polls the cursor, since a click-through window gets no mouse events); solid and clickable under it.
+3. **Snap:** after a drag it settles, then snaps to the nearest screen corner or edge, 16px from the taskbar-aware work area, when within 48px of it.
+4. **Auto-hide:** dims to 30% (300ms fade) after 4s without a track change and returns to full for 4s on each one. Off keeps it solid.
+5. **Ctrl+Alt+H** shows/hides it (registered only while Global hotkeys is on).
+6. **Limit:** topmost windows show over windowed and borderless games, not exclusive fullscreen; that would need DLL injection, which risks anti-cheat bans, so it is not done.
 
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

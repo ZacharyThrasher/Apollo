@@ -1,5 +1,7 @@
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, QueueEntryId, Track, VideoId};
-use apollo_domain::queue::{Origin, Queue, QueueEntry, QueueSnapshot, Repeat};
+use apollo_domain::queue::{
+    AutoplayStart, Origin, Queue, QueueEntry, QueueSnapshot, QueueSource, Repeat, SourceKind,
+};
 use rusqlite::{params, Transaction};
 
 use crate::{Store, StoreError};
@@ -40,6 +42,49 @@ fn repeat_from(s: &str) -> Result<Repeat, StoreError> {
         "all" => Ok(Repeat::All),
         _ => Err(StoreError::Corrupt("unknown repeat mode")),
     }
+}
+
+fn kind_str(k: SourceKind) -> &'static str {
+    match k {
+        SourceKind::Playlist => "playlist",
+        SourceKind::Album => "album",
+        SourceKind::Artist => "artist",
+        SourceKind::Radio => "radio",
+        SourceKind::LikedSongs => "liked",
+        SourceKind::Search => "search",
+        SourceKind::Other => "other",
+    }
+}
+
+/// The saved source, if it is one this build knows: a source is only a heading, so an
+/// unknown one is dropped rather than failing the whole queue.
+fn source_from(
+    (kind, name, target, thumbnail): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ),
+) -> Result<Option<QueueSource>, StoreError> {
+    let (Some(kind), Some(name)) = (kind, name) else {
+        return Ok(None);
+    };
+    let kind = match kind.as_str() {
+        "playlist" => SourceKind::Playlist,
+        "album" => SourceKind::Album,
+        "artist" => SourceKind::Artist,
+        "radio" => SourceKind::Radio,
+        "liked" => SourceKind::LikedSongs,
+        "search" => SourceKind::Search,
+        "other" => SourceKind::Other,
+        _ => return Ok(None),
+    };
+    Ok(Some(QueueSource {
+        kind,
+        name,
+        target,
+        thumbnail,
+    }))
 }
 
 fn insert_entry(
@@ -102,8 +147,10 @@ impl Store {
         )?;
         tx.execute(
             "INSERT INTO queue_state
-                (singleton, account_key, next_id, shuffle, seed, repeat, current_removed, position_ms)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (singleton, account_key, next_id, shuffle, seed, repeat, current_removed, position_ms,
+                 source_kind, source_name, source_target, source_thumb,
+                 autoplay_first, autoplay_seed)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 account_key,
                 next_id,
@@ -112,6 +159,15 @@ impl Store {
                 repeat_str(snap.repeat),
                 snap.current.as_ref().is_some_and(|(_, removed)| *removed) as i64,
                 position,
+                snap.source.as_ref().map(|s| kind_str(s.kind)),
+                snap.source.as_ref().map(|s| s.name.as_str()),
+                snap.source.as_ref().and_then(|s| s.target.as_deref()),
+                snap.source.as_ref().and_then(|s| s.thumbnail.as_deref()),
+                snap.autoplay
+                    .as_ref()
+                    .map(|a| to_i64(a.first.get(), "autoplay entry"))
+                    .transpose()?,
+                snap.autoplay.as_ref().map(|a| a.seed.as_str()),
             ],
         )?;
         for (i, e) in snap.history.iter().enumerate() {
@@ -143,7 +199,9 @@ impl Store {
     /// account is purged and `None` returned: private state never crosses identities.
     pub fn load_queue(&mut self, account_key: &str) -> Result<Option<(Queue, u64)>, StoreError> {
         let row = self.conn.query_row(
-            "SELECT account_key, next_id, shuffle, seed, repeat, current_removed, position_ms
+            "SELECT account_key, next_id, shuffle, seed, repeat, current_removed, position_ms,
+                    source_kind, source_name, source_target, source_thumb,
+                    autoplay_first, autoplay_seed
              FROM queue_state WHERE singleton = 1",
             [],
             |r| {
@@ -155,10 +213,17 @@ impl Store {
                     r.get::<_, String>(4)?,
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
+                    (
+                        r.get::<_, Option<String>>(7)?,
+                        r.get::<_, Option<String>>(8)?,
+                        r.get::<_, Option<String>>(9)?,
+                        r.get::<_, Option<String>>(10)?,
+                    ),
+                    (r.get::<_, Option<i64>>(11)?, r.get::<_, Option<String>>(12)?),
                 ))
             },
         );
-        let (stored_key, next_id, shuffle, seed, repeat, removed, position) = match row {
+        let (stored_key, next_id, shuffle, seed, repeat, removed, position, source, autoplay) = match row {
             Ok(r) => r,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -251,6 +316,16 @@ impl Store {
             shuffle: shuffle != 0,
             seed: seed as u64,
             repeat: repeat_from(&repeat)?,
+            source: source_from(source)?,
+            autoplay: match autoplay {
+                (Some(first), Some(seed)) => Some(AutoplayStart {
+                    first: QueueEntryId::from_raw(
+                        u64::try_from(first).map_err(|_| StoreError::Corrupt("negative id"))?,
+                    ),
+                    seed,
+                }),
+                _ => None,
+            },
         };
         let queue = Queue::restore(snap).map_err(|_| StoreError::Corrupt("queue invariants"))?;
         Ok(Some((queue, u64::try_from(position).unwrap_or(0))))

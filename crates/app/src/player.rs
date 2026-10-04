@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use apollo_domain::audio::{self, AudioDevice, Equalizer};
 use apollo_domain::model::{QueueEntryId, Track};
 use apollo_domain::playback::{EngineEvent, Event, Failure, Intent, Phase};
-use apollo_domain::queue::{Queue, QueueEntry, Repeat};
+use apollo_domain::queue::{Heading, Queue, QueueEntry, QueueSource, Repeat};
 use apollo_runtime::Driver;
 use apollo_theme::Accent;
 use gpui::{Context, RenderImage, SharedString};
@@ -108,6 +108,19 @@ pub struct QueueView {
     pub history: Vec<QueueRow>,
     pub current: Option<QueueRow>,
     pub upcoming: Vec<QueueRow>,
+    /// What the queue is playing from; none while nothing is queued.
+    pub heading: Option<QueueHeading>,
+}
+
+/// The queue header's "Playing from" line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueueHeading {
+    /// A playlist, album, artist, radio, search or other place.
+    Source(QueueSource),
+    /// Playback has gone past the source into autoplay; the track it was seeded from.
+    Autoplay(String),
+    /// The queue was put together by hand.
+    Yours,
 }
 
 /// Everything the views draw, copied out of the model.
@@ -850,11 +863,13 @@ impl PlayerModel {
         self.handle_as(Some("start_radio"), Event::Next, cx);
     }
 
-    /// The radio's tracks replace everything that was up next.
-    pub fn finish_radio(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+    /// The radio's tracks replace everything that was up next, and the queue now plays from
+    /// `source` (the radio).
+    pub fn finish_radio(&mut self, tracks: Vec<Track>, source: QueueSource, cx: &mut Context<Self>) {
         self.edit_queue(cx, |q| {
             q.clear_upcoming();
             q.append_radio(tracks);
+            q.set_source(Some(source));
         });
         self.prefetch_upcoming();
     }
@@ -895,6 +910,19 @@ impl PlayerModel {
         shuffle: Option<bool>,
         cx: &mut Context<Self>,
     ) {
+        self.play_tracks_from(tracks, start, shuffle, None, cx);
+    }
+
+    /// [`PlayerModel::play_tracks`] saying where the tracks come from (the queue header names
+    /// it); `None` is a queue with no place of its own.
+    pub fn play_tracks_from(
+        &mut self,
+        tracks: Vec<Track>,
+        start: Option<usize>,
+        shuffle: Option<bool>,
+        source: Option<QueueSource>,
+        cx: &mut Context<Self>,
+    ) {
         if tracks.is_empty() || self.driver.is_none() {
             return;
         }
@@ -918,6 +946,7 @@ impl PlayerModel {
             });
         }
         self.handle(Event::PlayContext { tracks, start }, cx);
+        self.edit_queue(cx, |q| q.set_source(source));
         self.prefetch_upcoming();
     }
 
@@ -1332,6 +1361,12 @@ impl PlayerModel {
         if !self.autoplay || queue.repeat() == Repeat::All || queue_tail(queue) != Some(seed) {
             return;
         }
+        let seed_title = queue
+            .upcoming()
+            .last()
+            .or_else(|| queue.current())
+            .map(|e| e.track.title.clone())
+            .unwrap_or_default();
         let mut known: HashSet<String> = queue
             .history()
             .iter()
@@ -1354,7 +1389,7 @@ impl PlayerModel {
             return;
         }
         self.edit_queue(cx, |q| {
-            q.append_radio(tracks);
+            q.append_autoplay(tracks, &seed_title);
         });
         self.prefetch_upcoming();
     }
@@ -1546,6 +1581,11 @@ impl PlayerModel {
             history: q.history().iter().map(queue_row).collect(),
             current: q.current().map(queue_row),
             upcoming: q.upcoming().map(queue_row).collect(),
+            heading: q.heading().map(|h| match h {
+                Heading::Source(s) => QueueHeading::Source(s.clone()),
+                Heading::Autoplay(seed) => QueueHeading::Autoplay(seed.to_owned()),
+                Heading::Yours => QueueHeading::Yours,
+            }),
         }
     }
 
@@ -1616,6 +1656,13 @@ fn queue_fingerprint(queue: &Queue) -> u64 {
         e.id.get().hash(&mut h);
     }
     (queue.shuffle(), queue.repeat() as u8).hash(&mut h);
+    // The header's place is saved with the queue, so a new place alone is a change.
+    match queue.heading() {
+        None => 0u8.hash(&mut h),
+        Some(Heading::Yours) => 1u8.hash(&mut h),
+        Some(Heading::Autoplay(seed)) => (2u8, seed).hash(&mut h),
+        Some(Heading::Source(s)) => (3u8, &s.name, &s.target, s.kind as u8).hash(&mut h),
+    }
     h.finish()
 }
 

@@ -358,6 +358,13 @@ fn start_radio_plays_the_song_and_the_radio_replaces_what_was_up_next(cx: &mut T
     assert!(!up.contains(&"Queued One".to_owned()), "the old up-next is gone");
     assert!(!up.contains(&"Found One".to_owned()), "the seed is not repeated");
     assert_eq!(notice(&page, vcx), None, "success is silence");
+    let heading = page.player.read_with(vcx, |m, _| m.queue_view().heading);
+    match heading {
+        Some(apollo_app::player::QueueHeading::Source(source)) => {
+            assert_eq!(source.label(), "Found One radio")
+        }
+        other => panic!("expected the radio as the source, got {other:?}"),
+    }
 }
 
 #[gpui::test]
