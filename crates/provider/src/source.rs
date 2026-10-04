@@ -9,11 +9,11 @@ use tokio::sync::Notify;
 use crate::artist::{page_from_artist, ArtistPage};
 use crate::home::{home_page, HomePage};
 use crate::map::{
-    account_validation, classify, classify_write, collections_from_grid, liked_from_rating,
-    page_from_album, page_from_continuation, page_from_playlist, target_from_option, track_from_song,
-    ListedTrack,
+    account_validation, classify, classify_write, collections_from_grid, history_days,
+    liked_from_rating, page_from_album, page_from_continuation, page_from_playlist, target_from_option, track_from_song,
+    HistoryDay, ListedTrack,
 };
-use crate::search::{search_results, SearchResults};
+use crate::search::{hit_from_item, search_results, Hit, SearchResults};
 
 /// Network-backed metadata source. Every call is authenticated: there is no guest mode, and a
 /// rejected session is reported to the caller instead of being retried or healed here.
@@ -102,6 +102,31 @@ impl InnerTubeSource {
             .await
             .map_err(|e| classify(&e))?;
         Ok(collections_from_grid(&cards, CollectionKind::Album))
+    }
+
+    /// The artists behind the songs and albums in the account's library (the Library's Artists
+    /// tab), in the service's order. A card with no id or title is dropped.
+    pub async fn library_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        let cards = self
+            .tube
+            .library_artists(&self.client)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(cards
+            .iter()
+            .filter(|c| c.kind == "artist")
+            .filter_map(hit_from_item)
+            .collect())
+    }
+
+    /// The play history in YouTube Music's own date buckets (the Library's History tab).
+    pub async fn history(&self) -> Result<Vec<HistoryDay>, LoadFailure> {
+        let groups = self
+            .tube
+            .history(&self.client)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(history_days(&groups))
     }
 
     /// First page of a playlist (`VL…`) or any page that lists tracks. A bare playlist id

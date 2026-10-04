@@ -15,7 +15,7 @@ use crate::lyrics::SimLyrics;
 use crate::player::PlayerModel;
 use crate::search::Unavailable;
 use crate::settings::{
-    AutoplayStore, GaplessStore, LyricsOpenStore, NormalizeStore, QueueStore, SettingsBackend,
+    AutoplayStore, GaplessStore, LibrarySortStore, LyricsOpenStore, NormalizeStore, QueueStore, SettingsBackend,
     SettingsModel, SqliteSettings, VolumeStore,
 };
 use crate::ui::shell::{self, Quit, Shell};
@@ -52,6 +52,7 @@ struct Stores {
     gapless: Option<Arc<dyn GaplessStore>>,
     queue: Option<Arc<dyn QueueStore>>,
     lyrics_open: Option<Arc<dyn LyricsOpenStore>>,
+    library_sort: Option<Arc<dyn LibrarySortStore>>,
     /// The store's file, where the lyrics cache keeps its rows too.
     db_path: Option<std::path::PathBuf>,
 }
@@ -65,6 +66,7 @@ impl Stores {
                 normalize: Some(db.clone()),
                 gapless: Some(db.clone()),
                 lyrics_open: Some(db.clone()),
+                library_sort: Some(db.clone()),
                 db_path: Some(db.path().to_path_buf()),
                 queue: Some(db),
             },
@@ -125,7 +127,8 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     );
     let lyrics = lyrics_service(&mode, stores.db_path.clone());
     let _ = window.update(cx, |shell, _, cx| {
-        shell.install_lyrics(lyrics, stores.lyrics_open.clone(), cx)
+        shell.install_lyrics(lyrics, stores.lyrics_open.clone(), cx);
+        shell.install_library_sort(stores.library_sort.clone(), cx);
     });
     // Media keys and the SMTC overlay, on the window just opened.
     #[cfg(windows)]
