@@ -4,6 +4,7 @@
 
 pub mod browse;
 pub mod edits;
+pub mod filter;
 pub mod model;
 pub mod sim;
 pub mod source;

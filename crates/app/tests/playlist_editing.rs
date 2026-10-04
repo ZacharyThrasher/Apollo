@@ -1100,3 +1100,62 @@ fn a_playlist_that_is_not_yours_has_no_edit_item_and_its_dialog_never_asks_the_p
         "only the name is offered for what the account does not own"
     );
 }
+
+
+// ---- the description on the playlist page ----------------------------------------------------------
+
+/// A playlist of somebody else's that carries a description in the simulation.
+const DESCRIBED: &str = "Mix 020";
+
+fn shown_description(vcx: &mut VisualTestContext) -> bool {
+    vcx.debug_bounds("detail-description").is_some()
+}
+
+#[gpui::test]
+fn a_playlist_without_a_description_shows_none(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_playlist(&page, vcx, ROAD_TRIP);
+    assert!(!shown_description(vcx));
+}
+
+#[gpui::test]
+fn another_persons_description_is_shown_and_clicking_it_does_nothing(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_playlist(&page, vcx, DESCRIBED);
+    assert!(shown_description(vcx), "the blurb the service sent is on the page");
+    let at = bounds(vcx, "detail-description").center();
+    vcx.simulate_click(at, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(!dialog_open(&page, vcx), "it is not theirs to edit");
+}
+
+#[gpui::test]
+fn a_description_set_in_the_dialog_appears_under_the_title_and_a_click_reopens_the_dialog(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    open_playlist(&page, vcx, ROAD_TRIP);
+    choose_from_header(&page, vcx);
+    set_description(&page, vcx, "Songs for the road");
+    submit(&page, vcx);
+    assert!(!dialog_open(&page, vcx));
+    assert!(shown_description(vcx), "the open page follows the edit");
+
+    let at = bounds(vcx, "detail-description").center();
+    vcx.simulate_click(at, Modifiers::none());
+    vcx.run_until_parked();
+    assert!(dialog_open(&page, vcx), "a click on your own description edits it");
+    assert!(matches!(dialog_mode(&page, vcx), Some(Mode::Edit(_))));
+    assert_eq!(description(&page, vcx), "Songs for the road");
+
+    // Clearing it takes it off the page again.
+    set_description(&page, vcx, "");
+    submit(&page, vcx);
+    assert!(!shown_description(vcx));
+}
+
+fn choose_from_header(page: &Page, vcx: &mut VisualTestContext) {
+    let more = bounds(vcx, "detail-more").center();
+    right_click(vcx, point(more.x - gpui::px(300.0), more.y));
+    choose(page, vcx, Command::EditPlaylist);
+}

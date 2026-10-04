@@ -1135,7 +1135,11 @@ impl LibrarySource for SimLibrary {
                 let owned = owned_ids(&state).contains(&key);
                 PageMeta {
                     owned,
-                    description: owned.then(|| state.descriptions.get(&key).cloned()).flatten(),
+                    description: state
+                        .descriptions
+                        .get(&key)
+                        .cloned()
+                        .or_else(|| (!owned).then(|| foreign_description(&key)).flatten()),
                     privacy: owned
                         .then(|| state.privacies.get(&key).copied().unwrap_or_default()),
                     save_id: Some(key),
@@ -1704,6 +1708,17 @@ fn owned_list(state: &SimState) -> Vec<(String, String)> {
             (id, t)
         })
         .collect()
+}
+
+/// The blurb a playlist of somebody else's carries; only one of them has any.
+pub const FOREIGN_DESCRIBED_ID: &str = "VLPLsimmix020";
+
+fn foreign_description(key: &str) -> Option<String> {
+    (key == FOREIGN_DESCRIBED_ID.trim_start_matches("VL")).then(|| {
+        "Slow mornings, long drives and a few songs that never get old. Built over about three \
+         years by someone who could not stop adding to it, and updated whenever something fits."
+            .to_owned()
+    })
 }
 
 fn owned_ids(state: &SimState) -> Vec<String> {
