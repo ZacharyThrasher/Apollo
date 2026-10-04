@@ -9,6 +9,7 @@ use innertube::{Clients, InnerTube, Rating, Session, YouTubeClient, METADATA_CLI
 use tokio::sync::Notify;
 
 use crate::artist::{page_from_artist, ArtistPage};
+use crate::explore::{explore_page, mood_playlists, worst, ExplorePage};
 use crate::home::{home_page, HomePage};
 use crate::map::{
     account_validation, classify, classify_write, collections_from_grid, history_days,
@@ -195,6 +196,53 @@ impl InnerTubeSource {
         home_page(&parsed)
     }
 
+    /// Explore: new releases, the song chart, chart shelves and the mood tiles. The four answers
+    /// it is made of are asked for together and any of them may fail or be refused (some are
+    /// not offered to every account or country); the page shows what came back. It fails only
+    /// when nothing could be shown, naming the worst failure, and a rejected session fails it
+    /// at once.
+    pub async fn explore(&self) -> Result<ExplorePage, LoadFailure> {
+        let (explore, charts, releases, moods) = tokio::join!(
+            self.tube.explore(&self.client),
+            self.tube.charts(&self.client),
+            self.tube.new_releases(&self.client),
+            self.tube.moods(&self.client),
+        );
+        let failures: Vec<LoadFailure> = [
+            explore.as_ref().err(),
+            charts.as_ref().err(),
+            releases.as_ref().err(),
+            moods.as_ref().err(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(classify)
+        .collect();
+        if failures.contains(&LoadFailure::Session) {
+            return Err(LoadFailure::Session);
+        }
+        let page = explore_page(
+            explore.as_ref().ok(),
+            charts.as_ref().ok(),
+            releases.as_deref().ok(),
+            moods.as_deref().ok(),
+        );
+        match worst(failures) {
+            Some(failure) if page.is_empty() => Err(failure),
+            _ => Ok(page),
+        }
+    }
+
+    /// The playlists of one mood or genre tile (`params` from the Explore page's tiles).
+    pub async fn mood_playlists(&self, params: &str) -> Result<Vec<Collection>, LoadFailure> {
+        let cards = self
+            .tube
+            .mood_playlists(&self.client, params)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(mood_playlists(&cards))
+    }
+
     pub async fn continuation(&self, token: &str) -> Result<Page<ListedTrack>, LoadFailure> {
         let page = self
             .tube
@@ -369,6 +417,32 @@ impl InnerTubeSource {
             }
         }
         Ok(radio_tracks(&next.items, video_id))
+    }
+
+    /// The tracks of a radio or mix playlist that has no seed song (`RDEM…` an artist's radio,
+    /// `RDAO…` its shuffle mix), as the `next` panel lists them. Repeats and unplayable rows are
+    /// left out.
+    pub async fn mix(&self, playlist_id: &str) -> Result<Vec<ListedTrack>, LoadFailure> {
+        let next = self
+            .tube
+            .next(&self.client, None, Some(playlist_id))
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(radio_tracks(&next.items, ""))
+    }
+
+    /// Subscribe to or unsubscribe from an artist's channel (`UC…`) as the signed-in account.
+    /// Sent once: a failure that says [`WriteFailure::outcome_unknown`] means the account may or
+    /// may not have changed, and the caller reads the artist page back to find out.
+    pub async fn set_subscribed(
+        &self,
+        channel_id: &str,
+        subscribed: bool,
+    ) -> Result<(), WriteFailure> {
+        self.tube
+            .subscribe(&self.client, channel_id, subscribed)
+            .await
+            .map_err(|e| classify_write(&e))
     }
 
     /// The playlists the account can add `video_id` to, each flagged when it already holds it.

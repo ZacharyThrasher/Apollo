@@ -522,8 +522,9 @@ fn enter_on_an_artist_pages_card_opens_it_instead_of_playing_the_selected_song(
         vcx,
         &format!("{}Neon Arcade", sim::SEARCH_ARTIST_PREFIX),
     );
-    // The list holds focus and has a song selected; the next tab stop is the first album card.
-    vcx.simulate_keystrokes("down tab enter");
+    // The list holds focus and has a song selected; the next tab stop is "Show all" on the Top
+    // songs heading, then the first album card.
+    vcx.simulate_keystrokes("down tab tab enter");
     vcx.run_until_parked();
     page.model.read_with(vcx, |m, _| {
         assert_eq!(m.depth(), 2, "a card opened a page over the artist");

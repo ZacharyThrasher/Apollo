@@ -28,7 +28,7 @@ Segoe UI Variable (Display optical size at >=20px, Text below); fallback Segoe U
 
 ## Layout
 Title bar: custom, Mica, 32px drag region, native-style caption buttons.
-Nav rail (left): 64px icons-only collapsed / 220px expanded; Home, Search, Library; tooltips when collapsed.
+Nav rail (left): 64px icons-only collapsed / 220px expanded; Home, Explore, Search, Library; tooltips when collapsed.
 Main content: scrollable; page title 28px, sections 20px.
 Player bar (bottom): 80px on bg.raised. Left: 56px art + title/artist. Center: shuffle, previous, play/pause (40px accent circle), next, repeat; progress bar below with times in text.tertiary. Right: volume, queue toggle.
 Queue: right panel 320px, toggled from player bar, slides in 200 ms.
@@ -133,6 +133,14 @@ Applied to the lyrics pane (`ui/lyrics_pane.rs`, `lyrics.rs`) and the Lyrics but
 5. **States:** no lyrics is a single centred "No lyrics" in text.secondary (same type as the lines); loading is the shared skeleton pulse (six bars the height of a line, starting at the third). Nothing else is explained.
 6. **Data:** LRCLIB only (`/api/get`, then `/api/search` within 2 s of the track's length), synced preferred, plain as the fallback. Looked up when a track becomes current and for the track after it; answers, including "not found", are cached in SQLite by video id (a "not found" is believed for a week).
 
+## Artist page decisions (coordinator brief, 2026-10-04)
+Applied to the artist page (`ui/library/artist.rs`); it replaces the artist-page parts of "Album, artist and playlist decisions" 1, 3 and 4.
+1. **Header:** the artist's picture as a wide banner, the service's own crop, centre-cropped to its frame: the page's width by 280px, 8px radius, scrolling with the page. It fades to bg.base (opaque, so the picture never shows through the Mica alpha) over its lower two thirds, with the name over it at 32px semibold (`typography::ARTIST_NAME`), 24px from the left and bottom. No blur: the ambient blur stays in Now Playing. While the page loads the banner is the skeleton color and the name is the one the card carried.
+2. **Button row,** 16px under the banner, 8px apart, all 32px high: Play (filled with the accent, label in accent.fg), Shuffle and Radio (outlined, `border.strong`, label in text.primary) and Subscribe, an outlined toggle that reads "Subscribed" with the selected tint when on. Subscribe keeps one width for both labels. Shuffle plays the artist's own shuffle mix (the header's Shuffle button) and falls back to the top songs; Radio plays the artist's radio from its first track; Play plays the top songs. Radio and Shuffle show the in-button spinner while their tracks load. A failed radio raises "Couldn't start radio"; a failed Subscribe is put back with "Couldn't subscribe" or "Couldn't unsubscribe" (the usual error toast).
+3. **Sections, in order:** "Top songs" (the page's rows, with a "Show all" text button at the right of the heading when the service has a page of every top song; it opens that playlist over the artist), then a sideways shelf of cards for each of the service's album, single and playlist rows under its own title, then "Fans also like" as a shelf of round artist cards (name only), then "About". Shelves scroll with the wheel or a swipe; every card is a tab stop and keyboard focus scrolls its shelf. No music-video sections.
+4. **About:** the bio in body text.primary, clamped to 3 lines and 720px wide, opened and closed by clicking it (Enter when focused); under it one line in text.secondary with the subscriber count and, when the service gives one, the monthly listeners, joined by " · ".
+5. **Subscribe is a write to the account:** the button flips at once, the request is sent once, and an unknown outcome (a timeout, a dropped connection, an unreadable reply) is settled by reading the artist page back, never by sending it again. Presses are ignored while one is out, and an answer for a page closed since (an account change closes them all) is dropped.
+
 ## Search decisions (coordinator brief, 2026-10-04)
 Applied to the popover under the Search field (`ui/search_popover.rs`) and `search.rs`.
 1. **Popover:** one anchored popover hangs under the field, as wide as the field, styled like the track menu (bg.overlay, 8px radius, border.subtle, 4px padding, 32px rows with a 16px Fluent search icon in text.secondary). Up to 8 rows. Up, Down, Enter and Esc work it; a click picks a row. No scrim, no helper text.
@@ -150,6 +158,16 @@ Applied to the Search page (`ui/search_page.rs`, `ui/search_chips.rs`, `ui/top_r
 3. **Top result card:** art 96px (a circle for an artist), the name at 22px semibold, then "Song / Video / Album / Artist / Playlist \u2022 byline" in text.secondary, then a Play button (accent fill, accent.fg label, 32px pill). The art and text are one control (a song plays, anything else opens its page); Play plays a song, plays an album or playlist through, and plays the listed songs for an artist. Right-click opens the same menu as the cards.
 4. **Filtered lists:** Songs is the song rows, the other chips the card grid, with no heading. They page by scrolling: the next page is asked for within 600px of the end (or when the list does not fill the window), under it the shared skeleton pulse (3 rows, or one row of cards); a failed page is "Couldn't load more" with Retry. A page that adds nothing new ends the list.
 5. **No Settings rows** were added.
+
+## Explore decisions (coordinator brief, 2026-10-04)
+Applied to the Explore route (`ui/explore_page.rs`, `explore.rs`, provider `explore.rs`).
+1. **Nav:** "Explore" sits right after Home with the Fluent compass icon (filled when selected). Choosing it while on it closes an open mood page.
+2. **Page:** the "Explore" page title, then sections in this order, each hidden when the service sends nothing for it: "New releases", "Top songs", the other shelves (such as "Trending"), "Moods & genres". No subtitles, no country picker; the country is the account's own.
+3. **New releases and other shelves:** one horizontal row of the shared cards, 16px apart, with Home's hover chevrons; albums and singles open their page, and Back returns to Explore. One Tab stop per row; Left and Right walk it.
+4. **Top songs:** a numbered list of the compact song rows Home uses, 560px wide, rank in text.tertiary (tabular numerals) in a 32px column, twenty rows. "Show all" is a text button under the list: it opens the chart's own playlist page when the service names one, else it opens the rest of the list in place. One Tab stop; Up and Down walk it. Clicking a row plays it with the whole chart as the queue.
+5. **Moods & genres:** one wrapping grid of 32px-high pills on bg.raised (full radius, 16px side padding, body label in text.primary, 12px apart, the hover tint fading over 120 ms). One Tab stop; Left and Right walk it. A pill opens a page titled with the mood: Back button, the mood in the page-title style, then the playlists as the shared cards in a wrapping grid. Esc and Alt+Left go back to the pills, scrolled to where they were. Opening a playlist from there and pressing Back returns to the mood page.
+6. **States:** the shared skeleton while loading, "Couldn't load Explore" or "Couldn't load playlists" with Retry, "Nothing to show" with Retry (or Back on a mood page); signed out offers the primary Sign in button. The page loads when first opened (not at startup), is kept for the session and refreshes in the background after 10 minutes. A different account drops it.
+7. **What the service sends varies:** Explore is built from four answers (explore, charts, new albums and singles, moods) and shows whatever came back. Podcasts and music-video shelves are left out (Apollo plays audio). No new Settings row.
 
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.
