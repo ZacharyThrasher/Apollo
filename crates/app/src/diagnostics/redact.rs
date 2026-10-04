@@ -57,7 +57,9 @@ fn patterns() -> &'static Patterns {
             netscape: re(r"(?m)^(?:#HttpOnly_)?\.?[A-Za-z0-9.-]+\t(?:TRUE|FALSE)\t[^\t\r\n]*\t(?:TRUE|FALSE)\t\d+\t[^\t\r\n]+\t[^\r\n]*$"),
             // Header lines: the whole value goes.
             header: re(r"(?i)\b(cookie|set-cookie|authorization|proxy-authorization|x-goog-[a-z0-9-]+|x-youtube-[a-z0-9-]+)\s*[:=][ \t]*[^\r\n]*"),
-            scheme_token: re(r"(?i)\b(SAPISIDHASH|SAPISID1PHASH|SAPISID3PHASH|Bearer|Basic)\s+[A-Za-z0-9._~+/=_-]+(?:\s+[A-Za-z0-9._~+/=_-]{16,})*"),
+            // Authorization schemes. Bearer and Basic need a token-sized value after them, so the
+            // ordinary words "basic" and "bearer" in a message are left alone.
+            scheme_token: re(r"(?i)\b(SAPISIDHASH|SAPISID1PHASH|SAPISID3PHASH)\s+[A-Za-z0-9._~+/=_-]+(?:\s+[A-Za-z0-9._~+/=_-]{16,})*|\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=_-]{12,}"),
             cookie_secure: re(r"(?i)\b(__Secure-[A-Za-z0-9_-]+|__Host-[A-Za-z0-9_-]+)\s*=\s*[^;\s,]*"),
             cookie_named: re(&format!(r"\b({COOKIE_NAMES})\s*=\s*[^;\s,&]+")),
             // "access_token": "abc" and friends.
@@ -288,6 +290,23 @@ mod tests {
         }
         assert!(out.contains("GET /youtubei/v1/browse"));
         assert!(out.contains("Cookie: [redacted]"));
+    }
+
+    #[test]
+    fn ordinary_words_that_are_also_auth_schemes_are_left_alone() {
+        let text = "basic settings loaded; bearer of news";
+        assert_eq!(scrub(text), text);
+        let out = scrub("sent Bearer ya29.a0AfH6SMBsecret and Basic dXNlcjpwYXNzd29yZA==");
+        assert!(!out.contains("ya29") && !out.contains("dXNlcjpw"), "{out}");
+    }
+
+    #[test]
+    fn visitor_data_is_removed_in_any_spelling() {
+        let out = scrub("visitorData=CgtWaXNpdG9yMTIz&visitor_id=abc123def456 visitor=zz9plural");
+        assert!(
+            !out.contains("CgtWaXNp") && !out.contains("abc123def") && !out.contains("zz9plural"),
+            "{out}"
+        );
     }
 
     #[test]
