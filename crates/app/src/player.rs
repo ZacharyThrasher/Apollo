@@ -631,6 +631,11 @@ impl PlayerModel {
         }
     }
 
+    /// The https URL of a track's artwork, for surfaces that cannot take pixels.
+    pub fn art_url(&self, video_id: &str) -> Option<String> {
+        self.art_source.as_ref()?.url(video_id)
+    }
+
     /// Replace the queue with `tracks` and start playing. `start` is the first track's index
     /// (default: the first, or a random one when shuffling); `shuffle` sets the queue's shuffle
     /// on or off, `None` keeping the current setting.
@@ -745,6 +750,16 @@ impl PlayerModel {
             let volume = self.volume;
             std::thread::spawn(move || store.save(volume));
         }
+    }
+
+    /// A volume key: `delta` percent louder or quieter, saved at once. Louder while muted
+    /// unmutes at the stepped level; quieter while muted changes nothing.
+    pub fn nudge_volume(&mut self, delta: i8, cx: &mut Context<Self>) {
+        if self.muted && delta < 0 {
+            return;
+        }
+        self.set_volume(self.volume.saturating_add_signed(delta), cx);
+        self.save_volume();
     }
 
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {

@@ -1,5 +1,5 @@
 //! Settings: one scrolling column of sections. Account first (its own page), then the sections
-//! of switches built from [`SettingsSection`] and [`SettingsRow`]: Playback, then Window.
+//! of switches built from [`SettingsSection`] and [`SettingsRow`]: Playback, Window, Discord, then Keyboard.
 
 use apollo_theme::tokens::spacing;
 use gpui::{
@@ -9,7 +9,10 @@ use gpui::{
 
 use crate::autostart;
 use crate::player::PlayerModel;
-use crate::settings::{BoolSetting, SettingsModel, CLOSE_TO_TRAY, START_MINIMIZED_TO_TRAY};
+use crate::settings::{
+    BoolSetting, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS,
+    START_MINIMIZED_TO_TRAY,
+};
 use crate::ui::account_page::{self, AccountPage};
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::settings_row::{SettingsRow, SettingsSection};
@@ -85,7 +88,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(3, cx);
+        let h = self.handles(5, cx);
 
         let mut window_section = SettingsSection::new("Window")
             .row(self.bool_row(
@@ -125,6 +128,24 @@ impl Render for SettingsPage {
             );
         }
 
+        let discord_section = SettingsSection::new("Discord").row(self.bool_row(
+            "setting-discord-presence",
+            "Show what I'm playing",
+            &DISCORD_PRESENCE,
+            &h[3],
+            accent,
+            cx,
+        ));
+
+        let keyboard_section = SettingsSection::new("Keyboard").row(self.bool_row(
+            "setting-global-hotkeys",
+            "Global hotkeys",
+            &GLOBAL_HOTKEYS,
+            &h[4],
+            accent,
+            cx,
+        ));
+
         div()
             .id("settings-page")
             .flex()
@@ -137,5 +158,7 @@ impl Render for SettingsPage {
             .child(self.account_page.clone())
             .child(self.playback_page.clone())
             .child(window_section)
+            .child(discord_section)
+            .child(keyboard_section)
     }
 }

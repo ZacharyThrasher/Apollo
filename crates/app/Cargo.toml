@@ -45,6 +45,7 @@ apollo-theme = { path = "../theme" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f37989fbdf840b308892af66516c2b9c3ef3853a" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f37989fbdf840b308892af66516c2b9c3ef3853a" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+serde_json = "1"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "time", "net"] }
 unicode-segmentation = "1"
 ureq = { version = "3", optional = true }
@@ -57,6 +58,8 @@ apollo-resolver = { path = "../resolver", optional = true }
 raw-window-handle = "0.6"
 souvlaki = { version = "=0.8.3", default-features = false }
 tray-icon = "0.26"
+# System-wide hotkeys (RegisterHotKey) on GPUI's own message loop, like the tray icon.
+global-hotkey = "0.8"
 
 # Core Audio (default output device, other apps' audio sessions) and the suspend/resume notice
 # for pc_watch_win.rs. Same version as GPUI's own `windows`, so no extra copy.
