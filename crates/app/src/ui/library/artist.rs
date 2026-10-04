@@ -564,6 +564,7 @@ impl LibraryView {
                 .id("artist-bio")
                 .debug_selector(|| "artist-bio".into())
                 .relative()
+                .w_full()
                 .max_w(px(BIO_MAX_WIDTH))
                 .rounded(px(radius::SMALL))
                 .cursor_pointer()
@@ -583,7 +584,11 @@ impl LibraryView {
                     style::text_style(div(), typography::BODY, cx)
                         .text_color(color::text_primary())
                         .when(!bio_open, |d| d.line_clamp(BIO_LINES))
-                        .child(SharedString::from(text)),
+                        .child(SharedString::from(if bio_open {
+                            text
+                        } else {
+                            one_paragraph(&text)
+                        })),
                 )
                 .when(ring, |d| d.child(focus_ring(ring_color, radius::SMALL)))
         });
@@ -604,6 +609,28 @@ impl LibraryView {
                 })
                 .into_any_element(),
         )
+    }
+}
+
+/// The bio as one paragraph. GPUI's line clamp counts wrapped lines inside a paragraph only: the
+/// paragraphs after the first (the service's bios have several, and a "From Wikipedia" credit) are
+/// drawn whole, unwrapped and cut off at the edge, so the clamped bio flattens its line breaks.
+fn one_paragraph(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::one_paragraph;
+
+    #[test]
+    fn a_clamped_bio_is_a_single_paragraph() {
+        assert_eq!(
+            one_paragraph("First paragraph.\nSecond one.\n\nFrom Wikipedia (https://x)"),
+            "First paragraph. Second one. From Wikipedia (https://x)"
+        );
+        assert_eq!(one_paragraph("  already   one line "), "already one line");
+        assert_eq!(one_paragraph(""), "");
     }
 }
 

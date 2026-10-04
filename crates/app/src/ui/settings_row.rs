@@ -236,18 +236,29 @@ impl RenderOnce for SettingsRow {
                     .child(self.label),
             )
             .when(!is_select, |d| {
-                d.children(self.action.map(|control| {
-                    // The control's own clicks stay its own: stopped here, the row never sees
-                    // the press and so does not flip.
+                // The control sits beside the switch, both at the row's right end: with the row
+                // spreading three children apart, the control landed in the middle of the row
+                // (and the row's own click, aimed at its centre, landed on the control).
+                d.child(
                     div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
                         .flex_none()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(control)
-                }))
-                .child(
-                    div()
-                        .debug_selector(|| format!("{}-switch", id))
-                        .child(switch::pill(on, true, self.accent)),
+                        .gap(px(spacing::S4))
+                        .children(self.action.map(|control| {
+                            // The control's own clicks stay its own: stopped here, the row
+                            // never sees the press and so does not flip.
+                            div()
+                                .flex_none()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(control)
+                        }))
+                        .child(
+                            div()
+                                .debug_selector(|| format!("{}-switch", id))
+                                .child(switch::pill(on, true, self.accent)),
+                        ),
                 )
             })
             .when_some(value, |d, value| {

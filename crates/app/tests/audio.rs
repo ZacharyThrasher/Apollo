@@ -26,7 +26,7 @@ use apollo_domain::playback::{LeaseId, LoadId};
 use apollo_provider::SearchResults;
 use apollo_runtime::mock::{MockEngine, MockResolver};
 use apollo_runtime::MediaEngine;
-use gpui::{AppContext, Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
+use gpui::{px, AppContext, Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
 
 struct NoArt;
 impl ArtSource for NoArt {
@@ -319,6 +319,28 @@ fn settings_has_an_audio_section_with_the_device_and_the_equalizer(cx: &mut Test
     let playback = bounds(vcx, "setting-gapless-playback");
     assert!(playback.top() < device.top(), "Audio comes after Playback");
     assert!(!on_screen(vcx, "equalizer-panel"), "the editor is closed");
+}
+
+#[gpui::test]
+fn the_equalizer_edit_button_sits_beside_its_switch_not_in_the_middle_of_the_row(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx, &[]);
+    settings_page(&page, vcx);
+    let row = bounds(vcx, "setting-equalizer");
+    let edit = bounds(vcx, "setting-equalizer-edit");
+    let switch = bounds(vcx, "setting-equalizer-switch");
+    assert!(edit.right() <= switch.left(), "Edit is left of the switch");
+    assert!(
+        switch.left() - edit.right() <= px(24.0),
+        "and right beside it, not spread across the row"
+    );
+    assert!(
+        edit.left() > row.left() + row.size.width * 0.6,
+        "at the row's right end"
+    );
+    // The row's own click is aimed at its centre: that must not be the Edit button.
+    assert!(!edit.contains(&row.center()), "the centre of the row is not Edit");
 }
 
 #[gpui::test]
