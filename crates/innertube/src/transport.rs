@@ -295,6 +295,30 @@ impl InnerTube {
         body: &B,
         set_login: bool,
     ) -> Result<serde_json::Value, Error> {
+        self.send(path, client, body, set_login, true).await
+    }
+
+    /// [`Self::post`] that sends the request exactly once. For a write whose outcome the caller
+    /// reads back itself: a timeout or a dropped connection may mean the service applied it, and a
+    /// silent second attempt would hide that.
+    pub async fn post_once<B: Serialize>(
+        &self,
+        path: &str,
+        client: &YouTubeClient,
+        body: &B,
+        set_login: bool,
+    ) -> Result<serde_json::Value, Error> {
+        self.send(path, client, body, set_login, false).await
+    }
+
+    async fn send<B: Serialize>(
+        &self,
+        path: &str,
+        client: &YouTubeClient,
+        body: &B,
+        set_login: bool,
+        retry: bool,
+    ) -> Result<serde_json::Value, Error> {
         // `path` may already carry query params (e.g. browse continuations); chain accordingly.
         let sep = if path.contains('?') { '&' } else { '?' };
         let url = format!("{BASE_URL}{path}{sep}prettyPrint=false");
@@ -322,7 +346,7 @@ impl InnerTube {
                     return Ok(resp.json().await?);
                 }
                 // Retry only on connect/timeout (transient).
-                Err(e) if attempt < 3 && (e.is_timeout() || e.is_connect() || e.is_request()) => {
+                Err(e) if retry && attempt < 3 && (e.is_timeout() || e.is_connect() || e.is_request()) => {
                     tracing::warn!(attempt, error = %e.without_url(), "retrying InnerTube POST {path}");
                     tokio::time::sleep(delay).await;
                     delay *= 2;
