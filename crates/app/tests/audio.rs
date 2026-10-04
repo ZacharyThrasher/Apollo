@@ -455,6 +455,8 @@ fn a_preset_sets_the_curve_turns_the_equalizer_on_and_is_saved(cx: &mut TestAppC
 #[gpui::test]
 fn dragging_a_slider_moves_the_sound_live_and_saves_when_let_go(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx, &[]);
+    // Tall enough that the editor is on screen however many sections Settings has above it.
+    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(1800.0)));
     settings_page(&page, vcx);
     click(vcx, "setting-equalizer-edit");
 
