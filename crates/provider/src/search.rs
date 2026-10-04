@@ -23,8 +23,20 @@ pub struct Hit {
     pub explicit: bool,
 }
 
+/// The best match for a query: the card the service leads its unfiltered answer with. Its row
+/// is also first in its own group, so `songs`, `albums`, `artists` and `playlists` stay complete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TopResult {
+    Song(ListedTrack),
+    Album(Hit),
+    Artist(Hit),
+    Playlist(Hit),
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchResults {
+    /// `None` on a filtered page and when the service named no best match.
+    pub top: Option<TopResult>,
     pub songs: Vec<ListedTrack>,
     pub albums: Vec<Hit>,
     pub artists: Vec<Hit>,
@@ -43,21 +55,87 @@ impl SearchResults {
             && self.playlists.is_empty()
     }
 
-    /// The same results without the songs that are music videos.
+    /// The same results without the songs that are music videos (a top result that is one
+    /// goes too).
     pub fn without_videos(&self) -> SearchResults {
         let mut out = self.clone();
         out.songs
             .retain(|s| !self.video_ids.contains(s.track.video_id.as_str()));
+        if matches!(&out.top, Some(TopResult::Song(s)) if self.video_ids.contains(s.track.video_id.as_str()))
+        {
+            out.top = None;
+        }
         out
+    }
+
+    /// Add what a later page of the same list found, keeping the first copy of any repeat
+    /// (the service sometimes carries a row over a page boundary).
+    pub fn append(&mut self, more: SearchResults) {
+        for song in more.songs {
+            if !self
+                .songs
+                .iter()
+                .any(|s| s.track.video_id == song.track.video_id)
+            {
+                self.songs.push(song);
+            }
+        }
+        for (list, extra) in [
+            (&mut self.albums, more.albums),
+            (&mut self.artists, more.artists),
+            (&mut self.playlists, more.playlists),
+        ] {
+            for hit in extra {
+                if !list.iter().any(|h| h.id == hit.id) {
+                    list.push(hit);
+                }
+            }
+        }
+        self.skipped = self.skipped.saturating_add(more.skipped);
+        self.video_ids.extend(more.video_ids);
+    }
+}
+
+/// What a filtered search lists: one kind of result, paged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SearchFilter {
+    Songs,
+    Albums,
+    Artists,
+    Playlists,
+    CommunityPlaylists,
+}
+
+impl SearchFilter {
+    pub(crate) fn params(self) -> &'static str {
+        match self {
+            SearchFilter::Songs => innertube::endpoints::FILTER_SONG,
+            SearchFilter::Albums => innertube::endpoints::FILTER_ALBUM,
+            SearchFilter::Artists => innertube::endpoints::FILTER_ARTIST,
+            SearchFilter::Playlists => innertube::endpoints::FILTER_FEATURED_PLAYLIST,
+            SearchFilter::CommunityPlaylists => innertube::endpoints::FILTER_COMMUNITY_PLAYLIST,
+        }
+    }
+}
+
+/// One page of a filtered search and the token for the next, `None` on the last page.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchPage {
+    pub results: SearchResults,
+    pub continuation: Option<String>,
+}
+
+/// Map a filtered page (or a continuation of one).
+pub fn search_page(parsed: &innertube::SearchPage) -> SearchPage {
+    SearchPage {
+        results: group(parsed.items.iter()),
+        continuation: parsed.continuation.clone(),
     }
 }
 
 /// Group a parsed search response. The "top result" card and its related rows come first in
 /// their own kind's group; a row that appears twice (card and list) is kept once.
 pub fn search_results(parsed: &innertube::SearchResults) -> SearchResults {
-    let mut out = SearchResults::default();
-    // `top` is first so the best match leads its group; `seen` makes the later flat row a no-op.
-    let mut seen: Vec<(&'static str, &str)> = Vec::new();
     let rows = [
         &parsed.top,
         &parsed.songs,
@@ -65,7 +143,23 @@ pub fn search_results(parsed: &innertube::SearchResults) -> SearchResults {
         &parsed.artists,
         &parsed.playlists,
     ];
-    for item in rows.into_iter().flatten() {
+    let mut out = group(rows.into_iter().flatten());
+    // The service's first card row is the best match; a card that could not be read is no match.
+    out.top = parsed.top.first().and_then(|item| match item.kind {
+        "song" => track_from_item(item).map(TopResult::Song),
+        "album" => hit_from_item(item).map(TopResult::Album),
+        "artist" => hit_from_item(item).map(TopResult::Artist),
+        "playlist" => hit_from_item(item).map(TopResult::Playlist),
+        _ => None,
+    });
+    out
+}
+
+fn group<'a>(items: impl Iterator<Item = &'a BrowseItem>) -> SearchResults {
+    let mut out = SearchResults::default();
+    // `seen` makes a later flat row that repeats an earlier one a no-op.
+    let mut seen: Vec<(&'static str, &str)> = Vec::new();
+    for item in items {
         if seen.contains(&(item.kind, item.id.as_str())) {
             continue;
         }

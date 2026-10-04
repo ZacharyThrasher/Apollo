@@ -282,3 +282,120 @@ fn hiding_music_videos_drops_only_the_songs_flagged_as_videos() {
     assert_eq!(ids, ["aaaaaaaaaaa", "ccccccccccc"]);
     assert_eq!(results.songs.len(), 3, "the original is untouched");
 }
+
+fn card(title: &str, kind_browse: &str) -> Value {
+    json!({ "musicCardShelfRenderer": {
+        "title": { "runs": [{ "text": title, "navigationEndpoint": { "browseEndpoint": { "browseId": kind_browse } } }] },
+        "subtitle": { "runs": [{ "text": "Album" }, { "text": " • " }, { "text": "Daft Punk" }, { "text": " • " }, { "text": "2001" }] },
+        "contents": []
+    } })
+}
+
+fn with_card(card: Value, rows: Vec<Value>) -> SearchResults {
+    let mut sections: Vec<Value> = vec![card];
+    sections.extend(
+        rows.into_iter()
+            .map(|r| json!({ "itemSectionRenderer": { "contents": [r] } })),
+    );
+    let root = json!({ "contents": { "tabbedSearchResultsRenderer": { "tabs": [{ "tabRenderer": { "content": {
+        "sectionListRenderer": { "contents": sections } } } }] } } });
+    search_results(&parse_search_all(&root))
+}
+
+#[test]
+fn the_cards_main_row_is_the_top_result_and_keeps_its_place_in_its_group() {
+    let r = with_card(
+        card("Discovery", "MPREb_disc"),
+        vec![row(
+            "One More Time",
+            &[("Song", None), (" • ", None), ("Daft Punk", Some("UCdaft"))],
+            None,
+            Some("aaaaaaaaaaa"),
+        )],
+    );
+    match &r.top {
+        Some(TopResult::Album(hit)) => {
+            assert_eq!(hit.title, "Discovery");
+            assert_eq!(hit.subtitle.as_deref(), Some("Daft Punk • 2001"));
+        }
+        other => panic!("an album card is an album top result, got {other:?}"),
+    }
+    assert_eq!(r.albums[0].title, "Discovery", "the group is still complete");
+    assert_eq!(r.songs.len(), 1);
+}
+
+#[test]
+fn no_card_means_no_top_result() {
+    let r = grouped(vec![row(
+        "Digital Love",
+        &[("Song", None)],
+        None,
+        Some("aaaaaaaaaaa"),
+    )]);
+    assert_eq!(r.top, None);
+}
+
+#[test]
+fn a_music_video_top_result_goes_with_the_hidden_videos() {
+    let mut r = SearchResults::default();
+    let song = |id: &str| ListedTrack {
+        track: apollo_domain::model::Track::new(id, "A Video"),
+        occurrence: None,
+        thumbnail: None,
+        explicit: false,
+        liked: None,
+    };
+    r.top = Some(TopResult::Song(song("video000001")));
+    r.songs = vec![song("video000001"), song("audio000001")];
+    r.video_ids.insert("video000001".into());
+    let hidden = r.without_videos();
+    assert_eq!(hidden.top, None);
+    assert_eq!(hidden.songs.len(), 1);
+    // A top result that is not a video stays.
+    r.top = Some(TopResult::Song(song("audio000001")));
+    assert!(r.without_videos().top.is_some());
+}
+
+fn page(rows: Vec<Value>, token: Option<&str>) -> SearchPage {
+    let mut shelf = json!({ "contents": rows });
+    if let Some(t) = token {
+        shelf["continuations"] = json!([{ "nextContinuationData": { "continuation": t } }]);
+    }
+    let root = json!({ "contents": { "tabbedSearchResultsRenderer": { "tabs": [{ "tabRenderer": { "content": {
+        "sectionListRenderer": { "contents": [{ "musicShelfRenderer": shelf }] } } } }] } } });
+    search_page(&innertube::models::browse::parse_search_page(&root))
+}
+
+#[test]
+fn a_filtered_page_maps_its_rows_and_carries_the_token() {
+    let song = |id: &str| row("A Song", &[("Daft Punk", Some("UCdaft")), (" • ", None), ("3:02", None)], None, Some(id));
+    let p = page(vec![song("aaaaaaaaaaa"), song("bbbbbbbbbbb")], Some("NEXT"));
+    assert_eq!(p.results.songs.len(), 2);
+    assert_eq!(p.results.top, None, "a filtered page has no top result");
+    assert_eq!(p.continuation.as_deref(), Some("NEXT"));
+    assert_eq!(page(vec![song("ccccccccccc")], None).continuation, None);
+}
+
+#[test]
+fn appending_a_page_keeps_one_copy_of_a_row_that_crossed_the_boundary() {
+    let song = |id: &str| row("A Song", &[("Daft Punk", Some("UCdaft"))], None, Some(id));
+    let album = |id: &str| row("An Album", &[("2001", None)], Some(id), None);
+    let mut first = page(vec![song("aaaaaaaaaaa"), album("MPREb_one")], Some("T1")).results;
+    let second = page(vec![song("aaaaaaaaaaa"), song("bbbbbbbbbbb"), album("MPREb_one"), album("MPREb_two")], None).results;
+    first.append(second);
+    assert_eq!(first.songs.len(), 2);
+    assert_eq!(first.albums.len(), 2);
+}
+
+#[test]
+fn every_filter_has_its_own_params() {
+    let all = [
+        SearchFilter::Songs,
+        SearchFilter::Albums,
+        SearchFilter::Artists,
+        SearchFilter::Playlists,
+        SearchFilter::CommunityPlaylists,
+    ];
+    let params: std::collections::BTreeSet<_> = all.iter().map(|f| f.params()).collect();
+    assert_eq!(params.len(), all.len());
+}

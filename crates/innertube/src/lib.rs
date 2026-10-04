@@ -15,7 +15,8 @@ pub mod transport;
 pub use clients::{Clients, YouTubeClient, METADATA_CLIENT};
 pub use models::browse::{
     AlbumPage, ArtistCarousel, ArtistPage, BrowseItem, HistoryGroup, HomePage, Mood, MoodSection,
-    PlaylistContinuation, PlaylistOption, PlaylistPage, PlaylistSort, QuerySuggestion, SearchResults,
+    PlaylistContinuation, PlaylistOption, PlaylistPage, PlaylistSort, QuerySuggestion, SearchPage,
+    SearchResults,
     SearchSuggestions, Section, SortMenu,
 };
 pub use models::context::Locale;

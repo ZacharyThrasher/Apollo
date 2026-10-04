@@ -19,7 +19,10 @@ pub use map::{
     page_from_continuation, page_from_playlist, HistoryDay,
     target_from_option, track_from_song, ListedTrack,
 };
-pub use search::{search_results, track_from_item, Hit, SearchResults};
+pub use search::{
+    search_page, search_results, track_from_item, Hit, SearchFilter, SearchPage, SearchResults,
+    TopResult,
+};
 pub use source::{InnerTubeSource, LinkTarget};
 
 /// The play-reporting types the source speaks, so callers need not depend on the InnerTube crate.

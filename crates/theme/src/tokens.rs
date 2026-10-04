@@ -98,6 +98,8 @@ pub mod typography {
     pub const NOW_PLAYING_ARTIST: TextStyle = TextStyle::new(18.0, 400);
     /// Lines of lyrics in Now Playing.
     pub const LYRICS: TextStyle = TextStyle::new(22.0, 600);
+    /// The name on Search's Top result card.
+    pub const TOP_RESULT_TITLE: TextStyle = TextStyle::new(22.0, 600);
 }
 
 /// 4px grid, in logical pixels.

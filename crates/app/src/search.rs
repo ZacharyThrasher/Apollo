@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use apollo_domain::links::{parse_external_link, ExternalLink};
 use apollo_domain::listing::LoadFailure;
-use apollo_provider::{LinkTarget, SearchResults};
+use apollo_provider::{LinkTarget, SearchFilter, SearchPage, SearchResults};
 use gpui::{Context, EventEmitter, Task};
 
 use crate::settings::{BoolSetting, SettingsBackend};
@@ -23,6 +23,20 @@ pub const HIDE_MUSIC_VIDEOS: BoolSetting = BoolSetting::new("hide_music_videos",
 /// implementation may do network I/O or wait on its own runtime.
 pub trait SearchSource: Send + Sync {
     fn search(&self, query: &str) -> Result<SearchResults, LoadFailure>;
+
+    /// First page of one kind of result (a chip). Signed in like `search`.
+    fn search_filtered(
+        &self,
+        _query: &str,
+        _filter: SearchFilter,
+    ) -> Result<SearchPage, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
+    /// The page after one `search_filtered` answered, by its token.
+    fn search_more(&self, _token: &str) -> Result<SearchPage, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
 
     /// Typeahead completions for a partly typed query, best first. Never written to the
     /// account's search history.
@@ -67,6 +81,61 @@ const RECENTS_KEY: &str = "recent_searches";
 /// Suggestion answers remembered, so backspacing over a word costs no request.
 const SUGGEST_CACHE: usize = 64;
 
+/// The row of kinds under the field: "All" is the mixed answer, the rest are the service's own
+/// filtered searches, paged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SearchChip {
+    All,
+    Songs,
+    Albums,
+    Artists,
+    Playlists,
+    CommunityPlaylists,
+}
+
+impl SearchChip {
+    pub const ROW: [SearchChip; 6] = [
+        SearchChip::All,
+        SearchChip::Songs,
+        SearchChip::Albums,
+        SearchChip::Artists,
+        SearchChip::Playlists,
+        SearchChip::CommunityPlaylists,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SearchChip::All => "All",
+            SearchChip::Songs => "Songs",
+            SearchChip::Albums => "Albums",
+            SearchChip::Artists => "Artists",
+            SearchChip::Playlists => "Playlists",
+            SearchChip::CommunityPlaylists => "Community playlists",
+        }
+    }
+
+    /// The service's filter, `None` for the mixed answer.
+    pub fn filter(self) -> Option<SearchFilter> {
+        match self {
+            SearchChip::All => None,
+            SearchChip::Songs => Some(SearchFilter::Songs),
+            SearchChip::Albums => Some(SearchFilter::Albums),
+            SearchChip::Artists => Some(SearchFilter::Artists),
+            SearchChip::Playlists => Some(SearchFilter::Playlists),
+            SearchChip::CommunityPlaylists => Some(SearchFilter::CommunityPlaylists),
+        }
+    }
+}
+
+/// The next page of a filtered list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum More {
+    /// Nothing in flight (there may or may not be a next page: see [`SearchModel::has_more`]).
+    Idle,
+    Loading,
+    Failed(LoadFailure),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchState {
     /// Nothing to show: no query, or one too short to search for.
@@ -87,20 +156,49 @@ pub enum SearchEvent {
     OpenLink(LinkTarget),
 }
 
+/// What the page is doing with the text in the field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// No query, or one too short to search for.
+    Idle,
+    /// The text is a link, but not one to a track, playlist, album or artist.
+    BadLink,
+    /// A pasted link is being looked up (or failed, for Retry).
+    LinkLoading,
+    LinkFailed(LoadFailure),
+    /// A query: what is shown is its chip's pane.
+    Query,
+}
+
+/// One chip's list: the service's answer for the query it was asked, and its paging.
+#[derive(Default)]
+struct Pane {
+    /// A request (or the pause before it) is pending.
+    loading: bool,
+    /// The last request failed.
+    failure: Option<LoadFailure>,
+    /// The service's answer as it came, so toggling hide-music-videos needs no new request.
+    raw: Option<Arc<SearchResults>>,
+    /// What the page lists: `raw` with the hide-music-videos choice applied.
+    results: Option<Arc<SearchResults>>,
+    /// The query `raw` answers, so asking again for it costs nothing.
+    answered: Option<String>,
+    continuation: Option<String>,
+    more: Option<More>,
+    /// Debounce plus request. Replacing it drops the older one, so an abandoned query can
+    /// never update the view.
+    task: Option<Task<()>>,
+    more_task: Option<Task<()>>,
+}
+
 pub struct SearchModel {
     source: Option<Arc<dyn SearchSource>>,
     /// The query as searched: trimmed, inner whitespace collapsed.
     query: String,
-    state: SearchState,
-    /// What the page lists: `raw` with the hide-music-videos choice applied.
-    results: Option<Arc<SearchResults>>,
-    /// The service's answer as it came, so toggling the filter needs no new request.
-    raw: Option<Arc<SearchResults>>,
-    /// The query `results` answer, so asking again for it costs nothing.
-    answered: Option<String>,
-    /// Debounce plus request. Replacing it drops the older one, so an abandoned query can
-    /// never update the view.
-    task: Option<Task<()>>,
+    mode: Mode,
+    /// The chip on show; it stays across queries.
+    chip: SearchChip,
+    panes: HashMap<SearchChip, Pane>,
     /// Completions for the text being typed (cleared when it is empty or a link).
     suggestions: Vec<String>,
     suggest_task: Option<Task<()>>,
@@ -122,11 +220,9 @@ impl SearchModel {
         Self {
             source: None,
             query: String::new(),
-            state: SearchState::Idle,
-            results: None,
-            raw: None,
-            answered: None,
-            task: None,
+            mode: Mode::Idle,
+            chip: SearchChip::All,
+            panes: HashMap::new(),
             suggestions: Vec::new(),
             suggest_task: None,
             suggest_cache: HashMap::new(),
@@ -141,7 +237,7 @@ impl SearchModel {
     /// The backend is ready. A query typed before that (state `Loading`) goes out now.
     pub fn install(&mut self, source: Arc<dyn SearchSource>, cx: &mut Context<Self>) {
         self.source = Some(source);
-        if self.state == SearchState::Loading {
+        if self.state() == SearchState::Loading {
             match self.link.clone() {
                 Some(link) => self.open_link(link, cx),
                 None => self.start(false, cx),
@@ -187,19 +283,63 @@ impl SearchModel {
         &self.query
     }
 
-    pub fn state(&self) -> SearchState {
-        self.state
+    pub fn chip(&self) -> SearchChip {
+        self.chip
     }
 
-    /// Results of the last answered query. Kept while a newer one loads, so the page does not
-    /// flash to skeletons on every keystroke.
+    fn pane(&self, chip: SearchChip) -> Option<&Pane> {
+        self.panes.get(&chip)
+    }
+
+    fn pane_mut(&mut self, chip: SearchChip) -> &mut Pane {
+        self.panes.entry(chip).or_default()
+    }
+
+    pub fn state(&self) -> SearchState {
+        match self.mode {
+            Mode::Idle => SearchState::Idle,
+            Mode::BadLink => SearchState::BadLink,
+            Mode::LinkLoading => SearchState::Loading,
+            Mode::LinkFailed(f) => SearchState::Failed(f),
+            Mode::Query => match self.pane(self.chip) {
+                Some(p) if p.loading => SearchState::Loading,
+                Some(p) => match p.failure {
+                    Some(f) => SearchState::Failed(f),
+                    None if p.answered.is_some() => SearchState::Ready,
+                    None => SearchState::Loading,
+                },
+                None => SearchState::Loading,
+            },
+        }
+    }
+
+    /// Results of the chip on show for the last answered query. Kept while a newer one loads,
+    /// so the page does not flash to skeletons on every keystroke.
     pub fn results(&self) -> Option<&Arc<SearchResults>> {
-        self.results.as_ref()
+        if self.mode != Mode::Query {
+            return None;
+        }
+        self.pane(self.chip).and_then(|p| p.results.as_ref())
     }
 
     /// A finished search that found nothing and read everything it was given.
     pub fn is_confirmed_empty(&self) -> bool {
-        self.state == SearchState::Ready && self.results.as_ref().is_some_and(|r| r.is_empty())
+        self.state() == SearchState::Ready && self.results().is_some_and(|r| r.is_empty())
+    }
+
+    /// The service has another page of the chip on show.
+    pub fn has_more(&self) -> bool {
+        self.mode == Mode::Query
+            && self
+                .pane(self.chip)
+                .is_some_and(|p| p.continuation.is_some() && p.answered.as_deref() == Some(&self.query))
+    }
+
+    /// The next page of the chip on show: in flight, failed or neither.
+    pub fn more(&self) -> More {
+        self.pane(self.chip)
+            .and_then(|p| p.more)
+            .unwrap_or(More::Idle)
     }
 
     /// Completions for what is being typed, best first, at most [`MAX_SUGGESTIONS`].
@@ -229,7 +369,9 @@ impl SearchModel {
         }
         if self.hide_videos != hide_videos {
             self.hide_videos = hide_videos;
-            self.apply_filter();
+            for pane in self.panes.values_mut() {
+                pane.apply_filter(hide_videos);
+            }
             changed = true;
         }
         if changed {
@@ -295,10 +437,11 @@ impl SearchModel {
         if self.query.chars().count() < MIN_PREVIEW_CHARS || as_link(&self.query).is_some() {
             // A pasted link is never searched for: Enter opens it.
             self.clear(cx);
-        } else if self.answered.as_deref() == Some(self.query.as_str()) {
+        } else if self.answered_on_show() {
             // Typed back to what is already on screen.
-            self.task = None;
-            self.state = SearchState::Ready;
+            self.mode = Mode::Query;
+            let chip = self.chip;
+            self.pane_mut(chip).cancel();
             cx.notify();
         } else {
             self.start(true, cx);
@@ -334,19 +477,16 @@ impl SearchModel {
             match parsed {
                 Ok(link) => self.open_link(link, cx),
                 Err(_) => {
-                    self.task = None;
+                    self.reset_panes();
                     self.link = None;
-                    self.results = None;
-                    self.raw = None;
-                    self.answered = None;
-                    self.state = SearchState::BadLink;
+                    self.mode = Mode::BadLink;
                     cx.notify();
                 }
             }
             return;
         }
         self.remember(cx);
-        if self.answered.as_deref() == Some(self.query.as_str()) {
+        if self.mode == Mode::Query && self.answered_on_show() {
             return;
         }
         self.start(false, cx);
@@ -361,29 +501,64 @@ impl SearchModel {
         }
     }
 
-    fn clear(&mut self, cx: &mut Context<Self>) {
-        self.task = None;
-        self.state = SearchState::Idle;
-        self.results = None;
-        self.raw = None;
-        self.answered = None;
+    /// Show another kind of result. Its list is asked for unless it already answers this query.
+    pub fn set_chip(&mut self, chip: SearchChip, cx: &mut Context<Self>) {
+        if chip == self.chip {
+            return;
+        }
+        self.chip = chip;
+        if self.mode == Mode::Query {
+            if !self.answered_on_show() {
+                // Another query's rows must not stand in for this one's.
+                let pane = self.pane_mut(chip);
+                pane.raw = None;
+                pane.results = None;
+                pane.answered = None;
+                self.fetch(chip, false, cx);
+            }
+        }
         cx.notify();
     }
 
-    fn apply_filter(&mut self) {
-        self.results = self.raw.as_ref().map(|raw| {
-            if self.hide_videos && !raw.video_ids.is_empty() {
-                Arc::new(raw.without_videos())
-            } else {
-                raw.clone()
-            }
-        });
+    /// Whether the chip on show already holds the answer to the current query.
+    fn answered_on_show(&self) -> bool {
+        self.pane(self.chip)
+            .is_some_and(|p| p.answered.as_deref() == Some(self.query.as_str()))
     }
 
+    fn reset_panes(&mut self) {
+        // Dropping the tasks cancels any request in flight.
+        self.panes.clear();
+    }
+
+    fn clear(&mut self, cx: &mut Context<Self>) {
+        self.reset_panes();
+        self.mode = Mode::Idle;
+        cx.notify();
+    }
+
+    /// Ask for the chip on show.
     fn start(&mut self, debounce: bool, cx: &mut Context<Self>) {
-        self.state = SearchState::Loading;
+        self.mode = Mode::Query;
+        let chip = self.chip;
+        self.fetch(chip, debounce, cx);
+    }
+
+    fn fetch(&mut self, chip: SearchChip, debounce: bool, cx: &mut Context<Self>) {
         let query = self.query.clone();
-        self.task = Some(cx.spawn(async move |this, cx| {
+        // One chip asks at a time: a list left waiting for an older query would otherwise stay
+        // "loading" for good, its answer being dropped as stale.
+        for (other, pane) in self.panes.iter_mut() {
+            if *other != chip {
+                pane.cancel();
+            }
+        }
+        let pane = self.pane_mut(chip);
+        pane.loading = true;
+        pane.failure = None;
+        pane.more = None;
+        pane.more_task = None;
+        pane.task = Some(cx.spawn(async move |this, cx| {
             if debounce {
                 cx.background_executor().timer(DEBOUNCE).await;
             }
@@ -394,46 +569,128 @@ impl SearchModel {
             let asked = query.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { source.search(&asked) })
+                .spawn(async move {
+                    match chip.filter() {
+                        None => source.search(&asked).map(|results| SearchPage {
+                            results,
+                            continuation: None,
+                        }),
+                        Some(filter) => source.search_filtered(&asked, filter),
+                    }
+                })
                 .await;
-            let _ = this.update(cx, |m, cx| m.finish(query, result, cx));
+            let _ = this.update(cx, |m, cx| m.finish(chip, query, result, cx));
         }));
         cx.notify();
     }
 
     fn finish(
         &mut self,
+        chip: SearchChip,
         query: String,
-        result: Result<SearchResults, LoadFailure>,
+        result: Result<SearchPage, LoadFailure>,
         cx: &mut Context<Self>,
     ) {
         if query != self.query {
             return;
         }
+        let hide = self.hide_videos;
+        let pane = self.pane_mut(chip);
+        pane.loading = false;
         match result {
-            Ok(results) => {
-                self.raw = Some(Arc::new(results));
-                self.apply_filter();
-                self.answered = Some(query);
-                self.state = SearchState::Ready;
+            Ok(page) => {
+                pane.raw = Some(Arc::new(page.results));
+                pane.continuation = page.continuation;
+                pane.answered = Some(query);
+                pane.failure = None;
+                pane.apply_filter(hide);
             }
             Err(failure) => {
-                self.results = None;
-                self.raw = None;
-                self.answered = None;
-                self.state = SearchState::Failed(failure);
+                pane.results = None;
+                pane.raw = None;
+                pane.answered = None;
+                pane.continuation = None;
+                pane.failure = Some(failure);
             }
         }
         cx.notify();
     }
 
+    /// The next page of the chip on show. A no-op while one is in flight, after a failure (use
+    /// [`Self::retry_more`]) and at the end of the list.
+    pub fn load_more(&mut self, cx: &mut Context<Self>) {
+        if !self.has_more() || self.more() != More::Idle {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let (chip, query) = (self.chip, self.query.clone());
+        let pane = self.pane_mut(chip);
+        let Some(token) = pane.continuation.clone() else {
+            return;
+        };
+        pane.more = Some(More::Loading);
+        pane.more_task = Some(cx.spawn(async move |this, cx| {
+            let asked = token.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { source.search_more(&asked) })
+                .await;
+            let _ = this.update(cx, |m, cx| m.finish_more(chip, query, token, result, cx));
+        }));
+        cx.notify();
+    }
+
+    pub fn retry_more(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.more(), More::Failed(_)) {
+            let chip = self.chip;
+            self.pane_mut(chip).more = None;
+            self.load_more(cx);
+        }
+    }
+
+    fn finish_more(
+        &mut self,
+        chip: SearchChip,
+        query: String,
+        token: String,
+        result: Result<SearchPage, LoadFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        let hide = self.hide_videos;
+        if query != self.query {
+            return;
+        }
+        let pane = self.pane_mut(chip);
+        // The list moved on (a new answer) while this page was on its way.
+        if pane.continuation.as_deref() != Some(token.as_str()) {
+            return;
+        }
+        match result {
+            Ok(page) => {
+                let mut raw = pane.raw.as_deref().cloned().unwrap_or_default();
+                let before = (raw.songs.len(), raw.albums.len(), raw.artists.len(), raw.playlists.len());
+                raw.append(page.results);
+                let after = (raw.songs.len(), raw.albums.len(), raw.artists.len(), raw.playlists.len());
+                pane.raw = Some(Arc::new(raw));
+                // A page of nothing new ends the list, whatever token it carries.
+                pane.continuation = page
+                    .continuation
+                    .filter(|next| *next != token && after != before);
+                pane.more = None;
+                pane.apply_filter(hide);
+            }
+            Err(failure) => pane.more = Some(More::Failed(failure)),
+        }
+        cx.notify();
+    }
+
     fn open_link(&mut self, link: ExternalLink, cx: &mut Context<Self>) {
-        self.state = SearchState::Loading;
-        self.results = None;
-        self.raw = None;
-        self.answered = None;
+        self.reset_panes();
+        self.mode = Mode::LinkLoading;
         self.link = Some(link.clone());
-        self.task = Some(cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             let Some(source) = this.update(cx, |m, _| m.source.clone()).ok().flatten() else {
                 // No backend yet: `install` restarts the lookup.
                 return;
@@ -444,7 +701,10 @@ impl SearchModel {
                 .spawn(async move { source.resolve_link(&asked) })
                 .await;
             let _ = this.update(cx, |m, cx| m.finish_link(link, result, cx));
-        }));
+        });
+        // The lookup rides on the chip's pane so a new query or a clear drops it.
+        let chip = self.chip;
+        self.pane_mut(chip).task = Some(task);
         cx.notify();
     }
 
@@ -460,10 +720,10 @@ impl SearchModel {
         match result {
             Ok(target) => {
                 self.link = None;
-                self.state = SearchState::Idle;
+                self.mode = Mode::Idle;
                 cx.emit(SearchEvent::OpenLink(target));
             }
-            Err(failure) => self.state = SearchState::Failed(failure),
+            Err(failure) => self.mode = Mode::LinkFailed(failure),
         }
         cx.notify();
     }
@@ -516,6 +776,27 @@ impl SearchModel {
             .insert(query.to_lowercase(), list.clone());
         self.suggestions = list;
         cx.notify();
+    }
+}
+
+impl Pane {
+    /// Drop whatever request is pending (what was answered stays).
+    fn cancel(&mut self) {
+        self.loading = false;
+        self.task = None;
+        self.more_task = None;
+        self.more = None;
+    }
+
+    /// `results` is `raw` less the music videos while the setting asks for that.
+    fn apply_filter(&mut self, hide_videos: bool) {
+        self.results = self.raw.as_ref().map(|raw| {
+            if hide_videos && !raw.video_ids.is_empty() {
+                Arc::new(raw.without_videos())
+            } else {
+                raw.clone()
+            }
+        });
     }
 }
 

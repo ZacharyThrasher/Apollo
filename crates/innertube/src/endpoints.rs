@@ -25,6 +25,8 @@ pub const FILTER_SONG: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
 pub const FILTER_ALBUM: &str = "EgWKAQIYAWoKEAkQChAFEAMQBA%3D%3D";
 pub const FILTER_ARTIST: &str = "EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D";
 pub const FILTER_COMMUNITY_PLAYLIST: &str = "EgeKAQQoAEABagoQAxAEEAoQCRAF";
+/// YouTube Music's own ("featured") playlists, the service's "Playlists" tab.
+pub const FILTER_FEATURED_PLAYLIST: &str = "EgeKAQQoADgBagwQAxAKEAkQBRAE";
 
 impl InnerTube {
     /// Raw `search` POST. `params` = a filter (None = the mixed, unfiltered search). context/08.
@@ -110,22 +112,35 @@ impl InnerTube {
         Ok(r)
     }
 
-    /// Filtered card search for a "Show more" page. `category` ∈ albums / artists / playlists.
-    pub async fn search_cards(
+    /// First page of a filtered search (`filter` is one of the `FILTER_*` params). Carries the
+    /// account: an anonymous filtered search answers "No results" (checked 2026-10-03), and the
+    /// repeat of a query the page already recorded adds nothing new to the account's history.
+    pub async fn search_filtered(
         &self,
         client: &YouTubeClient,
         query: &str,
-        category: &str,
-    ) -> Result<Vec<BrowseItem>, Error> {
-        let filter = match category {
-            "albums" => FILTER_ALBUM,
-            "artists" => FILTER_ARTIST,
-            "playlists" => FILTER_COMMUNITY_PLAYLIST,
-            other => return Err(Error::Other(format!("unknown search category: {other}"))),
-        };
-        // No history: "Show more" repeats the query the search page already recorded.
-        let value = self.search_raw(client, query, Some(filter), false).await?;
-        Ok(browse::parse_search_cards(&value))
+        filter: &str,
+    ) -> Result<browse::SearchPage, Error> {
+        let value = self.search_raw(client, query, Some(filter), true).await?;
+        Ok(browse::parse_search_page(&value))
+    }
+
+    /// The page after one a filtered search answered, by its paging token.
+    pub async fn search_continuation(
+        &self,
+        client: &YouTubeClient,
+        token: &str,
+    ) -> Result<browse::SearchPage, Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ContinuationBody {
+            context: Context,
+        }
+        let body = ContinuationBody { context: self.context_for(client) };
+        let enc = urlencoding::encode(token);
+        let path = format!("search?ctoken={enc}&continuation={enc}&type=next");
+        let value = self.post(&path, client, &body, true).await?;
+        Ok(browse::parse_search_page(&value))
     }
 
     /// Up-next queue / radio for a video. context/08. Uses the metadata client.
