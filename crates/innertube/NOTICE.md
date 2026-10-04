@@ -25,7 +25,7 @@ Re-sync by diffing against upstream at a newer revision; keep the list below cur
 | `rustypipe_fallback.rs` and the `rustypipe` dependency | Anonymous stream fallback; the spec forbids guest fallback |
 | `blocklist.rs`, hide-videos filter | Product features, not part of the adapter; can come back as domain policy |
 | Session "healer" (`wait_for_session_heal`, `begin_heal`, `without_healing`, 90 s wait) | App-specific webview healing. A 401/403 now returns `Error::SessionExpired` and raises `session_rejected`; the account model decides what it means |
-| `post_upload`, playlist cover/create/delete and the other `edit_playlist` actions, `feedback`, `subscribe` | Write actions; M4. Re-vendored in M3: `like/like`, `like/removelike` (`rate`), `edit_playlist` add-video, `playlist/get_add_to_playlist` |
+| `post_upload`, playlist cover and the other `edit_playlist` actions (description, privacy, playlist-wide moves), `feedback`, `subscribe` | Write actions, not needed. Re-vendored in M3: `like/like`, `like/removelike` (`rate`), `edit_playlist` add-video, `playlist/get_add_to_playlist`. Added by Apollo for playlist editing: see Local changes |
 | `register_playback`, CPN generation | History write; M4 |
 | Lyrics (`models/lyrics.rs`, `IOS_MUSIC` client) | M4 |
 | `tests/live_smoke.rs`, `examples/`, `integration-tests` feature | Network tests; ours must run offline |
@@ -45,6 +45,20 @@ Re-sync by diffing against upstream at a newer revision; keep the list below cur
 - `add_to_playlist_options` / `parse_add_to_playlist`: the sheet of editable playlists with
   `containsSelectedVideos`. The fixture `add_to_playlist.json` is hand-written from memory of the
   response shape, not a recording; verify against the live account in the Windows check.
+
+- Playlist editing writes (Apollo additions, not from Limusic): `create_playlist` (`playlist/create`,
+  private, empty description), `delete_playlist` (`playlist/delete`), `rename_playlist`,
+  `remove_from_playlist` and `move_in_playlist` (`browse/edit_playlist` with
+  `ACTION_SET_PLAYLIST_NAME`, `ACTION_REMOVE_VIDEO` and `ACTION_MOVE_VIDEO_BEFORE`), and
+  `save_playlist` (`like/like` and `like/removelike` with `target.playlistId`, the way a playlist
+  or an album's audio playlist `OLAK5uy_…` is saved to the library). Every one goes through
+  `post_once` (a single attempt): the transport's three retries for timeouts are right for reads
+  and for idempotent writes, but a retried create would make a second playlist, so a timeout
+  here is an unknown outcome that `apollo-app`'s `library::edits` settles by reading the library
+  or the playlist back. The request bodies are unit-tested offline; the response shapes
+  (`playlistId` in the create answer, `STATUS_SUCCEEDED` on the edits) are from memory of the
+  service, not recordings, and are verified only in the signed-in Windows check (against a
+  scratch playlist named "Apollo test").
 
 - `InnerTube::player_loudness` and `models/player.rs` (Zach approved one metadata-only `player`
   call per track for volume normalization, 2026-10-03): the plain WEB_REMIX `player` request

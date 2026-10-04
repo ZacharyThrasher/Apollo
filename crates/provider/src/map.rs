@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use apollo_domain::account::{IdentityId, Validation, ValidationError};
-use apollo_domain::library::{Collection, CollectionKind, PlaylistTarget, WriteFailure};
+use apollo_domain::library::{
+    bare_playlist_id, is_user_playlist_id, Collection, CollectionKind, PageMeta, PlaylistTarget,
+    WriteFailure,
+};
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track, VideoId};
 use innertube::{
@@ -188,6 +191,27 @@ pub fn page_from_playlist(p: &PlaylistPage) -> Page<ListedTrack> {
 
 pub fn page_from_album(p: &AlbumPage) -> Page<ListedTrack> {
     page(&p.items, p.continuation.clone(), p.skipped)
+}
+
+/// What a playlist page says about editing it. Only a `PL…` playlist the service gave its owner
+/// header can be edited; the save target is the playlist's own bare id.
+pub fn meta_from_playlist(p: &PlaylistPage, browse_id: &str) -> PageMeta {
+    let bare = bare_playlist_id(browse_id);
+    PageMeta {
+        owned: p.owned && is_user_playlist_id(bare),
+        save_id: (!bare.is_empty()).then(|| bare.to_owned()),
+        in_library: None,
+    }
+}
+
+/// What an album page says about saving it: the audio playlist the save is made on, and whether
+/// the header's toggle is already on. An album is never editable.
+pub fn meta_from_album(a: &AlbumPage) -> PageMeta {
+    PageMeta {
+        owned: false,
+        save_id: a.playlist_id.clone().filter(|id| !id.is_empty()),
+        in_library: Some(a.in_library),
+    }
 }
 
 pub fn page_from_continuation(p: &PlaylistContinuation) -> Page<ListedTrack> {

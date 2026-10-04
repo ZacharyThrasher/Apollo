@@ -128,7 +128,8 @@ fn setup(cx: &mut TestAppContext) -> (Page, &mut VisualTestContext) {
 /// Ctrl+K, a query, and the cards it answers with on screen.
 fn search(page: &Page, vcx: &mut VisualTestContext) {
     vcx.simulate_keystrokes("ctrl-k");
-    vcx.simulate_keystrokes("a b");
+    // Text nothing in the simulated library holds, so only the service's answer is on the page.
+    vcx.simulate_keystrokes("z q x j");
     vcx.executor().advance_clock(DEBOUNCE);
     vcx.run_until_parked();
     page.shell
