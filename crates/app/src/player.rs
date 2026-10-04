@@ -705,6 +705,16 @@ impl PlayerModel {
         }
     }
 
+    /// A volume key: `delta` percent louder or quieter, saved at once. Louder while muted
+    /// unmutes at the stepped level; quieter while muted changes nothing.
+    pub fn nudge_volume(&mut self, delta: i8, cx: &mut Context<Self>) {
+        if self.muted && delta < 0 {
+            return;
+        }
+        self.set_volume(self.volume.saturating_add_signed(delta), cx);
+        self.save_volume();
+    }
+
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
         self.muted = !self.muted;
         self.push_volume();
