@@ -156,6 +156,9 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     if let Some(tray) = tray {
         crate::tray_win::install(cx, window, tray, player.clone(), settings.clone());
     }
+    // The PC around the player: the output device going away, sleep and wake, other apps playing.
+    #[cfg(windows)]
+    crate::pc_watch_win::install(cx, player.clone(), settings.clone());
     // Optional system-wide hotkeys (Settings > Keyboard).
     #[cfg(windows)]
     crate::hotkeys_win::install(cx, settings.clone(), player.clone());

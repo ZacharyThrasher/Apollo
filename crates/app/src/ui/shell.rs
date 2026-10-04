@@ -40,6 +40,7 @@ use crate::ui::settings_page::{self, SettingsPage};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
 use crate::ui::titlebar::TitleBar;
 use crate::ui::toast::{self, toast, Fade};
+use crate::ui::sleep_menu::{SleepMenu, SleepMenuHandle};
 use crate::ui::track_menu::{self, MenuHandle, TrackMenu};
 use crate::url_thumbs::{ThumbSource, ThumbStore};
 
@@ -108,6 +109,8 @@ pub struct Shell {
     picker: Entity<PlaylistPicker>,
     /// The menu a right-click or a row's More button opens.
     menu: Entity<TrackMenu>,
+    /// The sleep timer popover the moon button in Now Playing opens.
+    sleep_menu: Entity<SleepMenu>,
     /// The error on screen: it outlives the notice by the length of its fade-out.
     toast: Option<ToastShown>,
     /// Where a page opened from another route (a Search card) returns to when Back closes the
@@ -222,6 +225,9 @@ impl Shell {
         });
         cx.observe(&menu, |_, _, cx| cx.notify()).detach();
         cx.set_global(MenuHandle(menu.clone()));
+        let sleep_menu = cx.new(|cx| SleepMenu::new(player.clone(), cx));
+        cx.observe(&sleep_menu, |_, _, cx| cx.notify()).detach();
+        cx.set_global(SleepMenuHandle(sleep_menu.clone()));
         let queue_panel = cx.new(|cx| {
             QueuePanel::new(
                 player.clone(),
@@ -255,7 +261,8 @@ impl Shell {
             )
         });
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
-        let playback_page = cx.new(|cx| PlaybackPage::new(player.clone(), cx));
+        let playback_page =
+            cx.new(|cx| PlaybackPage::new(player.clone(), settings.clone(), cx));
         let settings_page = cx.new(|cx| {
             SettingsPage::new(
                 account_page,
@@ -352,6 +359,7 @@ impl Shell {
             writes,
             picker,
             menu,
+            sleep_menu,
             toast: None,
             detail_origin: None,
             library_epoch: 0,
@@ -401,6 +409,7 @@ impl Shell {
             self.writes.update(cx, |w, cx| w.reset(cx));
             self.picker.update(cx, |p, cx| p.reset(cx));
             self.menu.update(cx, |m, cx| m.reset(cx));
+            self.sleep_menu.update(cx, |m, cx| m.reset(cx));
         }
         let model = self.account.read(cx);
         let (signed_out, by_choice) = (model.is_signed_out(), model.is_signed_out_by_choice());
@@ -482,6 +491,15 @@ impl Shell {
 
     pub fn picker(&self) -> &Entity<PlaylistPicker> {
         &self.picker
+    }
+
+    /// The app's settings (the model the Settings page edits).
+    pub fn settings(&self, cx: &App) -> Entity<SettingsModel> {
+        self.settings_page.read(cx).settings().clone()
+    }
+
+    pub fn sleep_menu(&self) -> &Entity<SleepMenu> {
+        &self.sleep_menu
     }
 
     pub fn menu(&self) -> &Entity<TrackMenu> {
@@ -999,6 +1017,11 @@ impl Render for Shell {
         });
         let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
         let menu = self.menu.read(cx).is_open().then(|| self.menu.clone());
+        let sleep_menu = self
+            .sleep_menu
+            .read(cx)
+            .is_open()
+            .then(|| self.sleep_menu.clone());
 
         let fonts = cx.global::<style::Fonts>().text.clone();
         div()
@@ -1068,6 +1091,7 @@ impl Render for Shell {
             .children(toast)
             .children(picker)
             .children(menu)
+            .children(sleep_menu)
     }
 }
 

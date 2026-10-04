@@ -76,6 +76,8 @@ icons! {
     PlayNext => "play-next-regular",
     PictureInPicture => "picture-in-picture-regular",
     ArrowMaximize => "arrow-maximize-regular",
+    MoonRegular => "weather-moon-regular",
+    MoonFilled => "weather-moon-filled",
 }
 
 pub struct Assets;

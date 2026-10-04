@@ -21,6 +21,7 @@ pub mod settings_page;
 pub mod settings_row;
 pub mod shell;
 pub mod skeleton;
+pub mod sleep_menu;
 pub mod slider;
 pub mod switch;
 pub mod text_button;
