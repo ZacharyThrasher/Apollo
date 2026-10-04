@@ -18,7 +18,7 @@ use apollo_domain::model::{BrowseId, Track};
 use gpui::{Context, Entity, RenderImage};
 use image::imageops;
 
-use apollo_provider::Hit;
+use apollo_provider::{HistoryDay, Hit};
 
 use super::browse::{
     history_groups, history_len, history_row, sort_artists, sort_collections, HistoryGroup, SortKey,
@@ -30,6 +30,7 @@ use super::writes::{LibraryWrites, WritesEvent};
 mod artist;
 pub use artist::MixKind;
 use crate::art::{sized_thumbnail, DecodedArt};
+use crate::page_cache::{keys, PageCache, Ticket};
 use crate::player::{PlayerModel, Status};
 use crate::settings::LibrarySortStore;
 use crate::url_thumbs::Thumb as ThumbView;
@@ -268,6 +269,27 @@ fn like_seeds(rows: &[TrackRow], liked_music: bool) -> Vec<(String, bool)> {
         .collect()
 }
 
+/// How an artist page's answer relates to what is on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+    /// From the service, with nothing shown yet (or a retry).
+    Fresh,
+    /// From the page cache: drawn at once; only teaches like state nothing is known about.
+    Cached,
+    /// From the service, following cached content already shown: swapped in only when it
+    /// differs, and a failure other than a dead session leaves what is shown alone.
+    Behind,
+}
+
+/// Where an answer being applied came from.
+#[derive(Clone, Copy)]
+enum Origin<'a> {
+    /// The service, with the ticket to cache it under (none without a cache).
+    Live(Option<&'a Ticket>),
+    /// The page cache: drawn at once, fetched again behind.
+    Cached,
+}
+
 fn key(url: &str, size: ArtSize) -> String {
     format!("{size:?}|{url}")
 }
@@ -491,7 +513,22 @@ impl LibraryModel {
         let Some(source) = self.source.clone() else {
             return;
         };
-        self.collections = Load::Loading;
+        // The last answer is drawn at once and the list is fetched again behind it.
+        let cache = PageCache::try_global(cx);
+        let cached = cache
+            .as_ref()
+            .and_then(|c| c.get::<Vec<Collection>>(keys::COLLECTIONS));
+        let ticket = cache.as_ref().map(|c| c.ticket());
+        let quiet = cached.is_some();
+        self.collections = match cached {
+            Some(cached) => Load::Ready(split_collections(cached.value)),
+            None => Load::Loading,
+        };
+        self.reshow();
+        // What the cache showed is what the menus know about the library until the answer lands.
+        if let Load::Ready(lists) = &self.collections {
+            self.edits.update(cx, |e, cx| e.set_library(lists, cx));
+        }
         self.collections_rev += 1;
         let rev = self.collections_rev;
         cx.notify();
@@ -504,12 +541,26 @@ impl LibraryModel {
                 if m.collections_rev != rev {
                     return;
                 }
-                m.collections = match result {
-                    Ok(list) => Load::Ready(split_collections(list)),
-                    Err(f) => Load::Failed(f),
-                };
-                if let Load::Ready(lists) = &m.collections {
-                    m.edits.update(cx, |e, cx| e.set_library(lists, cx));
+                match result {
+                    Ok(list) => {
+                        if let (Some(cache), Some(ticket)) = (&cache, &ticket) {
+                            cache.put(ticket, keys::COLLECTIONS.to_owned(), list.clone());
+                        }
+                        let fresh = Load::Ready(split_collections(list));
+                        // Same lists: nothing is redrawn, so nothing flickers or jumps.
+                        if m.collections == fresh {
+                            return;
+                        }
+                        m.collections = fresh;
+                        if let Load::Ready(lists) = &m.collections {
+                            m.edits.update(cx, |e, cx| e.set_library(lists, cx));
+                        }
+                    }
+                    // A dead session is always said out loud; any other failure leaves the
+                    // lists that are already on screen alone.
+                    Err(LoadFailure::Session) => m.collections = Load::Failed(LoadFailure::Session),
+                    Err(_) if quiet => return,
+                    Err(f) => m.collections = Load::Failed(f),
                 }
                 m.reshow();
                 cx.notify();
@@ -546,7 +597,18 @@ impl LibraryModel {
         let Some(source) = self.source.clone() else {
             return;
         };
-        self.artists = Load::Loading;
+        // The last answer is drawn at once and the list is fetched again behind it.
+        let cache = PageCache::try_global(cx);
+        let cached = cache
+            .as_ref()
+            .and_then(|c| c.get::<Vec<Hit>>(keys::ARTISTS));
+        let ticket = cache.as_ref().map(|c| c.ticket());
+        let quiet = cached.is_some();
+        self.artists = match cached {
+            Some(cached) => Load::Ready(cached.value),
+            None => Load::Loading,
+        };
+        self.reshow();
         self.artists_rev += 1;
         let rev = self.artists_rev;
         cx.notify();
@@ -559,10 +621,21 @@ impl LibraryModel {
                 if m.artists_rev != rev {
                     return;
                 }
-                m.artists = match result {
-                    Ok(list) => Load::Ready(list),
-                    Err(f) => Load::Failed(f),
-                };
+                match result {
+                    Ok(list) => {
+                        if let (Some(cache), Some(ticket)) = (&cache, &ticket) {
+                            cache.put(ticket, keys::ARTISTS.to_owned(), list.clone());
+                        }
+                        let fresh = Load::Ready(list);
+                        if m.artists == fresh {
+                            return;
+                        }
+                        m.artists = fresh;
+                    }
+                    Err(LoadFailure::Session) => m.artists = Load::Failed(LoadFailure::Session),
+                    Err(_) if quiet => return,
+                    Err(f) => m.artists = Load::Failed(f),
+                }
                 m.reshow();
                 cx.notify();
             });
@@ -580,9 +653,29 @@ impl LibraryModel {
         let Some(source) = self.source.clone() else {
             return;
         };
-        let refresh = matches!(self.history, Load::Ready(_));
+        // Rows on screen stay; a launch with nothing on screen draws the last answer first.
+        let cache = PageCache::try_global(cx);
+        let ticket = cache.as_ref().map(|c| c.ticket());
+        let mut refresh = matches!(self.history, Load::Ready(_));
         if !refresh {
-            self.history = Load::Loading;
+            let cached = cache
+                .as_ref()
+                .and_then(|c| c.get::<Vec<HistoryDay>>(keys::HISTORY));
+            match cached {
+                Some(cached) => {
+                    let groups = history_groups(cached.value);
+                    let writes = self.writes.read(cx);
+                    let seeds: Vec<(String, bool)> = groups
+                        .iter()
+                        .flat_map(|g| like_seeds(&g.rows, false))
+                        .filter(|(video, _)| writes.liked(video).is_none())
+                        .collect();
+                    self.writes.update(cx, |w, cx| w.seed(seeds, cx));
+                    self.history = Load::Ready(groups);
+                    refresh = true;
+                }
+                None => self.history = Load::Loading,
+            }
         }
         self.history_rev += 1;
         let rev = self.history_rev;
@@ -598,6 +691,9 @@ impl LibraryModel {
                 }
                 match result {
                     Ok(days) => {
+                        if let (Some(cache), Some(ticket)) = (&cache, &ticket) {
+                            cache.put(ticket, keys::HISTORY.to_owned(), days.clone());
+                        }
                         let groups = history_groups(days);
                         let seeds: Vec<(String, bool)> = groups
                             .iter()
@@ -783,8 +879,26 @@ impl LibraryModel {
         let Some(Entry::Collection(detail)) = self.stack.last_mut() else {
             return;
         };
-        let (id, rev, collection) = (detail.id, detail.listing.begin(), detail.collection.clone());
+        let (id, collection) = (detail.id, detail.collection.clone());
         detail.pending = None;
+        // The last answer (the whole list) is drawn at once and fetched again behind it.
+        let cache = PageCache::try_global(cx);
+        let cached = cache
+            .as_ref()
+            .and_then(|c| c.get::<Vec<TrackRow>>(&keys::collection(&collection.id)));
+        if let Some(cached) = cached {
+            let rev = detail.listing.begin();
+            let page = Page {
+                items: cached.value,
+                continuation: None,
+                skipped: 0,
+            };
+            self.apply_page(id, rev, Ok(page), Origin::Cached, cx);
+            self.refresh_detail(id, cx);
+            return;
+        }
+        let rev = detail.listing.begin();
+        let ticket = cache.map(|c| c.ticket());
         cx.notify();
         cx.spawn(async move |this, cx| {
             let first = {
@@ -808,7 +922,7 @@ impl LibraryModel {
             };
             loop {
                 let next = this
-                    .update(cx, |m, cx| m.apply_page(id, rev, result, cx))
+                    .update(cx, |m, cx| m.apply_page(id, rev, result, Origin::Live(ticket.as_ref()), cx))
                     .ok()
                     .flatten();
                 let Some(token) = next else { break };
@@ -823,12 +937,15 @@ impl LibraryModel {
     }
 
     /// Applies one page (or failure) and returns the token of the page to fetch next, if the
-    /// load should go on.
+    /// load should go on. A live fetch carries its cache ticket: when its last page lands the
+    /// whole list is cached. A page drawn from the cache only teaches the like state of tracks
+    /// nothing is known about yet; the fetch behind it settles the rest.
     fn apply_page(
         &mut self,
         detail_id: u64,
         rev: Revision,
         result: Result<Page<TrackRow>, LoadFailure>,
+        origin: Origin<'_>,
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let detail = self.collection_mut(detail_id)?;
@@ -856,10 +973,25 @@ impl LibraryModel {
         let settled = !detail.is_loading();
         let failed = detail.failure().is_some();
         let pending = if settled { detail.pending.take() } else { None };
+        let to_cache = match origin {
+            Origin::Live(Some(ticket)) if detail.listing.state() == LoadState::Complete => {
+                Some((ticket.clone(), detail.collection.id.clone(), detail.listing.items().to_vec()))
+            }
+            _ => None,
+        };
         // Opening a page is the strongest hint that its first track is about to be played.
         let first = detail.listing.items().first().map(|r| r.track.clone());
+        if let Some((ticket, id, rows)) = to_cache {
+            if let Some(cache) = PageCache::try_global(cx) {
+                cache.put(&ticket, keys::collection(&id), rows);
+            }
+        }
         if let Some(track) = first.filter(|_| pending.is_none() && !failed) {
             self.player.update(cx, |p, _| p.prefetch(&track));
+        }
+        if matches!(origin, Origin::Cached) {
+            let writes = self.writes.read(cx);
+            seeds.retain(|(video, _)| writes.liked(video).is_none());
         }
         self.writes.update(cx, |w, cx| w.seed(seeds, cx));
         if let Some(request) = pending.filter(|_| !failed) {
@@ -906,12 +1038,15 @@ impl LibraryModel {
         }
     }
 
-    /// Load a page's list again without clearing what it shows; swap it in when it is complete.
-    /// Quiet on failure: the rows already shown stay.
+    /// Load a page's list again without clearing what it shows; swap it in when it is complete
+    /// (and only when it differs, so an unchanged page is not redrawn). Quiet on failure: the
+    /// rows already shown stay.
     fn refresh_detail(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(source) = self.source.clone() else {
             return;
         };
+        let cache = PageCache::try_global(cx);
+        let ticket = cache.as_ref().map(|c| c.ticket());
         let Some(detail) = self.collection_mut(id) else {
             return;
         };
@@ -922,6 +1057,7 @@ impl LibraryModel {
             let rev = fresh.begin();
             let mut result = {
                 let source = source.clone();
+                let collection = collection.clone();
                 cx.background_executor()
                     .spawn(async move { source.tracks(&collection) })
                     .await
@@ -946,10 +1082,16 @@ impl LibraryModel {
             if !whole {
                 return;
             }
+            if let (Some(cache), Some(ticket)) = (&cache, &ticket) {
+                cache.put(ticket, keys::collection(&collection.id), fresh.items().to_vec());
+            }
             let _ = this.update(cx, |m, cx| {
+                let seeds = like_seeds(fresh.items(), collection.is_liked_music());
                 if let Some(d) = m.collection_mut(id) {
-                    if d.refresh == generation && !d.is_loading() {
+                    if d.refresh == generation && !d.is_loading() && d.listing.items() != fresh.items()
+                    {
                         d.listing = fresh;
+                        m.writes.update(cx, |w, cx| w.seed(seeds, cx));
                         cx.notify();
                     }
                 }
@@ -1070,6 +1212,7 @@ impl LibraryModel {
         // The account is named now, when the person acted, not when the edit goes out.
         let token = self.source.as_ref().and_then(|s| s.account_token());
         let key = collection.library_key().to_owned();
+        edits::Stale::Collection(key.clone()).invalidate(cx);
         self.edit_queues
             .entry(key.clone())
             .or_insert_with(|| EditQueue {
@@ -1145,6 +1288,8 @@ impl LibraryModel {
         result: Result<(), apollo_domain::library::WriteFailure>,
         cx: &mut Context<Self>,
     ) {
+        // Whatever a read cached while the write was out is not the playlist as it is now.
+        edits::Stale::Collection(key.to_owned()).invalidate(cx);
         match result {
             Ok(()) => {
                 if let Some(queue) = self.edit_queues.get_mut(key) {
@@ -1192,31 +1337,64 @@ impl LibraryModel {
             return;
         };
         let (id, browse_id) = (detail.id, detail.target.id.clone());
-        detail.state = Load::Loading;
         detail.pending = None;
-        cx.notify();
+        // The last answer is drawn at once and fetched again behind it.
+        let cache = PageCache::try_global(cx);
+        let cached = cache
+            .as_ref()
+            .and_then(|c| c.get::<ArtistContent>(&keys::artist(&browse_id)));
+        let ticket = cache.as_ref().map(|c| c.ticket());
+        let how = if cached.is_some() {
+            Answer::Behind
+        } else {
+            Answer::Fresh
+        };
+        match cached {
+            Some(cached) => self.apply_artist(id, Ok(cached.value), Answer::Cached, cx),
+            None => {
+                detail.state = Load::Loading;
+                cx.notify();
+            }
+        }
         cx.spawn(async move |this, cx| {
+            let asked = browse_id.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { source.artist(&browse_id) })
+                .spawn(async move { source.artist(&asked) })
                 .await;
-            let _ = this.update(cx, |m, cx| m.apply_artist(id, result, cx));
+            let _ = this.update(cx, |m, cx| {
+                if let (Ok(content), Some(cache), Some(ticket)) = (&result, &cache, &ticket) {
+                    cache.put(ticket, keys::artist(&browse_id), content.clone());
+                }
+                m.apply_artist(id, result, how, cx)
+            });
         })
         .detach();
     }
 
+    /// Applies an artist page's answer; see [`Answer`].
     fn apply_artist(
         &mut self,
         id: u64,
         result: Result<ArtistContent, LoadFailure>,
+        how: Answer,
         cx: &mut Context<Self>,
     ) {
         let Some(detail) = self.artist_mut(id) else {
             return;
         };
+        if how == Answer::Behind {
+            match &result {
+                Ok(content) if detail.content().is_some_and(|c| **c == *content) => return,
+                Err(failure) if *failure != LoadFailure::Session && detail.content().is_some() => {
+                    return
+                }
+                _ => {}
+            }
+        }
         let pending = detail.pending.take();
         let ok = result.is_ok();
-        let seeds = result
+        let mut seeds = result
             .as_ref()
             .map(|c| like_seeds(&c.top_songs, false))
             .unwrap_or_default();
@@ -1224,6 +1402,10 @@ impl LibraryModel {
             Ok(content) => Load::Ready(Arc::new(content)),
             Err(failure) => Load::Failed(failure),
         };
+        if how == Answer::Cached {
+            let writes = self.writes.read(cx);
+            seeds.retain(|(video, _)| writes.liked(video).is_none());
+        }
         let first = match &self.artist_mut(id).map(|d| &d.state) {
             Some(Load::Ready(c)) => c.top_songs.first().map(|r| r.track.clone()),
             _ => None,

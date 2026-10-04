@@ -42,6 +42,28 @@ use crate::player::PlayerModel;
 /// write is reported as unknown.
 const MAX_PAGES: usize = 100;
 
+/// What a write makes stale in the page cache, dropped when the write goes out and again when it
+/// settles (a read between the two must not put the old page back).
+#[derive(Clone, Debug)]
+pub enum Stale {
+    /// The set of playlists and albums (one was created).
+    Library,
+    /// One collection's page, and the library list that carries its title.
+    Collection(String),
+}
+
+impl Stale {
+    pub fn invalidate(&self, cx: &gpui::App) {
+        let Some(cache) = crate::page_cache::PageCache::try_global(cx) else {
+            return;
+        };
+        match self {
+            Stale::Library => cache.invalidate_library(),
+            Stale::Collection(id) => cache.invalidate_collection(id),
+        }
+    }
+}
+
 /// What was being done, for the words of a failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edit {
@@ -440,6 +462,7 @@ impl LibraryEdits {
     fn run<T: Send + 'static>(
         &mut self,
         key: String,
+        stale: Stale,
         cx: &mut Context<Self>,
         work: impl FnOnce(&dyn LibrarySource, &Option<String>) -> Result<T, WriteFailure>
             + Send
@@ -456,6 +479,7 @@ impl LibraryEdits {
         };
         let expect = source.account_token();
         self.busy.insert(key.clone());
+        stale.invalidate(cx);
         cx.notify();
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
@@ -468,6 +492,7 @@ impl LibraryEdits {
                     return;
                 }
                 m.busy.remove(&key);
+                stale.invalidate(cx);
                 done(m, result, cx);
                 cx.notify();
             });
@@ -489,6 +514,7 @@ impl LibraryEdits {
         let asked = title.clone();
         self.run(
             "create".into(),
+            Stale::Library,
             cx,
             move |source, expect| create(source, expect, &known, &asked),
             move |m, result, cx| match result {
@@ -530,6 +556,7 @@ impl LibraryEdits {
         let (id, asked) = (key.clone(), title.clone());
         self.run(
             format!("playlist:{key}"),
+            Stale::Collection(key.clone()),
             cx,
             move |source, expect| rename(source, expect, &id, &asked),
             move |m, result, cx| match result {
@@ -552,6 +579,7 @@ impl LibraryEdits {
         let id = key.clone();
         self.run(
             format!("playlist:{key}"),
+            Stale::Collection(key.clone()),
             cx,
             move |source, expect| delete(source, expect, &id),
             move |m, result, cx| match result {
@@ -577,6 +605,7 @@ impl LibraryEdits {
         let asked = collection.clone();
         self.run(
             format!("save:{key}"),
+            Stale::Collection(key.clone()),
             cx,
             move |source, expect| {
                 // An album is saved on its audio playlist, which takes reading its page.

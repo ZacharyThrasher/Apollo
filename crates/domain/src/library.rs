@@ -8,14 +8,14 @@ use crate::model::BrowseId;
 /// Browse id of the account's Liked Music playlist (`LM` with the `VL` browse prefix).
 pub const LIKED_MUSIC_BROWSE_ID: &str = "VLLM";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CollectionKind {
     Playlist,
     Album,
 }
 
 /// One entry of the library: enough to draw a row and to ask the provider for its tracks.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Collection {
     pub kind: CollectionKind,
     /// Browse id: `VL…` for a playlist, `MPRE…` for an album.

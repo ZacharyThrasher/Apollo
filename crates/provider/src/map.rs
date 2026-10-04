@@ -14,7 +14,7 @@ use innertube::{
 
 /// A track as it appears in a listing: the playable identity plus the row's own occurrence token,
 /// which is what repeated pages are deduplicated on (the same video may sit in a playlist twice).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ListedTrack {
     pub track: Track,
     pub occurrence: Option<String>,
@@ -164,7 +164,7 @@ pub fn collections_from_grid(cards: &[BrowseItem], kind: CollectionKind) -> Vec<
 
 /// One of YouTube Music's date buckets of the play history ("Today", "Yesterday", "This week"),
 /// most recent play first.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HistoryDay {
     pub title: String,
     pub items: Vec<ListedTrack>,
