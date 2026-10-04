@@ -24,6 +24,8 @@ use crate::settings::SettingsBackend;
 pub const KEY_MAIN: &str = "window_main";
 /// The mini player's record.
 pub const KEY_MINI: &str = "window_mini";
+/// The game HUD's own place (it is a different size from the mini player).
+pub const KEY_HUD: &str = "window_hud";
 
 /// How long a window must sit still before its place is written down.
 const SAVE_DELAY: Duration = Duration::from_millis(600);
@@ -56,6 +58,21 @@ impl Rect {
 
     pub fn bottom(&self) -> f32 {
         self.y + self.h
+    }
+
+    /// This rectangle drawn in by `by` on every side.
+    pub fn inset(&self, by: f32) -> Self {
+        Self::new(
+            self.x + by,
+            self.y + by,
+            self.w - 2.0 * by,
+            self.h - 2.0 * by,
+        )
+    }
+
+    /// This rectangle grown by `by` on every side.
+    pub fn outset(&self, by: f32) -> Self {
+        self.inset(-by)
     }
 
     /// The overlap with `other` as (width, height); both zero when they do not touch.

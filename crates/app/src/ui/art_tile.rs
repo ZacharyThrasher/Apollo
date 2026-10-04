@@ -30,10 +30,28 @@ pub fn art_tile_fluid(nominal: f32, image: Option<Arc<RenderImage>>) -> Div {
 
 /// [`art_tile`] as a circle (an artist) or a rounded square.
 pub fn art_tile_shaped(nominal: f32, image: Option<Arc<RenderImage>>, circle: bool) -> Div {
-    art_tile_fluid_shaped(nominal, image, circle).size(px(nominal)).flex_none()
+    art_tile_fluid_shaped(nominal, image, circle)
+        .size(px(nominal))
+        .flex_none()
+}
+
+/// [`art_tile`] with its own corner radius (the HUD's art has smaller corners than a card's).
+pub fn art_tile_rounded(size: f32, image: Option<Arc<RenderImage>>, corner: f32) -> Div {
+    art_tile_corners(size, image, false, corner)
+        .size(px(size))
+        .flex_none()
 }
 
 fn art_tile_fluid_shaped(nominal: f32, image: Option<Arc<RenderImage>>, circle: bool) -> Div {
+    art_tile_corners(nominal, image, circle, radius::MEDIUM)
+}
+
+fn art_tile_corners(
+    nominal: f32,
+    image: Option<Arc<RenderImage>>,
+    circle: bool,
+    corner: f32,
+) -> Div {
     let size = nominal;
     div()
         .flex()
@@ -43,7 +61,7 @@ fn art_tile_fluid_shaped(nominal: f32, image: Option<Arc<RenderImage>>, circle: 
             if circle {
                 d.rounded_full()
             } else {
-                d.rounded(px(radius::MEDIUM))
+                d.rounded(px(corner))
             }
         })
         .overflow_hidden()
@@ -59,7 +77,7 @@ fn art_tile_fluid_shaped(nominal: f32, image: Option<Arc<RenderImage>>, circle: 
                         if circle {
                             i.rounded_full()
                         } else {
-                            i.rounded(px(radius::MEDIUM))
+                            i.rounded(px(corner))
                         }
                     }),
             ),

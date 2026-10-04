@@ -19,12 +19,19 @@ use crate::player::PlayerModel;
 use crate::settings::{SettingsBackend, SettingsModel, MINI_PLAYER_HUD};
 use crate::ui::mini_player::{self, MiniPlayer};
 use crate::ui::shell::Shell;
-use crate::window_state::{self, Constraints, Home, KEY_MINI};
+use crate::window_state::{self, Constraints, Home, KEY_HUD, KEY_MINI};
 
 /// Where the mini player parks the first time, and the one size it ever has.
 pub const PLACEMENT: Constraints = Constraints {
     default_size: (mini_player::WIDTH, mini_player::HEIGHT),
     min_size: (mini_player::WIDTH, mini_player::HEIGHT),
+    home: Home::BottomRight,
+};
+
+/// The HUD's window: the panel plus room for its shadow, parked in the same corner.
+pub const HUD_PLACEMENT: Constraints = Constraints {
+    default_size: (mini_player::HUD_WIDTH, mini_player::HUD_HEIGHT),
+    min_size: (mini_player::HUD_WIDTH, mini_player::HUD_HEIGHT),
     home: Home::BottomRight,
 };
 
@@ -95,7 +102,16 @@ pub fn open(cx: &mut App) {
         host.store.clone(),
     );
     let hud = settings.read(cx).get(&MINI_PLAYER_HUD);
-    let place = window_state::restore(cx, store.as_ref(), KEY_MINI, &PLACEMENT);
+    // The HUD keeps its own place: it is a different size and sits somewhere else.
+    let (key, placement) = if hud {
+        (KEY_HUD, &HUD_PLACEMENT)
+    } else {
+        (KEY_MINI, &PLACEMENT)
+    };
+    let place = window_state::restore(cx, store.as_ref(), key, placement);
+    let Ok(writes) = main.read_with(cx, |shell, _| shell.writes().clone()) else {
+        return;
+    };
     let opened = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(place.rect.to_bounds())),
@@ -120,7 +136,14 @@ pub fn open(cx: &mut App) {
         },
         |_, cx| {
             cx.new(|cx| {
-                MiniPlayer::new(player, settings, hud, |_, cx| cx.defer(return_to_main), cx)
+                MiniPlayer::new(
+                    player,
+                    settings,
+                    writes,
+                    hud,
+                    |_, cx| cx.defer(return_to_main),
+                    cx,
+                )
             })
         },
     );
@@ -144,7 +167,7 @@ pub fn open(cx: &mut App) {
             true
         });
         // Its position is remembered like the main window's.
-        let remembered = window_state::remember(window, cx, store, KEY_MINI, false);
+        let remembered = window_state::remember(window, cx, store, key, false);
         view.keep(remembered);
     });
     if cx.has_global::<Host>() {

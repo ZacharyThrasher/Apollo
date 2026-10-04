@@ -221,14 +221,18 @@ Applied to the dialog, menus, popover and Library page (`ui/playlist_dialog.rs`,
 8. **Feedback:** success is silent. Failures use the existing error toast, six words or fewer: "Couldn't create playlist", "Couldn't rename playlist", "Couldn't delete playlist", "Couldn't remove song", "Couldn't move song", "Couldn't save to library", "Couldn't remove from library", or "Sign-in expired". A write whose reply is lost is read back before anything is said or retried.
 9. **After a delete:** a playlist page that is open closes and the card leaves the list.
 
-## HUD mode decisions (coordinator brief, 2026-10-04)
-Applied to the mini player (`ui/mini_player.rs`, `mini.rs`, `hud.rs`). Settings > Window: "HUD mode for mini player" (off), "Auto-hide HUD" (on).
-1. **Look:** the same 360x96 layout, painted on `bg.overlay` at 85% with the medium radius over a transparent window (no Mica). Never takes keyboard focus; always on top.
-2. **Pointer:** click-through while the pointer is away (the app polls the cursor, since a click-through window gets no mouse events); solid and clickable under it.
-3. **Snap:** after a drag it settles, then snaps to the nearest screen corner or edge, 16px from the taskbar-aware work area, when within 48px of it.
-4. **Auto-hide:** dims to 30% (300ms fade) after 4s without a track change and returns to full for 4s on each one. Off keeps it solid.
-5. **Ctrl+Alt+H** shows/hides it (registered only while Global hotkeys is on).
-6. **Limit:** topmost windows show over windowed and borderless games, not exclusive fullscreen; that would need DLL injection, which risks anti-cheat bans, so it is not done.
+## HUD (coordinator brief, 2026-10-04)
+Applied to the mini player in HUD mode (`ui/mini_player.rs` `render_hud`, `mini.rs`, `hud.rs`). Settings > Window: "HUD mode for mini player" (off), "Auto-hide HUD" (on). Ctrl+Alt+H shows or hides it while Global hotkeys is on.
+1. **Panel:** 320x64, 12px corners (`radius::LARGE`), a 1px border of white at 8%, a soft shadow (0 4px 16px, black 40%). The window is the panel plus 20px of see-through room on every side so the shadow has somewhere to fall; only the panel counts for hover, clicks and snapping.
+2. **Fill:** the brief asks for Windows acrylic tinted with bg.overlay at 85%, falling back to solid bg.overlay at 92%. Built choice: the 92% fallback, with no blur. The system backdrops fill the whole window rectangle and are clipped by the system's 8px corner, which would square off the shadow room and the 12px corners. Revisit if the panel should trade its shadow for blur.
+3. **Content at rest:** a 48px square of art with 6px corners at 8px from the left, top and bottom; the title in Segoe UI Variable 14px semibold text.primary and the artist in 12px text.secondary, one line each with an ellipsis. Nothing else: no buttons, time or labels.
+4. **Progress:** a 2px line along the bottom edge, drawn in 12px (the corner radius) from each side, the art accent over the track in white at 10%.
+5. **On hover:** the panel goes fully opaque over 120 ms. Previous, play/pause, next and a heart appear on the right over the end of the text (28px buttons, text.primary icons, the heart in the accent when liked); the text ellipsises earlier to make room. No focus ring, and the window never takes focus.
+6. **Track change:** the title and artist slide up 6px and cross-fade over 160 ms, and the art cross-fades. Art arriving later than the title cross-fades alone.
+7. **Auto-hide:** the HUD fades to 30% after 4 s, and returns to 100% for 4 s on a track change, and while hovered. Off keeps it solid.
+8. **Animation effects off (Windows):** the fade, the opaque change, and the track change are instant.
+9. **Snap:** dropping the panel within 48px of a screen edge or corner moves it to 16px from it (above the taskbar), once it has sat still for half a second.
+10. **Limit:** topmost windows show over windowed and borderless games, not exclusive fullscreen; that would need DLL injection, which risks anti-cheat bans, so it is not done.
 
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.
