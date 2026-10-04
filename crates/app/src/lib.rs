@@ -9,6 +9,9 @@ pub mod autostart;
 pub mod backend;
 pub mod discord;
 pub mod home;
+#[cfg(windows)]
+pub mod hotkeys_win;
+pub mod keymap;
 pub mod latency;
 pub mod library;
 pub mod lyrics;
