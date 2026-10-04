@@ -75,6 +75,8 @@ icons! {
     Radio => "live-regular",
     QueueAdd => "queue-add-regular",
     PlayNext => "play-next-regular",
+    MoonRegular => "weather-moon-regular",
+    MoonFilled => "weather-moon-filled",
 }
 
 pub struct Assets;

@@ -220,12 +220,14 @@ dependencies = [
  "gpui_platform",
  "image",
  "raw-window-handle",
+ "serde_json",
  "souvlaki",
  "tempfile",
  "tokio",
  "tray-icon",
  "unicode-segmentation",
  "ureq",
+ "windows 0.62.2",
 ]
 
 [[package]]

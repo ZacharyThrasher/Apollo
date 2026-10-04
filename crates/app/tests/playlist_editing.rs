@@ -660,6 +660,23 @@ fn moving_a_row_to_the_end_and_a_row_onto_itself(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn reloading_the_library_while_an_edit_is_out_does_not_stall_the_next_edit(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_playlist(&page, vcx, ROAD_TRIP);
+    let model = page.view.read_with(vcx, |v, _| v.model().clone());
+    let tokens = page.sim.occurrences(ROAD_TRIP_ID);
+    // Nothing runs between these calls: the first edit is out when the library reloads.
+    model.update(vcx, |m, cx| {
+        m.remove_row(ROAD_TRIP_ID, &tokens[0], cx);
+        m.reload_collections(cx);
+        m.remove_row(ROAD_TRIP_ID, &tokens[1], cx);
+    });
+    vcx.run_until_parked();
+    assert_eq!(page.sim.occurrences(ROAD_TRIP_ID).len(), 1, "both removes went out, one after the other");
+    assert!(!model.read_with(vcx, |m, _| m.edits_pending(ROAD_TRIP_ID)));
+}
+
+#[gpui::test]
 fn a_refused_move_shows_the_services_order_again(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     open_playlist(&page, vcx, ROAD_TRIP);

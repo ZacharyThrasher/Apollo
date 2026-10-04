@@ -23,7 +23,7 @@ use crate::os_media::OsCommand;
 use crate::player::PlayerModel;
 use crate::search::{SearchModel, SearchSource};
 use crate::settings::SettingsModel;
-use crate::settings::LyricsOpenStore;
+use crate::settings::{LibrarySortStore, LyricsOpenStore};
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
 use crate::ui::home_page::{self, HomeView};
@@ -41,6 +41,7 @@ use crate::ui::settings_page::{self, SettingsPage};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
 use crate::ui::titlebar::TitleBar;
 use crate::ui::toast::{self, toast, Fade};
+use crate::ui::sleep_menu::{SleepMenu, SleepMenuHandle};
 use crate::ui::track_menu::{self, MenuHandle, TrackMenu};
 use crate::url_thumbs::{ThumbSource, ThumbStore};
 
@@ -113,6 +114,8 @@ pub struct Shell {
     dialog: Entity<PlaylistDialog>,
     /// The menu a right-click or a row's More button opens.
     menu: Entity<TrackMenu>,
+    /// The sleep timer popover the moon button in Now Playing opens.
+    sleep_menu: Entity<SleepMenu>,
     /// The error on screen: it outlives the notice by the length of its fade-out.
     toast: Option<ToastShown>,
     /// Where a page opened from another route (a Search card) returns to when Back closes the
@@ -123,6 +126,8 @@ pub struct Shell {
     /// Whether the account could serve the library when it was last looked at; the library is
     /// loaded again when it becomes able to (see [`account_usable`]).
     library_usable: bool,
+    /// An account was signed in since the shell started: signing out then forgets its recents.
+    search_account_live: bool,
     /// The first time the account turns out to be signed out, the window opens on Settings.
     routed_to_sign_in: bool,
     /// Keeps the window-activation hook that dismisses tooltips alive.
@@ -238,6 +243,9 @@ impl Shell {
         });
         cx.observe(&menu, |_, _, cx| cx.notify()).detach();
         cx.set_global(MenuHandle(menu.clone()));
+        let sleep_menu = cx.new(|cx| SleepMenu::new(player.clone(), cx));
+        cx.observe(&sleep_menu, |_, _, cx| cx.notify()).detach();
+        cx.set_global(SleepMenuHandle(sleep_menu.clone()));
         let queue_panel = cx.new(|cx| {
             QueuePanel::new(
                 player.clone(),
@@ -271,9 +279,17 @@ impl Shell {
             )
         });
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
-        let playback_page = cx.new(|cx| PlaybackPage::new(player.clone(), cx));
-        let settings_page = cx
-            .new(|cx| SettingsPage::new(account_page, playback_page, settings, player.clone(), cx));
+        let playback_page =
+            cx.new(|cx| PlaybackPage::new(player.clone(), settings.clone(), cx));
+        let settings_page = cx.new(|cx| {
+            SettingsPage::new(
+                account_page,
+                playback_page,
+                settings.clone(),
+                player.clone(),
+                cx,
+            )
+        });
         let library = cx.new(|cx| {
             LibraryView::new(
                 player.clone(),
@@ -307,6 +323,9 @@ impl Shell {
         cx.observe(&progress, |_, _, cx| cx.notify()).detach();
         cx.observe(&volume, |_, _, cx| cx.notify()).detach();
         let search_model = cx.new(|_| SearchModel::new());
+        if let Some(backend) = settings.read(cx).backend() {
+            search_model.update(cx, |m, cx| m.install_recents(backend, cx));
+        }
         let thumbs = cx.new(|_| ThumbStore::new());
         let search = cx.new(|cx| {
             SearchPage::new(
@@ -315,6 +334,7 @@ impl Shell {
                 picker.clone(),
                 search_model.clone(),
                 thumbs.clone(),
+                settings.clone(),
                 root_focus.clone(),
                 {
                     let weak = weak.clone();
@@ -360,10 +380,12 @@ impl Shell {
             picker,
             dialog,
             menu,
+            sleep_menu,
             toast: None,
             detail_origin: None,
             library_epoch: 0,
             library_usable: false,
+            search_account_live: false,
             routed_to_sign_in: false,
             _activation: None,
             route: Route::Home,
@@ -409,9 +431,17 @@ impl Shell {
             self.menu.update(cx, |m, cx| m.reset(cx));
             self.edits.update(cx, |e, cx| e.reset(cx));
             self.dialog.update(cx, |d, cx| d.reset(cx));
+            self.sleep_menu.update(cx, |m, cx| m.reset(cx));
         }
         let model = self.account.read(cx);
         let (signed_out, by_choice) = (model.is_signed_out(), model.is_signed_out_by_choice());
+        if matches!(model.screen(), crate::account::Screen::SignedIn { .. }) {
+            self.search_account_live = true;
+        } else if by_choice && self.search_account_live {
+            // What the account searched for goes with its session.
+            self.search_account_live = false;
+            self.search_model.update(cx, |m, cx| m.forget_account(cx));
+        }
         let access = home_access(&view, signed_out, by_choice, self.home_access);
         if access != self.home_access || epoch != self.home_epoch {
             if epoch != self.home_epoch {
@@ -482,6 +512,15 @@ impl Shell {
 
     pub fn picker(&self) -> &Entity<PlaylistPicker> {
         &self.picker
+    }
+
+    /// The app's settings (the model the Settings page edits).
+    pub fn settings(&self, cx: &App) -> Entity<SettingsModel> {
+        self.settings_page.read(cx).settings().clone()
+    }
+
+    pub fn sleep_menu(&self) -> &Entity<SleepMenu> {
+        &self.sleep_menu
     }
 
     pub fn menu(&self) -> &Entity<TrackMenu> {
@@ -645,6 +684,16 @@ impl Shell {
             let _ = pane.update(cx, |p, cx| p.restore_open(saved, cx));
         })
         .detach();
+    }
+
+    /// Where the Library tabs' sort choices are remembered.
+    pub fn install_library_sort(
+        &mut self,
+        store: Option<Arc<dyn LibrarySortStore>>,
+        cx: &mut Context<Self>,
+    ) {
+        let model = self.library.read(cx).model().clone();
+        model.update(cx, |m, cx| m.install_sort_store(store, cx));
     }
 
     /// The L key: like the playing song, or take the like back (the heart's own toggle).
@@ -992,6 +1041,11 @@ impl Render for Shell {
         let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
         let menu = self.menu.read(cx).is_open().then(|| self.menu.clone());
         let dialog = self.dialog.read(cx).is_open().then(|| self.dialog.clone());
+        let sleep_menu = self
+            .sleep_menu
+            .read(cx)
+            .is_open()
+            .then(|| self.sleep_menu.clone());
 
         let fonts = cx.global::<style::Fonts>().text.clone();
         div()
@@ -1062,6 +1116,7 @@ impl Render for Shell {
             .children(picker)
             .children(menu)
             .children(dialog)
+            .children(sleep_menu)
     }
 }
 

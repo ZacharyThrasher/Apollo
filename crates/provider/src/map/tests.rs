@@ -459,3 +459,42 @@ fn an_album_saves_on_its_audio_playlist_and_says_whether_it_is_saved() {
     let not_saved = meta_from_album(&innertube::models::browse::parse_album(&header(false)));
     assert_eq!(not_saved.in_library, Some(false));
 }
+
+#[test]
+fn history_buckets_keep_their_order_and_drop_rows_that_cannot_play() {
+    use innertube::models::browse::parse_history;
+    let song = |video: &str, title: &str| {
+        json!({ "musicResponsiveListItemRenderer": {
+            "playlistItemData": { "videoId": video },
+            "flexColumns": [
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": title }] } } },
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                    { "text": "Some Artist", "navigationEndpoint": { "browseEndpoint": { "browseId": "UCabc" } } }
+                ] } } }
+            ]
+        } })
+    };
+    let shelf = |title: &str, rows: Vec<Value>| {
+        json!({ "musicShelfRenderer": { "title": { "runs": [{ "text": title }] }, "contents": rows } })
+    };
+    let root = json!({ "contents": [
+        shelf("Today", vec![song("aaaaaaaaaaa", "One"), song("bbbbbbbbbbb", "Two")]),
+        shelf("Yesterday", vec![song("aaaaaaaaaaa", "One")]),
+    ] });
+    let days = history_days(&parse_history(&root));
+    let shape: Vec<(&str, Vec<&str>)> = days
+        .iter()
+        .map(|d| {
+            (
+                d.title.as_str(),
+                d.items.iter().map(|t| t.track.title.as_str()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [("Today", vec!["One", "Two"]), ("Yesterday", vec!["One"])],
+        "a song played on two days is in both buckets"
+    );
+    assert_eq!(days[0].items[0].track.artists[0].name, "Some Artist");
+}
