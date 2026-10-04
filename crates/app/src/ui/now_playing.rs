@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use apollo_theme::tokens::{ambient, layout, lyrics, spacing, typography};
+use apollo_theme::tokens::{ambient, layout, lyrics, radius, spacing, typography};
 use gpui::{
     div, img, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, ImageSource,
     IntoElement, ObjectFit, ParentElement, Render, Styled, Window,
@@ -13,7 +13,7 @@ use gpui::{
 use crate::assets::Icon;
 use crate::library::writes::LibraryWrites;
 use crate::player::PlayerModel;
-use crate::style::color;
+use crate::style::{self, color};
 use crate::ui::anchor;
 use crate::ui::art_tile::art_tile_fluid;
 use crate::ui::button::{Handler, IconButton};
@@ -23,12 +23,15 @@ use crate::ui::player_bar::text_line;
 use crate::ui::playlist_picker::PlaylistPicker;
 use crate::ui::related_pane::RelatedPane;
 use crate::ui::row_actions::{heart_icon, heart_label};
+use crate::ui::sleep_menu;
 use crate::ui::slider::SliderState;
 use crate::ui::transport::{self, on_off, TransportFocus};
 
 /// Tab order: after the nav rail, before the queue panel and the player bar.
 /// Where the add-to-playlist popover of Now Playing is anchored.
 const PLAYLIST_ANCHOR: &str = "np-playlist-anchor";
+/// Where the sleep timer popover is anchored.
+const SLEEP_ANCHOR: &str = "np-sleep-anchor";
 const TAB_CLOSE: isize = 6;
 const TAB_TRANSPORT: isize = 7;
 
@@ -72,6 +75,7 @@ pub struct NowPlaying {
     focus_close: FocusHandle,
     focus_like: FocusHandle,
     focus_playlist: FocusHandle,
+    focus_sleep: FocusHandle,
     focus: TransportFocus,
     progress: Entity<SliderState>,
     on_close: Rc<Handler>,
@@ -103,6 +107,7 @@ impl NowPlaying {
             // Same slot as the transport: they sit above it, so they come first.
             focus_like: stop(cx, TAB_TRANSPORT),
             focus_playlist: stop(cx, TAB_TRANSPORT),
+            focus_sleep: stop(cx, TAB_TRANSPORT),
             focus: TransportFocus {
                 shuffle: stop(cx, TAB_TRANSPORT),
                 previous: stop(cx, TAB_TRANSPORT + 1),
@@ -195,6 +200,33 @@ impl Render for NowPlaying {
                 }
             });
             let add = anchor::anchored(PLAYLIST_ANCHOR, add);
+            let on = v.sleep.is_on();
+            let moon = IconButton::new(
+                "np-sleep",
+                &self.focus_sleep,
+                if on { Icon::MoonFilled } else { Icon::MoonRegular },
+                "Sleep timer",
+                v.accent,
+            )
+            .icon_color(on_off(on))
+            .toggled(on)
+            .on_click(|window, cx| sleep_menu::open(SLEEP_ANCHOR, window, cx));
+            // The minutes left hang off the button's corner, so nothing around it moves.
+            let moon = anchor::anchored(SLEEP_ANCHOR, moon).children(
+                v.sleep_minutes.filter(|m| *m >= 1).map(|m| {
+                    style::text_style(div(), typography::CAPTION, cx)
+                        .id("np-sleep-minutes")
+                        .debug_selector(|| "np-sleep-minutes".into())
+                        .absolute()
+                        .bottom(px(-2.0))
+                        .right(px(-2.0))
+                        .px(px(spacing::S1))
+                        .rounded(px(radius::SMALL))
+                        .bg(color::bg_overlay())
+                        .text_color(color::text_primary())
+                        .child(format!("{m}m"))
+                }),
+            );
             div()
                 .flex()
                 .flex_row()
@@ -202,6 +234,7 @@ impl Render for NowPlaying {
                 .gap(px(spacing::S1))
                 .child(div().debug_selector(|| "np-like".into()).child(like))
                 .child(div().debug_selector(|| "np-playlist".into()).child(add))
+                .child(div().debug_selector(|| "np-sleep".into()).child(moon))
         });
 
         let text = div()

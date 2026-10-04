@@ -41,6 +41,9 @@ impl BoolSetting {
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
 pub const START_MINIMIZED_TO_TRAY: BoolSetting = BoolSetting::new("start_minimized_to_tray", false);
+/// Playback > Pause when other audio plays: another app that keeps playing sound for a couple of
+/// seconds (a movie, a call) pauses the music. Off until the owner asks for it.
+pub const PAUSE_ON_OTHER_AUDIO: BoolSetting = BoolSetting::new("pause_on_other_audio", false);
 
 /// Discord > Show what I'm playing: the track shows as Rich Presence in the Discord client.
 pub const DISCORD_PRESENCE: BoolSetting = BoolSetting::new("discord_presence", false);
@@ -539,6 +542,7 @@ mod tests {
         let model = SettingsModel::new(Some(backend));
         assert!(!model.get(&CLOSE_TO_TRAY));
         assert!(!model.get(&START_MINIMIZED_TO_TRAY));
+        assert!(!model.get(&PAUSE_ON_OTHER_AUDIO), "off until asked for");
     }
 
     #[test]

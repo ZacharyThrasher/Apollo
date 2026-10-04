@@ -227,6 +227,7 @@ dependencies = [
  "tray-icon",
  "unicode-segmentation",
  "ureq",
+ "windows 0.62.2",
 ]
 
 [[package]]

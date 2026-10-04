@@ -109,6 +109,11 @@ pub enum Event {
     },
     Stop,
     Logout,
+    /// The sound output went away or changed under the player: the default device changed or
+    /// vanished (headphones unplugged, Bluetooth dropped), or the PC slept. Pauses in place at
+    /// the same position, never skips and never touches the queue; the next Play opens the track
+    /// afresh at that position so the audio comes out of whatever output exists then.
+    OutputLost,
     // --- asynchronous completions ---
     Resolved {
         load: LoadId,
@@ -202,6 +207,10 @@ pub struct Coordinator {
     failures: u8,
     skipped: Vec<(QueueEntryId, Failure)>,
     error: Option<Failure>,
+    /// The output was lost since the engine last opened a stream: the next Play opens the
+    /// current track again (at the paused position) instead of resuming a stream whose output
+    /// may be gone.
+    reopen_on_play: bool,
     next_load: u64,
     seek_gen: u64,
 }
@@ -226,6 +235,7 @@ impl Coordinator {
             failures: 0,
             skipped: Vec::new(),
             error: None,
+            reopen_on_play: false,
             next_load: 1,
             seek_gen: 0,
         }
@@ -326,6 +336,7 @@ impl Coordinator {
             },
             Event::Seek { position_ms } => self.on_seek(position_ms, &mut fx),
             Event::Stop => self.stop_all(&mut fx),
+            Event::OutputLost => self.on_output_lost(&mut fx),
             Event::Logout => {
                 self.stop_all(&mut fx);
                 self.queue = Queue::new();
@@ -360,6 +371,7 @@ impl Coordinator {
             fx.push(Effect::Cancel { load: p.load });
         }
         fx.push(Effect::Stop);
+        self.reopen_on_play = false;
         self.phase = Phase::Idle;
         self.intent = Intent::Paused;
         self.position_ms = 0;
@@ -381,6 +393,7 @@ impl Coordinator {
             fx.push(Effect::Cancel { load: a.load });
         }
         self.error = None;
+        self.reopen_on_play = false;
         self.position_ms = resume_ms;
         self.duration_ms = None;
         let Some(entry) = self.queue.current() else {
@@ -442,6 +455,14 @@ impl Coordinator {
     fn on_play(&mut self, fx: &mut Vec<Effect>) {
         let was_paused = self.intent == Intent::Paused;
         self.intent = Intent::Playing;
+        // The output was lost while this track was loaded: open it again where it stopped.
+        if self.reopen_on_play && matches!(self.phase, Phase::Paused | Phase::Seeking) {
+            self.failures = 0;
+            self.skipped.clear();
+            let resume = self.position_ms;
+            self.start_load(false, resume, fx);
+            return;
+        }
         match self.phase {
             Phase::Paused => {
                 if let Some(a) = &mut self.active {
@@ -487,6 +508,17 @@ impl Coordinator {
             }
             // Loading: intent is applied when the engine reports Opened.
             _ => {}
+        }
+    }
+
+    /// Pause where the track is and remember to reopen it on the next Play. A load still in
+    /// flight needs no reopening: it opens on whatever output exists by then.
+    fn on_output_lost(&mut self, fx: &mut Vec<Effect>) {
+        if self.is_loaded() {
+            self.on_pause(fx);
+            self.reopen_on_play = true;
+        } else if matches!(self.phase, Phase::Resolving | Phase::Opening) {
+            self.on_pause(fx);
         }
     }
 
@@ -662,6 +694,7 @@ impl Coordinator {
                 }
                 if self.is_loaded() {
                     self.phase = Phase::Paused;
+                    self.reopen_on_play = true;
                 }
                 self.error = Some(Failure::Device);
             }
@@ -1454,6 +1487,151 @@ mod tests {
         assert_eq!(c.phase(), Phase::Paused);
         assert_eq!(c.intent(), Intent::Paused);
         assert_eq!(cur(&c), "a");
+    }
+
+    /// Plays "a" for a while, so there is a position worth keeping.
+    fn playing_at(c: &mut Coordinator, ids: &[&str], at_ms: u64) -> LoadId {
+        let (load, _) = start_playing(c, ids);
+        c.handle(Event::Engine {
+            load,
+            event: EngineEvent::Position(at_ms),
+        });
+        load
+    }
+
+    // TEST-20 (logic level)
+    #[test]
+    fn output_lost_pauses_in_place_and_keeps_the_queue() {
+        let mut c = Coordinator::default();
+        let load = playing_at(&mut c, &["a", "b", "c"], 73_000);
+        let fx = c.handle(Event::OutputLost);
+        assert!(fx.contains(&Effect::Pause { load }));
+        assert_eq!(c.phase(), Phase::Paused);
+        assert_eq!(c.intent(), Intent::Paused);
+        assert_eq!(c.position_ms(), 73_000);
+        assert_eq!(cur(&c), "a");
+        assert_eq!(c.queue().upcoming_ids().len(), 2);
+        // Not an error: nothing to show the user.
+        assert_eq!(c.error(), None);
+        // The engine's own late word about the lost device does not skip anything either.
+        c.handle(Event::Engine {
+            load,
+            event: EngineEvent::Error(Failure::Device),
+        });
+        assert_eq!(cur(&c), "a");
+        assert_eq!(c.position_ms(), 73_000);
+    }
+
+    #[test]
+    fn play_after_output_lost_opens_the_track_again_at_the_same_position() {
+        let mut c = Coordinator::default();
+        let load = playing_at(&mut c, &["a", "b"], 73_000);
+        c.handle(Event::OutputLost);
+        let fx = c.handle(Event::Play);
+        // The old stream is dropped and a fresh one is resolved from where it stopped.
+        assert!(fx.contains(&Effect::Cancel { load }));
+        let (new_load, resume_ms) = fx
+            .iter()
+            .find_map(|e| match e {
+                Effect::Resolve {
+                    load, resume_ms, ..
+                } => Some((*load, *resume_ms)),
+                _ => None,
+            })
+            .expect("a fresh resolve");
+        assert_ne!(new_load, load);
+        assert_eq!(resume_ms, 73_000);
+        assert_eq!(cur(&c), "a");
+        let fx = c.handle(Event::Resolved {
+            load: new_load,
+            result: Ok(LeaseId(9)),
+        });
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Open {
+                start_paused: false,
+                start_ms: 73_000,
+                ..
+            }
+        )));
+        // And that is the only reopen: pausing and playing again just resumes.
+        c.handle(Event::Engine {
+            load: new_load,
+            event: EngineEvent::Opened {
+                duration_ms: Some(200_000),
+            },
+        });
+        c.handle(Event::Pause);
+        let fx = c.handle(Event::Play);
+        assert_eq!(fx, vec![Effect::Resume { load: new_load }]);
+    }
+
+    #[test]
+    fn output_lost_while_already_paused_still_reopens_on_play() {
+        let mut c = Coordinator::default();
+        let load = playing_at(&mut c, &["a"], 10_000);
+        c.handle(Event::Pause);
+        let fx = c.handle(Event::OutputLost);
+        assert!(fx.is_empty(), "already paused: nothing to tell the engine");
+        let fx = c.handle(Event::Play);
+        assert!(fx.contains(&Effect::Cancel { load }));
+        assert!(fx.iter().any(|e| matches!(e, Effect::Resolve { resume_ms: 10_000, .. })));
+    }
+
+    #[test]
+    fn output_lost_with_nothing_loaded_does_nothing() {
+        let mut c = Coordinator::default();
+        assert!(c.handle(Event::OutputLost).is_empty());
+        assert_eq!(c.phase(), Phase::Idle);
+        // A load still in flight is paused by intent and opens on whatever output exists then.
+        let fx = c.handle(Event::PlayContext {
+            tracks: tracks(&["a"]),
+            start: 0,
+        });
+        let load = resolve_load(&fx);
+        c.handle(Event::OutputLost);
+        assert_eq!(c.intent(), Intent::Paused);
+        let fx = c.handle(Event::Resolved {
+            load,
+            result: Ok(LeaseId(1)),
+        });
+        assert!(fx
+            .iter()
+            .any(|e| matches!(e, Effect::Open { start_paused: true, .. })));
+        c.handle(Event::Engine {
+            load,
+            event: EngineEvent::Opened { duration_ms: None },
+        });
+        assert_eq!(c.phase(), Phase::Paused);
+        // No stale reopen: Play just resumes.
+        let fx = c.handle(Event::Play);
+        assert_eq!(fx, vec![Effect::Resume { load }]);
+    }
+
+    #[test]
+    fn a_lost_device_reported_by_the_engine_also_reopens_on_play() {
+        let mut c = Coordinator::default();
+        let load = playing_at(&mut c, &["a"], 5_000);
+        c.handle(Event::Engine {
+            load,
+            event: EngineEvent::Error(Failure::Device),
+        });
+        assert_eq!(c.error(), Some(Failure::Device));
+        let fx = c.handle(Event::Play);
+        assert!(fx.iter().any(|e| matches!(e, Effect::Resolve { resume_ms: 5_000, .. })));
+        assert_eq!(c.error(), None);
+    }
+
+    #[test]
+    fn output_lost_during_a_seek_keeps_the_pause_and_reopens() {
+        let mut c = Coordinator::default();
+        let _ = playing_at(&mut c, &["a"], 5_000);
+        c.handle(Event::Seek { position_ms: 90_000 });
+        assert_eq!(c.phase(), Phase::Seeking);
+        c.handle(Event::OutputLost);
+        assert_eq!(c.intent(), Intent::Paused);
+        let fx = c.handle(Event::Play);
+        assert!(fx.iter().any(|e| matches!(e, Effect::Resolve { resume_ms: 90_000, .. })));
     }
 
     // TEST-04 (logic level)
