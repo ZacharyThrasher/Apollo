@@ -343,6 +343,7 @@ impl LibraryView {
             for ix in 0..songs {
                 let frame = RowFrame {
                     ix,
+                    real: ix,
                     level: self.hover.level(ix, &mut moving),
                     selected: list_focused && ix == self.selected,
                     accent,

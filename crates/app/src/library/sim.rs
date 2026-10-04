@@ -11,7 +11,7 @@ use apollo_domain::library::{
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::{AlbumRef, ArtistRef, BrowseId, Track};
 use apollo_provider::{
-    ArtistSection, Hit, HomeItem, HomePage, HomeShelf, ListedTrack, RelatedArtist,
+    ArtistSection, HistoryDay, Hit, HomeItem, HomePage, HomeShelf, ListedTrack, RelatedArtist,
 };
 
 use super::source::{ArtistContent, LibrarySource, TrackRow};
@@ -114,6 +114,8 @@ struct SimState {
     home: HomeBehaviour,
     /// Home requests the simulation received: `""` for the first batch, else the token.
     home_log: Vec<String>,
+    /// Makes the Artists and History tabs fail to load.
+    tabs: Option<LoadFailure>,
     /// Makes `radio` fail (autoplay's error path).
     radio: Option<LoadFailure>,
     /// The seeds `radio` was asked about, in order.
@@ -136,6 +138,7 @@ impl SimState {
             log: Vec::new(),
             home: HomeBehaviour::default(),
             home_log: Vec::new(),
+            tabs: None,
             radio: None,
             radio_seeds: Vec::new(),
             subscribed: Vec::new(),
@@ -193,6 +196,10 @@ impl SimLibrary {
     }
 
     /// Makes the radio fail (tests).
+    pub fn set_tabs_failure(&self, failure: Option<LoadFailure>) {
+        self.state().tabs = failure;
+    }
+
     pub fn set_radio_failure(&self, failure: Option<LoadFailure>) {
         self.state().radio = failure;
     }
@@ -503,6 +510,60 @@ fn artist_content(id: &str) -> Option<ArtistContent> {
     })
 }
 
+/// The artists of the simulated library: one per fixture artist, in the order the account added
+/// them (not alphabetical, so a sort has something to do).
+pub fn library_artist_hits() -> Vec<Hit> {
+    let mut hits: Vec<Hit> = Vec::new();
+    for f in FIXTURES.iter().rev() {
+        let id = format!("{SEARCH_ARTIST_PREFIX}{}", f.artist);
+        if hits.iter().any(|h| h.id.as_str() == id) {
+            continue;
+        }
+        hits.push(Hit {
+            id: BrowseId::new(id),
+            title: f.artist.into(),
+            subtitle: Some(format!("{} songs", matching(|x| x.artist == f.artist).len())),
+            thumbnail: art_url(f),
+            explicit: false,
+        });
+    }
+    hits
+}
+
+/// The simulated history, in YouTube Music's buckets. A song can play on several days.
+pub fn history_days() -> Vec<HistoryDay> {
+    let listed = |ids: &[usize]| -> Vec<ListedTrack> {
+        fixture_rows(ids)
+            .into_iter()
+            .map(|r| ListedTrack {
+                track: r.track,
+                occurrence: r.occurrence,
+                thumbnail: r.thumbnail,
+                explicit: r.explicit,
+                liked: r.liked,
+            })
+            .collect()
+    };
+    vec![
+        HistoryDay {
+            title: "Today".into(),
+            items: listed(&[3, 1, 0]),
+        },
+        HistoryDay {
+            title: "Yesterday".into(),
+            items: listed(&[4, 5]),
+        },
+        HistoryDay {
+            title: "This week".into(),
+            items: listed(&[0, 2]),
+        },
+        HistoryDay {
+            title: "Older".into(),
+            items: listed(&[3]),
+        },
+    ]
+}
+
 /// A thumbnail URL the simulated store (`SimThumbs`) understands.
 fn home_art(art: Option<SyntheticArt>) -> Option<String> {
     match art? {
@@ -743,6 +804,22 @@ impl LibrarySource for SimLibrary {
             }
         }
         lands.map(|_| ())
+    }
+
+    fn library_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        self.wait(LATENCY);
+        if let Some(f) = self.state().tabs {
+            return Err(f);
+        }
+        Ok(library_artist_hits())
+    }
+
+    fn history(&self) -> Result<Vec<HistoryDay>, LoadFailure> {
+        self.wait(LATENCY);
+        if let Some(f) = self.state().tabs {
+            return Err(f);
+        }
+        Ok(history_days())
     }
 
     fn home(&self) -> Result<HomePage, LoadFailure> {

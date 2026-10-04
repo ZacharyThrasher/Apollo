@@ -173,6 +173,12 @@ pub trait ArtSource: Send + Sync {
     /// about at start-up. Without it a source can only guess the video's own frame, which is
     /// letterboxed for songs.
     fn hint(&self, _video_id: &str, _url: &str) {}
+
+    /// The https URL of the picture [`fetch`](Self::fetch) would load, for a surface that has
+    /// to point at the image instead of holding its pixels (Discord presence).
+    fn url(&self, _video_id: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Fixture artwork for the simulated backend: no network, deterministic.
