@@ -330,6 +330,7 @@ fn start_services(
         };
         account.update(cx, |m, cx| m.startup_finished(cx));
         let service = ports.service.clone();
+        let tools_dir = mode.tools_dir();
         let (prepared, saved) = cx
             .background_executor()
             .spawn(async move {
@@ -351,6 +352,7 @@ fn start_services(
             .await;
         match prepared {
             Ok(prepared) => {
+                crate::diagnostics::note_backend(prepared.label, tools_dir);
                 let (search, thumbs) = (prepared.search.clone(), prepared.thumbs.clone());
                 let _ = weak.update(cx, |m, cx| {
                     m.restore_volume(saved.volume);

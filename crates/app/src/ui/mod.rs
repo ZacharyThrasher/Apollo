@@ -6,6 +6,7 @@ pub mod blocked_dialog;
 pub mod button;
 pub mod card;
 pub mod crate_page;
+pub mod data_page;
 pub mod choice_menu;
 pub mod equalizer_panel;
 pub mod explore_page;

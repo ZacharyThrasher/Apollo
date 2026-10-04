@@ -550,6 +550,12 @@ impl InnerTube {
         self.library_grid(client, "FEmusic_library_corpus_track_artists").await
     }
 
+    /// The artists the account subscribes to (`FEmusic_library_corpus_artists`), as list rows
+    /// like the library artists. Read-only; the export's "subscribed artists". Needs login.
+    pub async fn subscribed_artists(&self, client: &YouTubeClient) -> Result<Vec<BrowseItem>, Error> {
+        self.library_grid(client, "FEmusic_library_corpus_artists").await
+    }
+
     /// A playlist or album page by browseId (`VL…` / `MPRE…`). context/08.
     ///
     /// `sort` asks YouTube to order the tracks — see `PlaylistSort::params`. Passing `None` gets

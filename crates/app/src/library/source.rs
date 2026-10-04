@@ -100,6 +100,12 @@ pub trait LibrarySource: Send + Sync {
         Err(LoadFailure::Other)
     }
 
+    /// The artists the account subscribes to, in the service's order (the data export). Not
+    /// the Artists tab's list, which is the artists behind the saved songs.
+    fn subscribed_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        Err(LoadFailure::Other)
+    }
+
     /// The play history in the service's date buckets, most recent first (the History tab).
     fn history(&self) -> Result<Vec<HistoryDay>, LoadFailure> {
         Err(LoadFailure::Other)

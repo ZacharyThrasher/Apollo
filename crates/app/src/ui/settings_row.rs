@@ -2,10 +2,12 @@
 //! label on the left and the app's switch pill on the right. No helper text. A row is one focus stop and one
 //! click target; Enter toggles it (Space stays the global play/pause key).
 //!
-//! Three variants share the row: [`SettingsRow::select`] shows the current choice and a chevron
-//! on the right and opens a popover when pressed, [`SettingsRow::action`] puts a control
-//! (a text button) beside a switch; pressing the control does not flip the switch, and
-//! [`SettingsRow::manage`] shows a short fact (a count) and a control, with no switch.
+//! Four variants share the row: [`SettingsRow::select`] shows the current choice and a chevron
+//! on the right and opens a popover when pressed, [`SettingsRow::action`] puts a control (a text
+//! button) beside a switch or a select's choice (pressing the control does not flip the switch
+//! or open the popover), [`SettingsRow::plain`] is a label with only such a control: no
+//! switch, no row click, and no focus stop of its own, and [`SettingsRow::manage`] shows a short
+//! fact (a count) and a control, with no switch and no chevron.
 
 use std::time::Instant;
 
@@ -78,6 +80,17 @@ impl RenderOnce for SettingsSection {
     }
 }
 
+/// A row's control, wrapped so its own clicks stay its own: stopped here, the row never sees the
+/// press and so does not flip (or open its popover).
+fn control_slot(control: Option<AnyElement>) -> Option<impl IntoElement> {
+    control.map(|control| {
+        div()
+            .flex_none()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(control)
+    })
+}
+
 /// Where a select row's popover hangs from: the key its choice and chevron record their bounds
 /// under (see `ui::anchor`).
 pub fn anchor_key(id: &str) -> String {
@@ -99,7 +112,9 @@ const SELECT_VALUE_MAX_WIDTH: f32 = 320.0;
 #[derive(IntoElement)]
 pub struct SettingsRow {
     id: &'static str,
-    focus: FocusHandle,
+    /// The row's own focus stop; `None` for a [`plain`](Self::plain) row, whose control is the
+    /// only thing to reach.
+    focus: Option<FocusHandle>,
     label: SharedString,
     on: bool,
     /// Set for a select row: the current choice, shown with a chevron instead of a switch.
@@ -123,9 +138,26 @@ impl SettingsRow {
     ) -> Self {
         Self {
             id,
-            focus: focus.clone(),
+            focus: Some(focus.clone()),
             label: label.into(),
             on,
+            value: None,
+            action: None,
+            fact: None,
+            ring: color::accent(accent),
+            accent,
+            on_toggle: None,
+        }
+    }
+
+    /// A label and a control ([`action`](Self::action)) and nothing else: the row itself is not
+    /// pressable and not a tab stop.
+    pub fn plain(id: &'static str, label: impl Into<SharedString>, accent: Accent) -> Self {
+        Self {
+            id,
+            focus: None,
+            label: label.into(),
+            on: false,
             value: None,
             action: None,
             fact: None,
@@ -185,7 +217,7 @@ impl SettingsRow {
 }
 
 impl RenderOnce for SettingsRow {
-    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let on = self.on;
         let animations = !cx.reduce_motion();
         let state = window.use_keyed_state(ElementId::from(self.id), cx, |_, _| RowState {
@@ -195,24 +227,30 @@ impl RenderOnce for SettingsRow {
         if moving {
             window.request_animation_frame();
         }
-        let ring = keyboard_focused(&self.focus, window);
+        let ring = self
+            .focus
+            .as_ref()
+            .is_some_and(|focus| keyboard_focused(focus, window));
+        let plain = self.focus.is_none();
         let handler = self.on_toggle;
+        let fact = self.fact.clone();
+        let is_manage = fact.is_some();
+        let mut action = self.action;
+        // A manage row keeps its control next to the fact.
+        let beside_fact = if is_manage { action.take() } else { None };
+        let (beside_switch, beside_choice) = if self.value.is_some() {
+            (None, action)
+        } else {
+            (action, None)
+        };
         let hover_state = state.clone();
         let id = self.id;
         let value = self.value.clone();
-        let is_manage = self.fact.is_some();
         let is_select = value.is_some() || is_manage;
-        let accessible = match (&value, &self.fact) {
+        let accessible = match (&value, &fact) {
             (Some(value), _) => SharedString::from(format!("{}, {}", self.label, value)),
             (None, Some(fact)) => SharedString::from(format!("{}, {}", self.label, fact)),
             (None, None) => self.label.clone(),
-        };
-        let fact = self.fact.clone();
-        // The control sits beside the switch, or (a manage row) beside the fact.
-        let (fact_action, switch_action) = if is_manage {
-            (self.action.take(), None)
-        } else {
-            (None, self.action.take())
         };
 
         div()
@@ -226,27 +264,33 @@ impl RenderOnce for SettingsRow {
             .gap(px(spacing::S4))
             .h(px(ROW_HEIGHT))
             .px(px(spacing::S4))
-            .track_focus(&self.focus.clone().tab_stop(true))
-            .role(if is_select {
+            .when_some(self.focus.clone(), |d, focus| {
+                d.track_focus(&focus.tab_stop(true))
+            })
+            .role(if plain {
+                gpui::Role::Group
+            } else if is_select {
                 gpui::Role::Button
             } else {
                 gpui::Role::Switch
             })
             .aria_label(accessible)
-            .when(!is_select, |d| {
+            .when(!is_select && !plain, |d| {
                 d.aria_toggled(if on {
                     gpui::Toggled::True
                 } else {
                     gpui::Toggled::False
                 })
             })
-            .cursor_pointer()
-            .bg(color::state_hover().opacity(tint))
-            .on_hover(move |hovered, _, cx| {
-                hover_state.update(cx, |s, cx| {
-                    s.hover.set(*hovered, Instant::now(), animations);
-                    cx.notify();
-                });
+            .when(!plain, |d| {
+                d.cursor_pointer()
+                    .bg(color::state_hover().opacity(tint))
+                    .on_hover(move |hovered, _, cx| {
+                        hover_state.update(cx, |s, cx| {
+                            s.hover.set(*hovered, Instant::now(), animations);
+                            cx.notify();
+                        });
+                    })
             })
             .when_some(handler, |d, handler| {
                 d.on_click(move |event, window, cx| {
@@ -263,6 +307,7 @@ impl RenderOnce for SettingsRow {
                     .text_color(color::text_primary())
                     .child(self.label),
             )
+            .children(control_slot(beside_switch))
             .when_some(fact, |d, fact| {
                 d.child(
                     div()
@@ -276,24 +321,11 @@ impl RenderOnce for SettingsRow {
                                 .text_color(color::text_secondary())
                                 .child(fact),
                         )
-                        .children(fact_action.map(|control| {
-                            div()
-                                .flex_none()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .child(control)
-                        })),
+                        .children(control_slot(beside_fact)),
                 )
             })
-            .when(!is_select, |d| {
-                d.children(switch_action.map(|control| {
-                    // The control's own clicks stay its own: stopped here, the row never sees
-                    // the press and so does not flip.
-                    div()
-                        .flex_none()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(control)
-                }))
-                .child(
+            .when(!is_select && !plain, |d| {
+                d.child(
                     div()
                         .debug_selector(|| format!("{}-switch", id))
                         .child(switch::pill(on, true, self.accent)),
@@ -301,7 +333,7 @@ impl RenderOnce for SettingsRow {
             })
             .when_some(value, |d, value| {
                 // The popover hangs from the choice and the chevron, right edges lined up.
-                d.child(anchor::anchored(
+                let choice = anchor::anchored(
                     anchor_key(id),
                     div()
                         .debug_selector(|| format!("{}-value", id))
@@ -323,7 +355,20 @@ impl RenderOnce for SettingsRow {
                                 .flex_none()
                                 .text_color(color::text_secondary()),
                         ),
-                ))
+                );
+                match control_slot(beside_choice) {
+                    // A select with a control keeps both on the right: the choice, then the control.
+                    Some(control) => d.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(spacing::S4))
+                            .child(choice)
+                            .child(control),
+                    ),
+                    None => d.child(choice),
+                }
             })
             // Inside the row: a ring drawn outside would spill past the card's edge.
             .when(ring, |d| {

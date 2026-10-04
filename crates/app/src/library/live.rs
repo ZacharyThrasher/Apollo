@@ -211,6 +211,14 @@ impl LibrarySource for InnerTubeLibrary {
         })
     }
 
+    fn subscribed_artists(&self) -> Result<Vec<Hit>, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.subscribed_artists().await
+        })
+    }
+
     fn history(&self) -> Result<Vec<HistoryDay>, LoadFailure> {
         let source = self.source()?;
         self.rt.block_on(async {

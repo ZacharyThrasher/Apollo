@@ -40,6 +40,7 @@ use crate::ui::lyrics_pane::LyricsPane;
 use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::audio_page::AudioPage;
+use crate::ui::data_page::DataPage;
 use crate::ui::choice_menu::{self, ChoiceHandle, ChoiceMenu};
 use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus};
 use crate::ui::playback_page::PlaybackPage;
@@ -401,11 +402,14 @@ impl Shell {
         let playback_page =
             cx.new(|cx| PlaybackPage::new(player.clone(), settings.clone(), cx));
         let audio_page = cx.new(|cx| AudioPage::new(player.clone(), settings.clone(), cx));
+        let data_page =
+            cx.new(|cx| DataPage::new(player.clone(), settings.clone(), account.clone(), cx));
         let settings_page = cx.new(|cx| {
             SettingsPage::new(
                 account_page,
                 playback_page,
                 audio_page,
+                data_page,
                 settings.clone(),
                 player.clone(),
                 cx,
@@ -760,6 +764,11 @@ impl Shell {
 
     pub fn choices(&self) -> &Entity<ChoiceMenu> {
         &self.choices
+    }
+
+    /// The Settings page, for tests that look inside it.
+    pub fn settings_page(&self) -> &Entity<SettingsPage> {
+        &self.settings_page
     }
 
     pub fn nav_expanded(&self) -> bool {
