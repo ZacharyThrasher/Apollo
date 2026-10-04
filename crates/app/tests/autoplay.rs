@@ -8,7 +8,8 @@ use std::time::Duration;
 use apollo_app::art::{ArtSource, DecodedArt};
 use apollo_app::backend::{Ports, Prepared};
 use apollo_app::library::sim::SimLibrary;
-use apollo_app::player::PlayerModel;
+use apollo_app::player::{PlayerModel, QueueHeading};
+use apollo_app::queue_source;
 use apollo_app::search::SearchSource;
 use apollo_app::settings::AutoplayStore;
 use apollo_app::url_thumbs::ThumbSource;
@@ -105,6 +106,36 @@ fn a_radio_follows_a_queue_that_is_about_to_end(cx: &mut TestAppContext) {
     assert_eq!(up[0], (id(1), Origin::Context), "what was queued stays first");
     assert_eq!(up.len(), 1 + 10);
     assert!(up[1..].iter().all(|(_, origin)| *origin == Origin::Radio));
+}
+
+#[gpui::test]
+fn past_the_source_the_queue_header_reads_autoplay_with_the_seed(cx: &mut TestAppContext) {
+    let (player, _library) = player(cx);
+    let heading = |player: &Entity<PlayerModel>, cx: &mut TestAppContext| {
+        player.read_with(cx, |m, _| m.queue_view().heading)
+    };
+    player.update(cx, |m, cx| {
+        m.play_tracks_from(
+            tracks(2),
+            Some(0),
+            Some(false),
+            Some(queue_source::named("Quick picks")),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    // The radio is queued behind the source, which is still what plays.
+    assert_eq!(radio_count(&player, cx), 10);
+    assert!(matches!(heading(&player, cx), Some(QueueHeading::Source(_))));
+
+    player.update(cx, |m, cx| m.next(cx)); // the source's last song
+    assert!(matches!(heading(&player, cx), Some(QueueHeading::Source(_))));
+    player.update(cx, |m, cx| m.next(cx)); // the first radio song
+    assert_eq!(heading(&player, cx), Some(QueueHeading::Autoplay("Song 1".into())));
+
+    // A new list is its own place again.
+    player.update(cx, |m, cx| m.play_tracks(tracks(5), Some(0), Some(false), cx));
+    assert_eq!(heading(&player, cx), Some(QueueHeading::Yours));
 }
 
 #[gpui::test]

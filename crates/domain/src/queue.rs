@@ -56,6 +56,81 @@ pub enum Previous {
 /// Previous seeks to the start when past this position (QUEUE-01).
 pub const PREVIOUS_RESTART_THRESHOLD_MS: u64 = 3_000;
 
+/// What kind of place a queue was built from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceKind {
+    Playlist,
+    Album,
+    Artist,
+    /// A generated radio; `name` is its seed ("<name> radio").
+    Radio,
+    LikedSongs,
+    /// Search results; `name` is the query.
+    Search,
+    /// Anything else with a name of its own (a Home shelf, a chart).
+    Other,
+}
+
+/// Where the queue came from, shown above it ("Playing from ...") and saved with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueSource {
+    pub kind: SourceKind,
+    pub name: String,
+    /// What opens the page: a browse id for a playlist, album or artist (none otherwise).
+    pub target: Option<String>,
+    /// Cover art URL, when the place has one.
+    pub thumbnail: Option<String>,
+}
+
+impl QueueSource {
+    pub fn new(kind: SourceKind, name: impl Into<String>) -> Self {
+        Self {
+            kind,
+            name: name.into(),
+            target: None,
+            thumbnail: None,
+        }
+    }
+
+    pub fn with_target(mut self, target: impl Into<String>) -> Self {
+        self.target = Some(target.into());
+        self
+    }
+
+    pub fn with_thumbnail(mut self, thumbnail: Option<String>) -> Self {
+        self.thumbnail = thumbnail;
+        self
+    }
+
+    /// The name as the header shows it.
+    pub fn label(&self) -> String {
+        match self.kind {
+            SourceKind::Radio => format!("{} radio", self.name),
+            SourceKind::Search => format!("Search: {}", self.name),
+            SourceKind::LikedSongs => "Liked songs".to_owned(),
+            _ => self.name.clone(),
+        }
+    }
+}
+
+/// Where autoplay took over: its first entry (every entry minted after it that is a radio
+/// entry is autoplay's) and the track it was seeded from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoplayStart {
+    pub first: QueueEntryId,
+    pub seed: String,
+}
+
+/// What the queue header says the queue is playing from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Heading<'a> {
+    Source(&'a QueueSource),
+    /// Playback has gone past the source into autoplay's tracks; the seed's name.
+    Autoplay(&'a str),
+    /// No source: the queue was put together by hand.
+    Yours,
+}
+
 struct Current {
     entry: QueueEntry,
     /// Row removed by the user: keeps playing but is excluded from future cycles.
@@ -75,6 +150,8 @@ pub struct Queue {
     shuffle: bool,
     seed: u64,
     repeat: Repeat,
+    source: Option<QueueSource>,
+    autoplay: Option<AutoplayStart>,
 }
 
 impl Default for Queue {
@@ -96,6 +173,8 @@ impl Queue {
             shuffle: false,
             seed: 0,
             repeat: Repeat::Off,
+            source: None,
+            autoplay: None,
         }
     }
 
@@ -128,6 +207,23 @@ impl Queue {
     pub fn repeat(&self) -> Repeat {
         self.repeat
     }
+    pub fn source(&self) -> Option<&QueueSource> {
+        self.source.as_ref()
+    }
+
+    /// What the header says the queue is playing from; `None` while nothing is queued.
+    pub fn heading(&self) -> Option<Heading<'_>> {
+        let current = self.current()?;
+        if let Some(auto) = &self.autoplay {
+            if current.origin == Origin::Radio && current.id >= auto.first {
+                return Some(Heading::Autoplay(&auto.seed));
+            }
+        }
+        Some(match &self.source {
+            Some(source) => Heading::Source(source),
+            None => Heading::Yours,
+        })
+    }
 
     /// Upcoming entries in the order they will play.
     pub fn upcoming(&self) -> impl Iterator<Item = &QueueEntry> {
@@ -156,6 +252,8 @@ impl Queue {
         self.context.clear();
         self.radio.clear();
         self.canonical.clear();
+        self.source = None;
+        self.autoplay = None;
         if tracks.is_empty() {
             return None;
         }
@@ -216,6 +314,26 @@ impl Queue {
             .collect();
         let ids = entries.iter().map(|e| e.id).collect();
         self.radio.extend(entries);
+        ids
+    }
+
+    /// Say where the queue came from. A new place ends any autoplay stretch of the old one.
+    pub fn set_source(&mut self, source: Option<QueueSource>) {
+        self.source = source;
+        self.autoplay = None;
+    }
+
+    /// [`Queue::append_radio`] for autoplay: the first such batch notes the seed it came from.
+    pub fn append_autoplay(&mut self, tracks: Vec<Track>, seed: &str) -> Vec<QueueEntryId> {
+        let ids = self.append_radio(tracks);
+        if self.autoplay.is_none() {
+            if let Some(first) = ids.first() {
+                self.autoplay = Some(AutoplayStart {
+                    first: *first,
+                    seed: seed.to_owned(),
+                });
+            }
+        }
         ids
     }
 
@@ -538,6 +656,8 @@ pub struct QueueSnapshot {
     pub shuffle: bool,
     pub seed: u64,
     pub repeat: Repeat,
+    pub source: Option<QueueSource>,
+    pub autoplay: Option<AutoplayStart>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -564,6 +684,8 @@ impl Queue {
             shuffle: self.shuffle,
             seed: self.seed,
             repeat: self.repeat,
+            source: self.source.clone(),
+            autoplay: self.autoplay.clone(),
         }
     }
 
@@ -609,6 +731,8 @@ impl Queue {
             shuffle: snap.shuffle,
             seed: snap.seed,
             repeat: snap.repeat,
+            source: snap.source,
+            autoplay: snap.autoplay.filter(|a| a.first.0 < snap.next_id),
         })
     }
 }
@@ -984,5 +1108,77 @@ mod tests {
             Queue::restore(canon).err(),
             Some(RestoreError::UnknownCanonicalEntry)
         );
+    }
+
+    #[test]
+    fn the_heading_names_the_source_then_autoplay_then_your_queue() {
+        let mut q = Queue::new();
+        assert_eq!(q.heading(), None);
+        q.play_next(tracks(&["m"]));
+        q.advance(AdvanceKind::Explicit);
+        // Put together by hand: no source.
+        assert_eq!(q.heading(), Some(Heading::Yours));
+
+        q.play_context(tracks(&["a", "b"]), 0);
+        q.set_source(Some(QueueSource::new(SourceKind::Playlist, "Gym").with_target("VLPL1")));
+        assert_eq!(q.heading(), Some(Heading::Source(q.source().unwrap())));
+
+        // Autoplay's tracks are its own; the source's tracks still read as the source.
+        q.append_autoplay(tracks(&["r1", "r2"]), "b");
+        assert!(matches!(q.heading(), Some(Heading::Source(_))));
+        q.advance(AdvanceKind::Explicit); // b
+        assert!(matches!(q.heading(), Some(Heading::Source(_))));
+        q.advance(AdvanceKind::Explicit); // r1
+        assert_eq!(q.heading(), Some(Heading::Autoplay("b")));
+
+        // A later batch keeps the first seed.
+        q.append_autoplay(tracks(&["r3"]), "r2");
+        assert_eq!(q.heading(), Some(Heading::Autoplay("b")));
+
+        // Going back to a source track reads as the source again.
+        q.jump_to(q.history()[0].id);
+        assert!(matches!(q.heading(), Some(Heading::Source(_))));
+    }
+
+    #[test]
+    fn a_new_context_or_source_forgets_the_old_source_and_autoplay() {
+        let mut q = Queue::new();
+        q.play_context(tracks(&["a"]), 0);
+        q.set_source(Some(QueueSource::new(SourceKind::Album, "Blue")));
+        q.append_autoplay(tracks(&["r1"]), "a");
+        q.advance(AdvanceKind::Explicit);
+        assert_eq!(q.heading(), Some(Heading::Autoplay("a")));
+
+        q.set_source(Some(QueueSource::new(SourceKind::Radio, "a")));
+        assert!(matches!(q.heading(), Some(Heading::Source(_))));
+
+        q.play_context(tracks(&["z"]), 0);
+        assert_eq!(q.source(), None);
+        assert_eq!(q.heading(), Some(Heading::Yours));
+    }
+
+    #[test]
+    fn labels_read_like_the_header() {
+        let label = |kind, name: &str| QueueSource::new(kind, name).label();
+        assert_eq!(label(SourceKind::Playlist, "Gym"), "Gym");
+        assert_eq!(label(SourceKind::Radio, "Song"), "Song radio");
+        assert_eq!(label(SourceKind::Search, "daft"), "Search: daft");
+        assert_eq!(label(SourceKind::LikedSongs, "Liked Music"), "Liked songs");
+    }
+
+    #[test]
+    fn the_source_and_autoplay_survive_a_snapshot() {
+        let mut q = Queue::new();
+        q.play_context(tracks(&["a", "b"]), 0);
+        q.set_source(Some(
+            QueueSource::new(SourceKind::Album, "Blue")
+                .with_target("MPRE1")
+                .with_thumbnail(Some("https://img/1".into())),
+        ));
+        q.append_autoplay(tracks(&["r1"]), "b");
+        let snap = q.snapshot();
+        let restored = Queue::restore(snap.clone()).expect("valid snapshot");
+        assert_eq!(restored.snapshot(), snap);
+        assert_eq!(restored.source(), q.source());
     }
 }

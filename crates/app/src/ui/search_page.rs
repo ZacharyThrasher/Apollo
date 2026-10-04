@@ -25,6 +25,7 @@ use gpui::{
 use crate::assets::Icon;
 use crate::library::model::{ArtistTarget, LibraryModel, Target};
 use crate::library::source::TrackRow;
+use crate::queue_source;
 use crate::library::writes::LibraryWrites;
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
@@ -1478,6 +1479,10 @@ impl SearchPage {
                 let target = target_of("artist", hit);
                 let on_open = self.on_open.clone();
                 let tracks: Vec<_> = songs.iter().map(|s| s.track.clone()).collect();
+                let source = match &target {
+                    Target::Artist(a) => Some(queue_source::of_artist(a)),
+                    _ => None,
+                };
                 let player = self.player.clone();
                 TopCard::new(
                     hit.title.clone(),
@@ -1488,8 +1493,10 @@ impl SearchPage {
                     accent,
                     move |w, cx| on_open(target.clone(), w, cx),
                     move |_, cx| {
-                        let tracks = tracks.clone();
-                        player.update(cx, |m, cx| m.play_tracks(tracks, Some(0), None, cx))
+                        let (tracks, source) = (tracks.clone(), source.clone());
+                        player.update(cx, |m, cx| {
+                            m.play_tracks_from(tracks, Some(0), None, source, cx)
+                        })
                     },
                 )
                 .circular(true)
