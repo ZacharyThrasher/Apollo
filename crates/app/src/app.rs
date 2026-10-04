@@ -98,6 +98,8 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     // Pages cached between runs (Home, the library, album, artist and playlist pages), kept in
     // the app's SQLite file; memory only without one.
     crate::page_cache::PageCache::new(stores.db_path.clone()).install(cx);
+    // What Apollo played, for the stats and Home's personal shelves: kept in the same file.
+    crate::stats::PlayLog::new(stores.db_path.clone()).install(cx);
     let player = cx.new(|_| PlayerModel::new());
     player.update(cx, |m, _| {
         m.set_volume_store(stores.volume.clone());

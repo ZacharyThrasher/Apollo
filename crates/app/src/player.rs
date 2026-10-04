@@ -24,6 +24,8 @@ use crate::persist::QueueSaver;
 use crate::reporting::{Activity, Feed, PlayReporter, Snapshot};
 use crate::settings::{AutoplayStore, GaplessStore, NormalizeStore, QueueStore, VolumeStore};
 use crate::sleep_timer::{Playhead, SleepChoice, SleepStep, SleepTimer};
+use crate::stats::tally::{PlayTally, TallyEvent};
+use crate::stats::{PlayLog, PlayRecord};
 use crate::thumbs::Thumbs;
 
 type AppDriver =
@@ -184,6 +186,13 @@ pub struct PlayerModel {
     /// Settings > Playback > Add plays to history. Off until the app says otherwise.
     report_plays: bool,
     report_feed: Feed,
+    /// Decides which plays count for the local stats, fed by the same snapshots.
+    tally: PlayTally,
+    tally_feed: Feed,
+    /// The account the play in progress belongs to.
+    tally_account: Option<String>,
+    /// Where the player's own clock for the tally starts.
+    tally_epoch: Instant,
     radio_inflight: bool,
     /// The last track a radio was asked for. Not asked again until the queue's tail changes or
     /// [`RADIO_RETRY`] has passed, so a failure is not retried on every tick.
@@ -226,6 +235,10 @@ impl PlayerModel {
             reporter: None,
             report_plays: false,
             report_feed: Feed::default(),
+            tally: PlayTally::new(),
+            tally_feed: Feed::default(),
+            tally_account: None,
+            tally_epoch: Instant::now(),
             radio_inflight: false,
             radio_tried: None,
         }
@@ -319,6 +332,73 @@ impl PlayerModel {
         if self.report_feed.due(snapshot.as_ref(), Instant::now()) {
             reporter.observe(snapshot);
         }
+    }
+
+    /// Feeds the local stats: a play that counted (see [`crate::stats::tally`]) is written to the
+    /// play log under the chosen account. Does nothing without a log or an account, whatever
+    /// the reporting setting says: the stats are Apollo's own and send nothing anywhere.
+    fn tally_plays(&mut self, cx: &mut Context<Self>) {
+        let Some(log) = PlayLog::try_global(cx) else {
+            return;
+        };
+        let account = crate::page_cache::PageCache::try_global(cx).and_then(|c| c.account());
+        let Some(account) = account else {
+            // Nobody is chosen: nothing counts, and what was in progress is dropped.
+            self.tally.reset();
+            self.tally_account = None;
+            return;
+        };
+        if self.tally_account.as_ref() != Some(&account) {
+            // Another account: a play in progress was not its own.
+            self.tally.reset();
+            self.tally_account = Some(account.clone());
+        }
+        let snapshot = self.report_snapshot();
+        let now = Instant::now();
+        if !self.tally_feed.due(snapshot.as_ref(), now) {
+            return;
+        }
+        let at = now.saturating_duration_since(self.tally_epoch).as_millis() as u64;
+        for event in self.tally.observe(at, snapshot.as_ref()) {
+            match event {
+                TallyEvent::Counted {
+                    entry,
+                    key,
+                    listened_ms,
+                } => {
+                    let Some(track) = self
+                        .driver
+                        .as_ref()
+                        .and_then(|d| d.coordinator().queue().current())
+                        .filter(|e| e.id.get() == entry)
+                        .map(|e| e.track.clone())
+                    else {
+                        continue;
+                    };
+                    let art = self
+                        .art_source
+                        .as_ref()
+                        .and_then(|a| a.url(track.video_id.as_str()));
+                    log.record(
+                        account.clone(),
+                        key,
+                        PlayRecord {
+                            track,
+                            art,
+                            played_unix: apollo_services_common::unix_now() as i64,
+                            listened_ms,
+                        },
+                    );
+                }
+                TallyEvent::Settled { key, listened_ms } => log.settle(key, listened_ms),
+            }
+        }
+    }
+
+    /// Makes a play count for the local stats after `ms` of listening instead of the usual 30 s
+    /// (tests and diagnostics).
+    pub fn count_plays_after(&mut self, ms: u64) {
+        self.tally = PlayTally::with_count_after(ms);
     }
 
     fn report_snapshot(&self) -> Option<Snapshot> {
@@ -1055,6 +1135,7 @@ impl PlayerModel {
         }
         self.persist();
         self.report();
+        self.tally_plays(cx);
         self.top_up_radio(cx);
         cx.notify();
     }

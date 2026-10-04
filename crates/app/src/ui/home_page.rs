@@ -307,7 +307,7 @@ impl Render for HomeView {
         let animate = !cx.reduce_motion();
         let (phase, more, has_more, shelves) = {
             let m = self.model.read(cx);
-            (m.phase(), m.more(), m.has_more(), m.shelves().to_vec())
+            (m.phase(), m.more(), m.has_more(), m.display_shelves())
         };
 
         let title = style::text_style(div(), typography::PAGE_TITLE, cx)

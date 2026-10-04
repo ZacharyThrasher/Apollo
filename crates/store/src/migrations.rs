@@ -93,4 +93,27 @@ Migration {
             PRIMARY KEY (account_key, page_key)
         );
     ",
+}, Migration {
+    version: 5,
+    sql: "
+        -- One row per play that counted (the app decides when: about half a track or 30 s),
+        -- for the local stats and Home's personal shelves. Nothing here leaves the machine.
+        -- `artists` is the credited artists as JSON the app reads and writes; the store only
+        -- groups by `video_id`. `art` is the cover address the app showed for the track.
+        CREATE TABLE plays (
+            id          INTEGER PRIMARY KEY,
+            account_key TEXT    NOT NULL,
+            played_unix INTEGER NOT NULL,
+            video_id    TEXT    NOT NULL,
+            title       TEXT    NOT NULL,
+            artists     TEXT    NOT NULL,
+            album_title TEXT,
+            album_id    TEXT,
+            duration_ms INTEGER,
+            art         TEXT,
+            listened_ms INTEGER NOT NULL
+        );
+        CREATE INDEX plays_by_account_time ON plays (account_key, played_unix);
+        CREATE INDEX plays_by_account_video ON plays (account_key, video_id);
+    ",
 }];

@@ -30,6 +30,7 @@ pub mod player;
 pub mod reporting;
 pub mod search;
 pub mod settings;
+pub mod stats;
 pub mod sleep_timer;
 #[cfg(windows)]
 pub mod single_instance;

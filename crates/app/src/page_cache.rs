@@ -438,7 +438,7 @@ pub fn browse_id(id: &str) -> String {
 /// Opening runs the migrations, and two threads doing that to a new file at once fail ("table
 /// already exists", "database is locked"). Opens by the cache's threads take turns, and a failed
 /// one is tried again a few times before the work is given up.
-fn open_store(path: &std::path::Path) -> Option<Store> {
+pub(crate) fn open_store(path: &std::path::Path) -> Option<Store> {
     static OPENING: Mutex<()> = Mutex::new(());
     for attempt in 0..6 {
         {

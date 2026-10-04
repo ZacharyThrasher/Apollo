@@ -53,6 +53,7 @@ impl Tab {
             Self::Albums => "Albums",
             Self::Artists => "Artists",
             Self::History => "History",
+            Self::Stats => "Stats",
         }
     }
 
@@ -63,6 +64,7 @@ impl Tab {
             Self::Albums => "albums",
             Self::Artists => "artists",
             Self::History => "history",
+            Self::Stats => "stats",
         }
     }
 
@@ -73,7 +75,8 @@ impl Tab {
         match self {
             Self::Playlists | Self::Artists => &[SortKey::Recent, SortKey::Title],
             Self::Albums => &[SortKey::Recent, SortKey::Title, SortKey::Artist],
-            Self::History => &[],
+            // Stats picks a period instead of an order.
+            Self::History | Self::Stats => &[],
         }
     }
 }

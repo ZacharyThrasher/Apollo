@@ -8,6 +8,7 @@
 //! bar) and the player bar (error row, no-art tile).
 
 mod filter;
+mod stats;
 mod tabs;
 
 use std::collections::HashMap;
@@ -121,6 +122,7 @@ struct Focus {
     tab_albums: FocusHandle,
     tab_artists: FocusHandle,
     tab_history: FocusHandle,
+    tab_stats: FocusHandle,
     /// The sort button, and the popover it opens (not a tab stop).
     sort: FocusHandle,
     sort_menu: FocusHandle,
@@ -209,6 +211,8 @@ pub struct LibraryView {
     /// The Artists tab's and the History tab's scrolling columns.
     artists_scroll: ScrollHandle,
     history_scroll: ScrollHandle,
+    /// The Stats tab's scrolling column.
+    stats_scroll: ScrollHandle,
     /// The sort popover is open, and the option the keyboard is on.
     sort_open: bool,
     sort_cursor: usize,
@@ -254,6 +258,7 @@ impl LibraryView {
             tab_albums: stop(cx, 6),
             tab_artists: stop(cx, 6),
             tab_history: stop(cx, 6),
+            tab_stats: stop(cx, 6),
             sort: stop(cx, 7),
             sort_menu: cx.focus_handle(),
             play: stop(cx, 7),
@@ -282,6 +287,7 @@ impl LibraryView {
             albums_scroll: UniformListScrollHandle::new(),
             artists_scroll: ScrollHandle::new(),
             history_scroll: ScrollHandle::new(),
+            stats_scroll: ScrollHandle::new(),
             sort_open: false,
             sort_cursor: 0,
             pages: Vec::new(),
@@ -445,6 +451,12 @@ impl LibraryView {
         model.depth() == 0 && model.tab() == Tab::History
     }
 
+    /// Whether the overview shows the Stats tab.
+    fn stats_open(&self, cx: &App) -> bool {
+        let model = self.model.read(cx);
+        model.depth() == 0 && model.tab() == Tab::Stats
+    }
+
     /// The playlist or album page on screen: its filter field, once it has one.
     pub fn filter_field(&self, cx: &App) -> Option<Entity<TextField>> {
         self.model.read(cx).detail()?;
@@ -534,6 +546,7 @@ impl LibraryView {
         match model.detail() {
             Some(_) => self.visible(cx).len(),
             None if model.tab() == Tab::History => model.history_count(),
+            None if model.tab() == Tab::Stats => model.stats_row_count(),
             None if model.tab() == Tab::Artists => 0,
             None => model.list(model.tab()).len(),
         }
@@ -550,6 +563,10 @@ impl LibraryView {
             if let Some(page) = self.pages.last() {
                 page.column.scroll_to_item(self.selected + artist::SONGS_OFFSET);
             }
+        } else if self.stats_open(cx) {
+            let lens = self.model.read(cx).stats_lens();
+            self.stats_scroll
+                .scroll_to_item(stats::stats_child(lens, self.selected));
         } else if self.history_open(cx) {
             let child = match self.model.read(cx).history() {
                 Load::Ready(groups) => crate::library::browse::history_child(groups, self.selected),
@@ -565,7 +582,7 @@ impl LibraryView {
 
     fn page_rows(&self, cx: &App) -> isize {
         let model = self.model.read(cx);
-        let row = if model.depth() > 0 || model.tab() == Tab::History {
+        let row = if model.depth() > 0 || matches!(model.tab(), Tab::History | Tab::Stats) {
             TRACK_ROW
         } else {
             COLLECTION_ROW
@@ -576,6 +593,8 @@ impl LibraryView {
                 .map_or(px(0.0), |p| p.column.bounds().size.height)
         } else if self.history_open(cx) {
             self.history_scroll.bounds().size.height
+        } else if self.stats_open(cx) {
+            self.stats_scroll.bounds().size.height
         } else {
             self.scroll_handle(cx)
                 .0
@@ -607,6 +626,7 @@ impl LibraryView {
             None if model.tab() == Tab::History => {
                 self.model.update(cx, |m, cx| m.play_history(index, cx));
             }
+            None if model.tab() == Tab::Stats => self.activate_stat(index, window, cx),
             None => {
                 if let Some(c) = model.list(model.tab()).get(index).cloned() {
                     self.open(c, window, cx);
@@ -812,6 +832,7 @@ impl LibraryView {
         let body: AnyElement = match tab {
             Tab::Artists => self.render_artists_tab(accent, window, cx),
             Tab::History => self.render_history_tab(accent, window, cx),
+            Tab::Stats => self.render_stats_tab(accent, window, cx),
             Tab::Playlists | Tab::Albums => {
                 let (state, count) = {
                     let model = self.model.read(cx);
@@ -894,6 +915,7 @@ impl LibraryView {
                 Tab::Albums => "Albums",
                 Tab::Artists => "Artists",
                 Tab::History => "History",
+                Tab::Stats => "Stats",
             },
             ListKind::Tracks => "Tracks",
         };
@@ -971,6 +993,21 @@ impl LibraryView {
             artist.content()?.top_songs.get(self.selected)?.clone()
         } else if self.history_open(cx) {
             model.history_at(self.selected)?
+        } else if self.stats_open(cx) {
+            // Only the Top tracks rows are songs.
+            match model.stats() {
+                Load::Ready(r) => {
+                    let t = r.tracks.get(self.selected)?;
+                    TrackRow {
+                        track: t.track.clone(),
+                        occurrence: None,
+                        thumbnail: t.art.clone(),
+                        explicit: false,
+                        liked: None,
+                    }
+                }
+                _ => return None,
+            }
         } else {
             let real = self.visible(cx).get(self.selected)?;
             model.detail()?.listing.items().get(real)?.clone()
@@ -1037,6 +1074,21 @@ impl LibraryView {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
+        self.row_shell_with(frame, height, playing, track, Some(menu), on_click, cx)
+    }
+
+    /// [`row_shell`](Self::row_shell) for a row that may have no menu (an artist).
+    #[allow(clippy::too_many_arguments)]
+    fn row_shell_with(
+        &self,
+        frame: &RowFrame,
+        height: f32,
+        playing: bool,
+        track: Option<Track>,
+        menu: Option<Subject>,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let (ix, animations) = (frame.ix, frame.animations);
         let tint = if frame.selected || playing {
             playing_row::tint()
@@ -1081,7 +1133,10 @@ impl LibraryView {
                 )
             });
         // Right-click opens the same menu as the More button.
-        track_menu::on_context_menu(row, menu)
+        match menu {
+            Some(menu) => track_menu::on_context_menu(row, menu),
+            None => row,
+        }
     }
 
     // ---- collection rows -----------------------------------------------------------------

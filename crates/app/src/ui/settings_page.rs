@@ -1,6 +1,6 @@
 //! Settings: one scrolling column of sections. Account first (its own page), then the sections
-//! of switches built from [`SettingsSection`] and [`SettingsRow`]: Playback, Search, Window,
-//! Discord, then Keyboard.
+//! of switches built from [`SettingsSection`] and [`SettingsRow`]: Playback, Home, Search,
+//! Window, Discord, then Keyboard.
 
 use apollo_theme::tokens::spacing;
 use gpui::{
@@ -13,7 +13,7 @@ use crate::player::PlayerModel;
 use crate::search::{HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES};
 use crate::settings::{
     BoolSetting, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS,
-    START_MINIMIZED_TO_TRAY,
+    PERSONAL_SHELVES, START_MINIMIZED_TO_TRAY,
 };
 use crate::ui::account_page::{self, AccountPage};
 use crate::ui::playback_page::PlaybackPage;
@@ -90,7 +90,16 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(7, cx);
+        let h = self.handles(8, cx);
+
+        let home_section = SettingsSection::new("Home").row(self.bool_row(
+            "setting-personal-shelves",
+            "Personal shelves",
+            &PERSONAL_SHELVES,
+            &h[7],
+            accent,
+            cx,
+        ));
 
         let search_section = SettingsSection::new("Search")
             .row(self.bool_row(
@@ -177,6 +186,7 @@ impl Render for SettingsPage {
             .pb(px(spacing::S8))
             .child(self.account_page.clone())
             .child(self.playback_page.clone())
+            .child(home_section)
             .child(search_section)
             .child(window_section)
             .child(discord_section)

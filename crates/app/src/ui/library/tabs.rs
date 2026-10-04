@@ -9,7 +9,8 @@ use apollo_provider::Hit;
 use gpui::{deferred, MouseButton};
 
 use super::*;
-use crate::library::browse::{history_len, SortKey};
+use crate::library::browse::history_len;
+use crate::stats::report::Period;
 use crate::ui::card::{self, Card};
 use crate::ui::track_menu::{ITEM_HEIGHT, MENU_WIDTH};
 
@@ -44,6 +45,7 @@ impl LibraryView {
             Tab::Albums => &self.focus.tab_albums,
             Tab::Artists => &self.focus.tab_artists,
             Tab::History => &self.focus.tab_history,
+            Tab::Stats => &self.focus.tab_stats,
         }
     }
 
@@ -62,8 +64,8 @@ impl LibraryView {
             .into_iter()
             .map(|tab| self.tab_button(tab, tab == current, accent, window, cx))
             .collect();
-        let sort =
-            (current.sorts().len() > 1).then(|| self.sort_control(current, accent, window, cx));
+        let sort = (current.sorts().len() > 1 || current == Tab::Stats)
+            .then(|| self.sort_control(current, accent, window, cx));
         div()
             .flex()
             .flex_row()
@@ -141,6 +143,20 @@ impl LibraryView {
 
     // ---- sort ------------------------------------------------------------------------------
 
+    /// What the popover at the right end of the tab row offers: the labels of its options and
+    /// the one in use. The Stats tab chooses a period; the other tabs choose an order.
+    fn sort_choices(&self, tab: Tab, cx: &App) -> (Vec<&'static str>, usize) {
+        let model = self.model.read(cx);
+        if tab == Tab::Stats {
+            let current = model.stats_period();
+            let at = Period::ALL.iter().position(|p| *p == current).unwrap_or(0);
+            return (Period::ALL.iter().map(|p| p.label()).collect(), at);
+        }
+        let current = model.sort(tab);
+        let at = tab.sorts().iter().position(|k| *k == current).unwrap_or(0);
+        (tab.sorts().iter().map(|k| k.label()).collect(), at)
+    }
+
     fn sort_control(
         &mut self,
         tab: Tab,
@@ -148,7 +164,8 @@ impl LibraryView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let current = self.model.read(cx).sort(tab);
+        let (options, current_ix) = self.sort_choices(tab, cx);
+        let current_label = options.get(current_ix).copied().unwrap_or_default();
         let focus = self.focus.sort.clone();
         let ring = keyboard_focused(&focus, window);
         let ring_color = color::accent(accent);
@@ -168,7 +185,11 @@ impl LibraryView {
             .cursor_pointer()
             .track_focus(&focus)
             .role(gpui::Role::Button)
-            .aria_label(format!("Sort: {}", current.label()))
+            .aria_label(format!(
+                "{}: {}",
+                if tab == Tab::Stats { "Period" } else { "Sort" },
+                current_label
+            ))
             .text_color(color::text_secondary())
             .hover(|s| s.text_color(color::text_primary()))
             .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
@@ -179,7 +200,7 @@ impl LibraryView {
                 }
                 this.toggle_sort(window, cx);
             }))
-            .child(current.label())
+            .child(current_label)
             .child(
                 gpui::svg()
                     .path(Icon::ChevronDown.path())
@@ -192,7 +213,7 @@ impl LibraryView {
             });
 
         let open = self.sort_open;
-        let panel = open.then(|| self.sort_menu(tab, current, cx));
+        let panel = open.then(|| self.sort_menu(tab, cx));
         div()
             .relative()
             .flex_none()
@@ -221,13 +242,13 @@ impl LibraryView {
             .into_any_element()
     }
 
-    fn sort_menu(&mut self, tab: Tab, current: SortKey, cx: &mut Context<Self>) -> AnyElement {
-        let options = tab.sorts();
+    fn sort_menu(&mut self, tab: Tab, cx: &mut Context<Self>) -> AnyElement {
+        let (options, current_ix) = self.sort_choices(tab, cx);
         let cursor = self.sort_cursor.min(options.len().saturating_sub(1));
         let items: Vec<AnyElement> = options
             .iter()
             .enumerate()
-            .map(|(ix, key)| self.sort_item(ix, *key, *key == current, ix == cursor, cx))
+            .map(|(ix, label)| self.sort_item(ix, label, ix == current_ix, ix == cursor, cx))
             .collect();
         div()
             .id("library-sort-menu")
@@ -264,7 +285,7 @@ impl LibraryView {
     fn sort_item(
         &mut self,
         ix: usize,
-        key: SortKey,
+        label: &'static str,
         chosen: bool,
         cursor: bool,
         cx: &mut Context<Self>,
@@ -282,7 +303,7 @@ impl LibraryView {
             .rounded(px(radius::SMALL))
             .cursor_pointer()
             .role(gpui::Role::MenuItem)
-            .aria_label(key.label())
+            .aria_label(label)
             .text_color(color::text_primary())
             .bg(if cursor {
                 color::state_hover()
@@ -307,7 +328,7 @@ impl LibraryView {
                         .text_color(color::text_secondary()),
                 )
             }))
-            .child(key.label())
+            .child(label)
             .into_any_element()
     }
 
@@ -316,10 +337,8 @@ impl LibraryView {
             self.close_sort(window, cx);
             return;
         }
-        let model = self.model.read(cx);
-        let tab = model.tab();
-        let at = tab.sorts().iter().position(|k| *k == model.sort(tab));
-        self.sort_cursor = at.unwrap_or(0);
+        let tab = self.model.read(cx).tab();
+        self.sort_cursor = self.sort_choices(tab, cx).1;
         self.sort_open = true;
         window.focus(&self.focus.sort_menu, cx);
         cx.notify();
@@ -334,7 +353,8 @@ impl LibraryView {
     }
 
     fn step_sort(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let len = self.model.read(cx).tab().sorts().len() as isize;
+        let tab = self.model.read(cx).tab();
+        let len = self.sort_choices(tab, cx).0.len() as isize;
         if len > 0 {
             self.sort_cursor = (self.sort_cursor as isize + delta).clamp(0, len - 1) as usize;
             cx.notify();
@@ -343,6 +363,17 @@ impl LibraryView {
 
     fn choose_sort(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let tab = self.model.read(cx).tab();
+        if tab == Tab::Stats {
+            let Some(period) = Period::ALL.get(ix).copied() else {
+                return;
+            };
+            self.model.update(cx, |m, cx| m.set_stats_period(period, cx));
+            self.selected = 0;
+            self.hover.clear();
+            self.stats_scroll.scroll_to_item(0);
+            self.close_sort(window, cx);
+            return;
+        }
         let Some(key) = tab.sorts().get(ix).copied() else {
             return;
         };
