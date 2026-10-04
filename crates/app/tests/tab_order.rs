@@ -155,7 +155,7 @@ const NAV: [&str; 7] = [
     "nav-settings",
 ];
 /// The player bar, left to right. The seek slider is a stop only while a track has a length.
-const BAR: [&str; 11] = [
+const BAR: [&str; 12] = [
     "bar-now-playing",
     "bar-shuffle",
     "bar-previous",
@@ -165,10 +165,11 @@ const BAR: [&str; 11] = [
     "bar-like",
     "bar-mute",
     "bar-volume",
+    "bar-mini",
     "bar-lyrics",
     "bar-queue",
 ];
-const BAR_PLAYING: [&str; 12] = [
+const BAR_PLAYING: [&str; 13] = [
     "bar-now-playing",
     "bar-shuffle",
     "bar-previous",
@@ -179,6 +180,7 @@ const BAR_PLAYING: [&str; 12] = [
     "bar-like",
     "bar-mute",
     "bar-volume",
+    "bar-mini",
     "bar-lyrics",
     "bar-queue",
 ];
