@@ -518,3 +518,120 @@ fn a_chip_that_was_left_loading_is_asked_again_when_it_comes_back(cx: &mut TestA
         .unwrap()
         .contains(&("punk".to_owned(), SearchFilter::Songs)));
 }
+
+// ---- the library -------------------------------------------------------------------------
+
+fn library_index() -> Arc<local::LocalIndex> {
+    use apollo_domain::library::{Collection, CollectionKind};
+    use apollo_domain::model::{AlbumRef, ArtistRef};
+
+    use crate::library::source::TrackRow;
+
+    let mut track = Track::new("libsong0001", "Moon River");
+    track.artists = vec![ArtistRef {
+        name: "Audrey".into(),
+        id: None,
+    }];
+    track.album = Some(AlbumRef {
+        title: "Breakfast".into(),
+        id: None,
+    });
+    let row = TrackRow {
+        track,
+        occurrence: None,
+        thumbnail: None,
+        explicit: false,
+        liked: None,
+    };
+    let album = Collection {
+        kind: CollectionKind::Album,
+        id: BrowseId::new("MPREb_moon"),
+        title: "Moonlight".into(),
+        subtitle: None,
+        thumbnail: None,
+    };
+    Arc::new(local::LocalIndex::new(&[row], &[album], &[], &[]))
+}
+
+#[gpui::test]
+fn the_library_answers_before_the_service_does(cx: &mut TestAppContext) {
+    let (model, script) = setup(cx);
+    model.update(cx, |m, cx| m.set_library(library_index(), cx));
+    model.update(cx, |m, cx| m.set_query("moon", cx));
+    // Only the suggestions' pause has passed: not the search's.
+    cx.executor().advance_clock(SUGGEST_DEBOUNCE);
+    cx.run_until_parked();
+    assert!(script.asked().is_empty());
+    assert_eq!(state(&model, cx), SearchState::Loading);
+    let found = model.read_with(cx, |m, _| m.local_shown().cloned()).unwrap();
+    assert_eq!(found.songs.len(), 1);
+    assert_eq!(found.albums.len(), 1);
+    assert_eq!(found.lead.len(), 2);
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    assert_eq!(script.asked(), ["moon"]);
+}
+
+#[gpui::test]
+fn the_library_chip_never_asks_the_service(cx: &mut TestAppContext) {
+    let (model, script) = setup(cx);
+    model.update(cx, |m, cx| m.set_library(library_index(), cx));
+    model.update(cx, |m, cx| m.set_chip(SearchChip::Library, cx));
+    model.update(cx, |m, cx| m.set_query("moon", cx));
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    assert_eq!(state(&model, cx), SearchState::Ready);
+    model.update(cx, |m, cx| m.submit(cx));
+    model.update(cx, |m, cx| m.set_query("moon river", cx));
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    assert!(script.asked().is_empty(), "nothing went to the service");
+    assert_eq!(state(&model, cx), SearchState::Ready);
+    assert!(model.read_with(cx, |m, _| m.results().is_none()));
+    assert_eq!(
+        model.read_with(cx, |m, _| m.local().songs.len()),
+        1
+    );
+    assert!(!model.read_with(cx, |m, _| m.is_local_empty()));
+
+    // Another chip then asks for its own list as usual.
+    model.update(cx, |m, cx| m.set_chip(SearchChip::All, cx));
+    cx.run_until_parked();
+    assert_eq!(script.asked(), ["moon river"]);
+}
+
+#[gpui::test]
+fn nothing_in_the_library_is_a_confirmed_empty_list(cx: &mut TestAppContext) {
+    let (model, _) = setup(cx);
+    model.update(cx, |m, cx| m.set_library(library_index(), cx));
+    model.update(cx, |m, cx| m.set_chip(SearchChip::Library, cx));
+    model.update(cx, |m, cx| m.set_query("zzzz", cx));
+    cx.executor().advance_clock(SUGGEST_DEBOUNCE);
+    cx.run_until_parked();
+    assert!(model.read_with(cx, |m, _| m.is_local_empty()));
+}
+
+#[gpui::test]
+fn a_library_that_loads_late_is_searched_for_the_query_already_typed(cx: &mut TestAppContext) {
+    let (model, _) = setup(cx);
+    model.update(cx, |m, cx| m.set_query("moon", cx));
+    cx.executor().advance_clock(SUGGEST_DEBOUNCE);
+    cx.run_until_parked();
+    assert!(model.read_with(cx, |m, _| m.is_local_empty()));
+    model.update(cx, |m, cx| m.set_library(library_index(), cx));
+    assert_eq!(model.read_with(cx, |m, _| m.local().total), 2);
+}
+
+#[gpui::test]
+fn a_short_query_and_a_link_look_for_nothing_in_the_library(cx: &mut TestAppContext) {
+    let (model, _) = setup(cx);
+    model.update(cx, |m, cx| m.set_library(library_index(), cx));
+    model.update(cx, |m, cx| m.set_query("m", cx));
+    cx.executor().advance_clock(SUGGEST_DEBOUNCE);
+    cx.run_until_parked();
+    assert!(model.read_with(cx, |m, _| m.local_shown().is_none()));
+    model.update(cx, |m, cx| m.set_query("music.youtube.com/watch?v=moonmoonmoo", cx));
+    cx.executor().advance_clock(SUGGEST_DEBOUNCE);
+    cx.run_until_parked();
+    assert!(model.read_with(cx, |m, _| m.local_shown().is_none()));
+}

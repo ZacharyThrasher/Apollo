@@ -30,6 +30,7 @@ use crate::library::model::{
     ArtSize, ArtistDetail, ArtistTarget, Detail, LibraryModel, Load, PlayRequest, Tab, Target,
 };
 use apollo_domain::model::Track;
+use crate::library::edits::{EditEvent, LibraryEdits};
 use crate::library::source::{ArtistContent, TrackRow};
 use crate::library::writes::LibraryWrites;
 use crate::motion::HoverFade;
@@ -40,6 +41,7 @@ use crate::ui::art_tile::art_tile_shaped;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::card::{heading, Card};
 use crate::ui::playing_row;
+use crate::ui::playlist_dialog::{self, Mode};
 use crate::ui::playlist_picker::PlaylistPicker;
 use crate::ui::row_actions::{heart_action, more_slot, playlist_action, ACTION_SIZE};
 use crate::ui::track_menu::{self, Subject};
@@ -112,6 +114,10 @@ const ALBUM_COLUMN_MIN_WINDOW: f32 = 1000.0;
 const SKELETON_ROWS: usize = 12;
 /// An artist page opens on its top songs, so its skeleton is about that many rows.
 const ARTIST_SKELETON_ROWS: usize = 5;
+/// The ghost that follows the pointer while a row is dragged.
+const DRAG_GHOST_WIDTH: f32 = 360.0;
+/// The insertion line a dragged row shows where it would land.
+const DROP_LINE: f32 = 2.0;
 
 /// Width of the filter field in a playlist or album page's header.
 const FILTER_WIDTH: f32 = 240.0;
@@ -130,6 +136,8 @@ struct Focus {
     shuffle: FocusHandle,
     list: FocusHandle,
     retry: FocusHandle,
+    /// The Playlists tab's New playlist button.
+    new_playlist: FocusHandle,
     /// The artist page's Radio and Subscribe buttons, "Show all" and the bio.
     radio: FocusHandle,
     subscribe: FocusHandle,
@@ -233,6 +241,48 @@ pub struct LibraryView {
     on_sign_in: Rc<Handler>,
     /// Rows drawn last frame: with virtualization this stays a screenful however long the list.
     rendered: Range<usize>,
+    /// A playlist was deleted: if its page is open it closes on the next frame (events carry no
+    /// window).
+    deleted: Option<String>,
+}
+
+/// The song row being dragged to a new place in an editable playlist.
+#[derive(Clone)]
+struct DraggedRow {
+    from: usize,
+    title: SharedString,
+    artist: SharedString,
+}
+
+struct DragGhost(DraggedRow);
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // On bg.overlay, so the lowest text tier is text.secondary.
+        div()
+            .w(px(DRAG_GHOST_WIDTH))
+            .h(px(TRACK_ROW - spacing::S2))
+            .px(px(spacing::S3))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .rounded(px(radius::MEDIUM))
+            .bg(color::bg_overlay())
+            .border_1()
+            .border_color(color::border_strong())
+            .child(
+                style::text_style(div(), typography::BODY, cx)
+                    .truncate()
+                    .text_color(color::text_primary())
+                    .child(self.0.title.clone()),
+            )
+            .child(
+                style::text_style(div(), typography::BODY, cx)
+                    .truncate()
+                    .text_color(color::text_secondary())
+                    .child(self.0.artist.clone()),
+            )
+    }
 }
 
 impl LibraryView {
@@ -240,6 +290,7 @@ impl LibraryView {
         player: Entity<PlayerModel>,
         writes: Entity<LibraryWrites>,
         picker: Entity<PlaylistPicker>,
+        edits: Entity<LibraryEdits>,
         on_search: impl Fn(&mut Window, &mut App) + 'static,
         on_closed: impl Fn(&mut Window, &mut App) + 'static,
         on_sign_in: impl Fn(&mut Window, &mut App) + 'static,
@@ -262,16 +313,26 @@ impl LibraryView {
             shuffle: stop(cx, 8),
             list: stop(cx, 9),
             retry: stop(cx, 10),
+            new_playlist: stop(cx, 8),
             // Same slot as Shuffle (they follow it in the tree), then the list's, then the cards'.
             radio: stop(cx, 8),
             subscribe: stop(cx, 8),
             show_all: stop(cx, 9),
             bio: stop(cx, 10),
         };
-        let model = cx.new(|cx| LibraryModel::new(player.clone(), writes.clone(), cx));
+        let model = cx.new(|cx| LibraryModel::new(player.clone(), writes.clone(), edits.clone(), cx));
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
         // Hearts follow the likes made anywhere.
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
+        // The lists follow what is made, renamed, deleted and saved; hearts of the menu too.
+        cx.observe(&edits, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&edits, |this, _, event, cx| {
+            if let EditEvent::Deleted(collection) = event {
+                this.deleted = Some(collection.library_key().to_owned());
+                cx.notify();
+            }
+        })
+        .detach();
         // The accent and the playing row follow the player.
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         Self {
@@ -296,6 +357,7 @@ impl LibraryView {
             signed_out: false,
             on_sign_in: Rc::new(Box::new(on_sign_in)),
             rendered: 0..0,
+            deleted: None,
         }
     }
 
@@ -1176,7 +1238,7 @@ impl LibraryView {
     ) -> AnyElement {
         let animations = !cx.reduce_motion();
         let filter = self.ensure_filter(window, cx);
-        let (collection, loading, failure, pending, items, skipped, confirmed_empty) = {
+        let (collection, loading, failure, pending, items, skipped, confirmed_empty, editable) = {
             let d: &Detail = self.model.read(cx).detail().expect("detail is open");
             (
                 d.collection.clone(),
@@ -1186,6 +1248,7 @@ impl LibraryView {
                 d.listing.items().len(),
                 d.listing.skipped(),
                 d.listing.is_confirmed_empty(),
+                d.can_edit(),
             )
         };
         let what = if collection.kind == CollectionKind::Album {
@@ -1311,7 +1374,14 @@ impl LibraryView {
                     .w(px(FILTER_WIDTH))
                     .flex_none()
                     .child(field)
-            }));
+            }))
+            .child(more_slot(
+                "detail-more",
+                true,
+                Subject::Collection(collection.clone()),
+            ));
+        // Right-click on the header opens the same menu as the More button.
+        let header = track_menu::on_context_menu(header, Subject::Collection(collection.clone()));
         let visible = self.visible(cx).len();
         let filtering = !self.filter_text(cx).is_empty();
 
@@ -1352,7 +1422,9 @@ impl LibraryView {
             )
         } else {
             // One extra row at the end carries the loading / partial-failure / skipped note.
-            let footer = loading || failure.is_some() || skipped > 0;
+            // On a playlist of your own it is also where a row dropped last lands (a filter hides
+            // some rows, so then rows cannot be dragged and there is no end to drop at).
+            let footer = loading || failure.is_some() || skipped > 0 || (editable && !filtering);
             self.render_list(visible + usize::from(footer), ListKind::Tracks, window, cx)
         };
 
@@ -1375,20 +1447,21 @@ impl LibraryView {
         let (ix, real) = (frame.ix, frame.real);
         // The History tab's rows are track rows with no page behind them.
         let history = self.history_open(cx);
-        let (row, album_collection, loading, failure, skipped): (
+        let (row, album_collection, loading, failure, skipped, editable): (
             Option<TrackRow>,
             bool,
             bool,
             Option<LoadFailure>,
             u32,
+            Option<Collection>,
         ) = {
             let model = self.model.read(cx);
             if let Some(artist) = model.artist() {
                 // Top songs: a plain list with no footer.
                 let row = artist.content().and_then(|c| c.top_songs.get(real).cloned());
-                (row, false, false, None, 0)
+                (row, false, false, None, 0, None)
             } else if history {
-                (model.history_at(real), false, false, None, 0)
+                (model.history_at(real), false, false, None, 0, None)
             } else {
                 let d = model.detail().expect("a page is open");
                 (
@@ -1397,11 +1470,23 @@ impl LibraryView {
                     d.is_loading(),
                     d.failure(),
                     d.listing.skipped(),
+                    d.can_edit().then(|| d.collection.clone()),
                 )
             }
         };
+        // A filter hides some rows: a row's place in the list on screen is not its place in the
+        // playlist, so nothing is dragged while one is in use.
+        let filtering = !self.filter_text(cx).is_empty();
         let Some(row) = row else {
-            return self.track_footer(ix, loading, failure, skipped, frame.accent, cx);
+            return self.track_footer(
+                ix,
+                loading,
+                failure,
+                skipped,
+                editable.is_some() && !filtering,
+                frame.accent,
+                cx,
+            );
         };
 
         let playing =
@@ -1435,7 +1520,28 @@ impl LibraryView {
         let accent = frame.accent;
         let video: String = row.track.video_id.as_str().to_owned();
         let liked = self.writes.read(cx).is_liked(&video);
-        let subject = Subject::track(row.track.clone(), row.thumbnail.clone());
+        // A row of a playlist of your own can be removed from it, and dragged to a new place.
+        let subject = match (&editable, &row.occurrence) {
+            (Some(collection), Some(occurrence)) => Subject::playlist_track(
+                row.track.clone(),
+                row.thumbnail.clone(),
+                collection.clone(),
+                occurrence.clone(),
+            ),
+            _ => Subject::track(row.track.clone(), row.thumbnail.clone()),
+        };
+        let draggable = editable.is_some()
+            && !filtering
+            && self
+                .model
+                .read(cx)
+                .detail()
+                .is_some_and(|d| d.listing.items().iter().all(|r| r.occurrence.is_some()));
+        let dragged = DraggedRow {
+            from: real,
+            title: row.track.title.clone().into(),
+            artist: artists.clone(),
+        };
         let actions = self.row_actions(
             ix,
             &video,
@@ -1558,7 +1664,42 @@ impl LibraryView {
                     cx,
                 )),
         )
+        .when(draggable, |d| {
+            let group: SharedString = format!("row-drop-{ix}").into();
+            d.group(group.clone())
+                .child(Self::drop_line(group))
+                .on_drag(dragged, |dragged, _, _, cx| {
+                    cx.new(|_| DragGhost(dragged.clone()))
+                })
+                .on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
+                    this.drop_row(dragged.from, ix, cx)
+                }))
+        })
         .into_any_element()
+    }
+
+    /// The thin accent line a dragged row shows above the row it would land before.
+    fn drop_line(group: SharedString) -> impl IntoElement {
+        div()
+            .absolute()
+            .top_0()
+            .left(px(spacing::S2))
+            .right(px(spacing::S2))
+            .h(px(DROP_LINE))
+            .rounded_full()
+            .bg(color::text_secondary())
+            .opacity(0.0)
+            .group_drag_over::<DraggedRow>(group, |s| s.opacity(1.0))
+    }
+
+    /// A dragged row was let go before slot `slot`: the playlist reorders.
+    fn drop_row(&mut self, from: usize, slot: usize, cx: &mut Context<Self>) {
+        let moved = self.model.update(cx, |m, cx| m.move_row(from, slot, cx));
+        if moved {
+            // The row keeps the keyboard selection with it.
+            self.selected = if slot > from { slot - 1 } else { slot };
+        }
+        cx.notify();
     }
 
     /// The like and add-to-playlist actions of a track row. Their room is always reserved, so
@@ -1614,6 +1755,7 @@ impl LibraryView {
         loading: bool,
         failure: Option<LoadFailure>,
         skipped: u32,
+        editable: bool,
         accent: Accent,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1644,14 +1786,27 @@ impl LibraryView {
         } else {
             div().into_any_element()
         };
-        div()
+        let footer = div()
             .id(("track-footer", ix))
+            .debug_selector(move || format!("library-row-{ix}"))
+            .relative()
             .flex()
             .items_center()
             .h(px(TRACK_ROW))
             .px(px(spacing::S2))
-            .child(body)
-            .into_any_element()
+            .child(body);
+        if editable {
+            // A row dropped here goes to the end of the playlist.
+            let group: SharedString = format!("row-drop-{ix}").into();
+            return footer
+                .group(group.clone())
+                .child(Self::drop_line(group))
+                .on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
+                    this.drop_row(dragged.from, ix, cx)
+                }))
+                .into_any_element();
+        }
+        footer.into_any_element()
     }
 }
 
@@ -1712,6 +1867,20 @@ impl Render for LibraryView {
         };
         // Pages the model opened directly (not through this view) still get scroll state.
         self.pages.resize_with(depth, PageScroll::new);
+        // A playlist deleted while its page is open: the page has nothing left to show.
+        if let Some(key) = self.deleted.take() {
+            let open_here = self
+                .model
+                .read(cx)
+                .detail()
+                .is_some_and(|d| d.collection.library_key() == key);
+            if open_here {
+                let this = cx.entity();
+                window.defer(cx, move |window, cx| {
+                    this.update(cx, |t, cx| t.back(window, cx));
+                });
+            }
+        }
         let page = if self.signed_out {
             self.render_signed_out(accent, cx)
         } else if artist_open {

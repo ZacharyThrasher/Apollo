@@ -14,8 +14,8 @@ use crate::account::AccountModel;
 use crate::crate_list::{CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
+use crate::library::{LibraryEdits, LibraryWrites, Notice, Target};
 use crate::page_cache::PageCache;
-use crate::library::{LibraryWrites, Notice, Target};
 use crate::lyrics::LyricsModel;
 use crate::keymap::{
     CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward, ToggleLyrics, ToggleMute, UndoQueue, VolumeDown,
@@ -42,6 +42,7 @@ use crate::ui::choice_menu::{self, ChoiceHandle, ChoiceMenu};
 use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus};
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
+use crate::ui::playlist_dialog::{self, DialogHandle, PlaylistDialog};
 use crate::ui::playlist_picker::{self, PlaylistPicker};
 use crate::ui::queue_panel::QueuePanel;
 use crate::ui::related_pane::RelatedPane;
@@ -96,6 +97,7 @@ pub fn bind_keys(cx: &mut App) {
     crate_page::bind_keys(cx);
     playlist_picker::bind_keys(cx);
     track_menu::bind_keys(cx);
+    playlist_dialog::bind_keys(cx);
     choice_menu::bind_keys(cx);
     crate::ui::vslider::bind_keys(cx);
     crate::ui::mini_player::bind_keys(cx);
@@ -130,7 +132,11 @@ pub struct Shell {
     explore_page: Entity<ExploreView>,
     /// Likes and playlist adds, and the short error a failed one leaves.
     writes: Entity<LibraryWrites>,
+    /// Playlist edits (create, rename, delete, save) and what the account owns.
+    edits: Entity<LibraryEdits>,
     picker: Entity<PlaylistPicker>,
+    /// The dialog that names, renames and confirms deleting a playlist.
+    dialog: Entity<PlaylistDialog>,
     /// The menu a right-click or a row's More button opens.
     menu: Entity<TrackMenu>,
     /// The pick-one popover of the Output device row and the speed button.
@@ -251,7 +257,11 @@ impl Shell {
         let root_focus = cx.focus_handle();
         let weak = cx.weak_entity();
         let writes = cx.new(|cx| LibraryWrites::new(player.clone(), cx));
+        let edits = cx.new(|_| LibraryEdits::new(player.clone(), writes.clone()));
         let picker = cx.new(|cx| PlaylistPicker::new(player.clone(), writes.clone(), cx));
+        let dialog = cx.new(|cx| PlaylistDialog::new(player.clone(), edits.clone(), cx));
+        cx.observe(&dialog, |_, _, cx| cx.notify()).detach();
+        cx.set_global(DialogHandle(dialog.clone()));
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         cx.observe(&picker, |_, _, cx| cx.notify()).detach();
         let crate_model = cx.new(|_| CrateModel::new());
@@ -276,10 +286,22 @@ impl Shell {
                 player.clone(),
                 writes.clone(),
                 picker.clone(),
+                edits.clone(),
                 {
                     let weak = weak.clone();
                     move |target, window, cx| {
                         let _ = weak.update(cx, |s, cx| s.open_target(target, window, cx));
+                    }
+                },
+                {
+                    let weak = weak.clone();
+                    move |collection, occurrence, cx| {
+                        let _ = weak.update(cx, |s, cx| {
+                            let model = s.library.read(cx).model().clone();
+                            model.update(cx, |m, cx| {
+                                m.remove_row(collection.library_key(), occurrence, cx)
+                            });
+                        });
                     }
                 },
                 cx,
@@ -373,6 +395,7 @@ impl Shell {
                 player.clone(),
                 writes.clone(),
                 picker.clone(),
+                edits.clone(),
                 {
                     let weak = weak.clone();
                     move |window, cx| {
@@ -409,6 +432,7 @@ impl Shell {
                 writes.clone(),
                 picker.clone(),
                 search_model.clone(),
+                library.read(cx).model().clone(),
                 thumbs.clone(),
                 settings.clone(),
                 root_focus.clone(),
@@ -475,7 +499,9 @@ impl Shell {
             explore,
             explore_page,
             writes,
+            edits,
             picker,
+            dialog,
             menu,
             choices,
             sleep_menu,
@@ -546,6 +572,8 @@ impl Shell {
             self.writes.update(cx, |w, cx| w.reset(cx));
             self.picker.update(cx, |p, cx| p.reset(cx));
             self.menu.update(cx, |m, cx| m.reset(cx));
+            self.edits.update(cx, |e, cx| e.reset(cx));
+            self.dialog.update(cx, |d, cx| d.reset(cx));
             self.sleep_menu.update(cx, |m, cx| m.reset(cx));
         }
         // The Crate belongs to the chosen account (a moment without one keeps what shows).
@@ -666,6 +694,14 @@ impl Shell {
 
     pub fn menu(&self) -> &Entity<TrackMenu> {
         &self.menu
+    }
+
+    pub fn edits(&self) -> &Entity<LibraryEdits> {
+        &self.edits
+    }
+
+    pub fn dialog(&self) -> &Entity<PlaylistDialog> {
+        &self.dialog
     }
 
     pub fn choices(&self) -> &Entity<ChoiceMenu> {
@@ -1392,6 +1428,7 @@ impl Render for Shell {
         });
         let picker = self.picker.read(cx).is_open().then(|| self.picker.clone());
         let menu = self.menu.read(cx).is_open().then(|| self.menu.clone());
+        let dialog = self.dialog.read(cx).is_open().then(|| self.dialog.clone());
         let choices = self.choices.read(cx).is_open().then(|| self.choices.clone());
         let sleep_menu = self
             .sleep_menu
@@ -1471,6 +1508,7 @@ impl Render for Shell {
             .children(pill)
             .children(picker)
             .children(menu)
+            .children(dialog)
             .children(choices)
             .children(sleep_menu)
     }

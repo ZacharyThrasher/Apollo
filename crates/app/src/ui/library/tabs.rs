@@ -64,6 +64,25 @@ impl LibraryView {
             .collect();
         let sort =
             (current.sorts().len() > 1).then(|| self.sort_control(current, accent, window, cx));
+        // Making a playlist needs the library to be there: the button shows once it has loaded.
+        let can_create = current == Tab::Playlists
+            && matches!(self.model.read(cx).collections(), Load::Ready(_));
+        let new_playlist = can_create.then(|| {
+            div()
+                .debug_selector(|| "library-new-playlist".into())
+                .child(
+                    TextButton::new(
+                        "library-new-playlist",
+                        &self.focus.new_playlist,
+                        "New playlist",
+                        accent,
+                    )
+                    .strong()
+                    .on_click(|window, cx| {
+                        playlist_dialog::open(Mode::Create { add_video: None }, window, cx)
+                    }),
+                )
+        });
         div()
             .flex()
             .flex_row()
@@ -79,7 +98,15 @@ impl LibraryView {
                     .gap(px(spacing::S2))
                     .children(buttons),
             )
-            .children(sort)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(spacing::S2))
+                    .children(new_playlist)
+                    .children(sort),
+            )
             .into_any_element()
     }
 

@@ -9,7 +9,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use apollo_domain::library::{Collection, CollectionKind, LIKED_MUSIC_BROWSE_ID};
+use apollo_domain::library::{
+    is_user_playlist_id, moved, plan_move, Collection, CollectionKind, PageMeta,
+    LIKED_MUSIC_BROWSE_ID,
+};
 use apollo_domain::listing::{Applied, Listing, LoadFailure, LoadState, Page, Revision};
 use apollo_domain::model::{BrowseId, Track};
 use gpui::{Context, Entity, RenderImage};
@@ -20,7 +23,9 @@ use apollo_provider::{HistoryDay, Hit};
 use super::browse::{
     history_groups, history_len, history_row, sort_artists, sort_collections, HistoryGroup, SortKey,
 };
+use super::edits::{self, Edit, EditEvent, LibraryEdits};
 use super::source::{ArtistContent, LibrarySource, TrackRow};
+use crate::search::local::LocalIndex;
 use super::writes::{LibraryWrites, WritesEvent};
 
 mod artist;
@@ -166,16 +171,53 @@ enum Entry {
     Artist(ArtistDetail),
 }
 
+/// The edits of one playlist's rows that are shown but not yet settled, oldest first, each with
+/// the account it was asked in. They go out one at a time (each one's order depends on the ones
+/// before it) and outlive the page they were made on: leaving the page does not drop them.
+struct EditQueue {
+    collection: Collection,
+    items: VecDeque<(PageEdit, Option<String>)>,
+    /// One is out.
+    busy: bool,
+}
+
+/// An edit of the rows of a playlist page, already shown and waiting to be (or being) written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PageEdit {
+    Remove {
+        video_id: String,
+        occurrence: String,
+    },
+    Move {
+        occurrence: String,
+        /// The row it goes in front of; `None` is the end.
+        before: Option<String>,
+        /// Every row's token in the order the playlist should have afterwards.
+        desired: Vec<String>,
+    },
+}
+
 pub struct Detail {
     id: u64,
     pub collection: Collection,
     pub listing: Listing<TrackRow>,
     pub pending: Option<PlayRequest>,
+    /// What the page says about editing and saving it (known once its first page arrived).
+    pub meta: PageMeta,
     /// Bumped by every silent refresh; an older refresh's answer is dropped.
     refresh: u64,
 }
 
 impl Detail {
+    /// The rows can be removed and reordered: the account owns the playlist (the page said so and
+    /// its id is a user playlist's) and every row is here.
+    pub fn can_edit(&self) -> bool {
+        self.meta.owned
+            && is_user_playlist_id(self.collection.library_key())
+            && !self.is_loading()
+            && self.failure().is_none()
+    }
+
     /// More pages are on the way (or the first one is).
     pub fn is_loading(&self) -> bool {
         matches!(
@@ -264,10 +306,15 @@ struct Shown {
 pub struct LibraryModel {
     player: Entity<PlayerModel>,
     writes: Entity<LibraryWrites>,
+    edits: Entity<LibraryEdits>,
+    /// Pending row edits by the playlist's library key.
+    edit_queues: HashMap<String, EditQueue>,
     source: Option<Arc<dyn LibrarySource>>,
     tab: Tab,
     collections: Load<Collections>,
     collections_rev: u64,
+    /// Bumped when the account changes: answers to row edits sent before are not for this library.
+    edit_epoch: u64,
     /// The Artists tab: the artists behind the library, in the service's order.
     artists: Load<Vec<Hit>>,
     artists_rev: u64,
@@ -277,6 +324,18 @@ pub struct LibraryModel {
     sorts: HashMap<Tab, SortKey>,
     sort_store: Option<Arc<dyn LibrarySortStore>>,
     shown: Shown,
+    /// Every liked song, loaded the first time a search needs them (the Liked Music page loads
+    /// its own copy). `liked_stale`: a like since then is not in it, so the next search that
+    /// starts reads it again.
+    liked_songs: Load<Arc<Vec<TrackRow>>>,
+    liked_rev: u64,
+    liked_stale: bool,
+    /// A search wanted them before the source was there: load them as soon as it is.
+    search_wanted: bool,
+    /// What Search looks through, rebuilt whenever one of the lists above changes; `index_rev`
+    /// tells a watcher that it did.
+    index: Arc<LocalIndex>,
+    index_rev: u64,
     /// Open pages, the one on screen last. Album and playlist pages opened from an artist page
     /// stack on it, and back unwinds one at a time.
     stack: Vec<Entry>,
@@ -288,9 +347,13 @@ impl LibraryModel {
     pub fn new(
         player: Entity<PlayerModel>,
         writes: Entity<LibraryWrites>,
+        edits: Entity<LibraryEdits>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&player, |m, _, cx| m.try_start(cx)).detach();
+        // The lists follow the playlists made, renamed, deleted and saved anywhere in the app.
+        cx.subscribe(&edits, |m, _, event, cx| m.edit_happened(event, cx))
+            .detach();
         // Liked Music follows the likes made anywhere in the app.
         cx.subscribe(&writes, |m, _, event, cx| match event {
             WritesEvent::LikeSettled { video_id, liked } => m.liked_changed(video_id, *liked, cx),
@@ -299,10 +362,13 @@ impl LibraryModel {
         let mut model = Self {
             player,
             writes,
+            edits,
+            edit_queues: HashMap::new(),
             source: None,
             tab: Tab::Playlists,
             collections: Load::Idle,
             collections_rev: 0,
+            edit_epoch: 0,
             artists: Load::Idle,
             artists_rev: 0,
             history: Load::Idle,
@@ -310,6 +376,12 @@ impl LibraryModel {
             sorts: HashMap::new(),
             sort_store: None,
             shown: Shown::default(),
+            liked_songs: Load::Idle,
+            liked_rev: 0,
+            liked_stale: false,
+            search_wanted: false,
+            index: Arc::new(LocalIndex::default()),
+            index_rev: 0,
             stack: Vec::new(),
             next_detail: 1,
             thumbs: Thumbs::default(),
@@ -415,6 +487,9 @@ impl LibraryModel {
                 self.source = Some(source);
                 self.load_collections(cx);
                 self.ensure_tab(self.tab, cx);
+                if self.search_wanted {
+                    self.ensure_searchable(cx);
+                }
             }
             None if unavailable && self.collections == Load::Idle => {
                 self.collections = Load::Failed(LoadFailure::Other);
@@ -428,6 +503,9 @@ impl LibraryModel {
     /// in flight for the old account are dropped.
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.stack.clear();
+        // Row edits not yet sent belong to the old account and are dropped, not sent to the new.
+        self.edit_queues.clear();
+        self.edit_epoch += 1;
         // Covers still downloading finish into the new cache harmlessly; keep their count.
         self.thumbs = Thumbs {
             inflight: self.thumbs.inflight,
@@ -440,7 +518,11 @@ impl LibraryModel {
         self.artists = Load::Idle;
         self.history_rev += 1;
         self.history = Load::Idle;
+        self.liked_rev += 1;
+        self.liked_songs = Load::Idle;
+        self.liked_stale = false;
         self.shown = Shown::default();
+        self.rebuild_index();
         if self.source.is_some() {
             self.load_collections(cx);
         } else {
@@ -469,6 +551,10 @@ impl LibraryModel {
             None => Load::Loading,
         };
         self.reshow();
+        // What the cache showed is what the menus know about the library until the answer lands.
+        if let Load::Ready(lists) = &self.collections {
+            self.edits.update(cx, |e, cx| e.set_library(lists, cx));
+        }
         self.collections_rev += 1;
         let rev = self.collections_rev;
         cx.notify();
@@ -492,6 +578,9 @@ impl LibraryModel {
                             return;
                         }
                         m.collections = fresh;
+                        if let Load::Ready(lists) = &m.collections {
+                            m.edits.update(cx, |e, cx| e.set_library(lists, cx));
+                        }
                     }
                     // A dead session is always said out loud; any other failure leaves the
                     // lists that are already on screen alone.
@@ -727,6 +816,118 @@ impl LibraryModel {
             albums,
             artists,
         };
+        self.rebuild_index();
+    }
+
+    // ---- search ----------------------------------------------------------------------------
+
+    /// What Search looks through, and a counter that changes whenever it does.
+    pub fn search_index(&self) -> (u64, &Arc<LocalIndex>) {
+        (self.index_rev, &self.index)
+    }
+
+    fn rebuild_index(&mut self) {
+        let songs: &[TrackRow] = match &self.liked_songs {
+            Load::Ready(rows) => rows,
+            _ => &[],
+        };
+        self.index = Arc::new(LocalIndex::new(
+            songs,
+            &self.shown.albums,
+            &self.shown.playlists,
+            &self.shown.artists,
+        ));
+        self.index_rev += 1;
+    }
+
+    /// A search is starting: bring in what it looks through that the screens have not loaded
+    /// yet, the artists and the liked songs, with the reads those screens make. Playlists and
+    /// albums load with the app. A load that is under way, or has answered, is left alone.
+    pub fn ensure_searchable(&mut self, cx: &mut Context<Self>) {
+        if self.source.is_none() {
+            self.search_wanted = true;
+            return;
+        }
+        self.search_wanted = false;
+        if matches!(self.artists, Load::Idle | Load::Failed(_)) {
+            self.load_artists(cx);
+        }
+        let stale = self.liked_stale && matches!(self.liked_songs, Load::Ready(_));
+        if matches!(self.liked_songs, Load::Idle | Load::Failed(_)) || stale {
+            self.load_liked_songs(cx);
+        }
+    }
+
+    /// Every liked song, page after page. Rows already held stay until a complete new list
+    /// replaces them, and stay for good if it fails.
+    fn load_liked_songs(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        if !matches!(self.liked_songs, Load::Ready(_)) {
+            self.liked_songs = Load::Loading;
+        }
+        self.liked_stale = false;
+        self.liked_rev += 1;
+        let rev = self.liked_rev;
+        cx.spawn(async move |this, cx| {
+            let mut rows: Vec<TrackRow> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            let mut listing = Listing::<TrackRow>::new();
+            let list_rev = listing.begin();
+            let liked = liked_music();
+            let mut result = {
+                let source = source.clone();
+                cx.background_executor()
+                    .spawn(async move { source.tracks(&liked) })
+                    .await
+            };
+            let outcome = loop {
+                let page = match result {
+                    Ok(page) => page,
+                    Err(f) => break Err(f),
+                };
+                if listing.apply(list_rev, page) != Applied::Yes {
+                    break Ok(());
+                }
+                let Some((_, token)) = listing.continuation() else {
+                    break Ok(());
+                };
+                let token = token.to_owned();
+                let source = source.clone();
+                result = cx
+                    .background_executor()
+                    .spawn(async move { source.more_tracks(&token) })
+                    .await;
+            };
+            if outcome.is_ok() {
+                for row in listing.items() {
+                    // The same song twice in the list is one library song.
+                    if seen.insert(row.track.video_id.as_str().to_owned()) {
+                        rows.push(row.clone());
+                    }
+                }
+            }
+            let _ = this.update(cx, |m, cx| {
+                if m.liked_rev != rev {
+                    return;
+                }
+                match outcome {
+                    Ok(()) => {
+                        let seeds = like_seeds(&rows, true);
+                        m.liked_songs = Load::Ready(Arc::new(rows));
+                        m.writes.update(cx, |w, cx| w.seed(seeds, cx));
+                    }
+                    Err(f) if !matches!(m.liked_songs, Load::Ready(_)) => {
+                        m.liked_songs = Load::Failed(f)
+                    }
+                    Err(_) => {}
+                }
+                m.rebuild_index();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // ---- pages --------------------------------------------------------------------------
@@ -752,6 +953,7 @@ impl LibraryModel {
             collection,
             listing: Listing::new(),
             pending: None,
+            meta: PageMeta::default(),
             refresh: 0,
         }));
         self.load_detail(cx);
@@ -840,10 +1042,22 @@ impl LibraryModel {
             let first = {
                 let source = source.clone();
                 cx.background_executor()
-                    .spawn(async move { source.tracks(&collection) })
+                    .spawn(async move { source.page(&collection) })
                     .await
             };
-            let mut result = first;
+            let mut result = match first {
+                Ok((page, meta)) => {
+                    let _ = this.update(cx, |m, _| {
+                        if let Some(d) = m.collection_mut(id) {
+                            if d.listing.revision() == rev {
+                                d.meta = meta;
+                            }
+                        }
+                    });
+                    Ok(page)
+                }
+                Err(failure) => Err(failure),
+            };
             loop {
                 let next = this
                     .update(cx, |m, cx| m.apply_page(id, rev, result, Origin::Live(ticket.as_ref()), cx))
@@ -932,6 +1146,22 @@ impl LibraryModel {
     /// and swaps it in when it is whole (a page that is still loading already brings the
     /// current list). A page that is not open needs nothing: opening one always loads it fresh.
     fn liked_changed(&mut self, video_id: &str, liked: bool, cx: &mut Context<Self>) {
+        match &mut self.liked_songs {
+            Load::Ready(rows) => {
+                let listed = rows.iter().any(|r| r.track.video_id.as_str() == video_id);
+                if !liked && listed {
+                    Arc::make_mut(rows).retain(|r| r.track.video_id.as_str() != video_id);
+                    self.rebuild_index();
+                    cx.notify();
+                } else if liked && !listed {
+                    // Only the id is known here: the next search reads the list again.
+                    self.liked_stale = true;
+                }
+            }
+            // A load under way may have read the list before this change.
+            Load::Loading => self.liked_stale = true,
+            _ => {}
+        }
         let mut refresh = Vec::new();
         let mut dropped = false;
         for entry in &mut self.stack {
@@ -1022,6 +1252,229 @@ impl LibraryModel {
             });
         })
         .detach();
+    }
+
+    // ---- playlist edits ------------------------------------------------------------------
+
+    /// The lists follow what was made, renamed, deleted or saved. A list that is not loaded yet
+    /// needs nothing: its load brings the current library.
+    fn edit_happened(&mut self, event: &EditEvent, cx: &mut Context<Self>) {
+        match event {
+            EditEvent::Created(c) => self.patch_lists(|l| insert_collection(l, c.clone())),
+            EditEvent::Renamed(c) => {
+                let key = c.library_key().to_owned();
+                self.patch_lists(|l| {
+                    for entry in l.playlists.iter_mut().filter(|e| e.library_key() == key) {
+                        entry.title = c.title.clone();
+                    }
+                });
+                for entry in &mut self.stack {
+                    if let Entry::Collection(d) = entry {
+                        if d.collection.kind == c.kind && d.collection.library_key() == key {
+                            d.collection.title = c.title.clone();
+                        }
+                    }
+                }
+            }
+            EditEvent::Deleted(c) => {
+                let key = c.library_key().to_owned();
+                self.patch_lists(|l| l.playlists.retain(|e| e.library_key() != key));
+            }
+            EditEvent::Saved { collection, saved } => {
+                let key = collection.library_key().to_owned();
+                if *saved {
+                    self.patch_lists(|l| insert_collection(l, collection.clone()));
+                } else {
+                    self.patch_lists(|l| match collection.kind {
+                        CollectionKind::Playlist => l.playlists.retain(|e| e.library_key() != key),
+                        CollectionKind::Album => l.albums.retain(|e| e.library_key() != key),
+                    });
+                }
+            }
+            EditEvent::Failed(_) => {}
+        }
+        cx.notify();
+    }
+
+    fn patch_lists(&mut self, f: impl FnOnce(&mut Collections)) {
+        if let Load::Ready(lists) = &mut self.collections {
+            f(lists);
+            self.reshow();
+        }
+    }
+
+    /// Remove the row with this occurrence token from the playlist page on top: it is gone at once
+    /// and the write follows. Only the page of a playlist the account owns, once all its rows are
+    /// loaded; anything else is ignored.
+    pub fn remove_row(&mut self, playlist_key: &str, occurrence: &str, cx: &mut Context<Self>) {
+        let Some(Entry::Collection(d)) = self.stack.last_mut() else {
+            return;
+        };
+        if d.collection.library_key() != playlist_key || !d.can_edit() {
+            return;
+        }
+        let Some(row) = d
+            .listing
+            .items()
+            .iter()
+            .find(|r| r.occurrence.as_deref() == Some(occurrence))
+            .cloned()
+        else {
+            return;
+        };
+        d.listing.retain(|r| r.occurrence.as_deref() != Some(occurrence));
+        let collection = d.collection.clone();
+        let edit = PageEdit::Remove {
+            video_id: row.track.video_id.as_str().to_owned(),
+            occurrence: occurrence.to_owned(),
+        };
+        self.queue_edit(collection, edit, cx);
+        cx.notify();
+    }
+
+    /// Move row `from` of the playlist page on top to sit before the insertion slot `slot`: it
+    /// moves at once and the write follows. Returns whether anything moved.
+    pub fn move_row(&mut self, from: usize, slot: usize, cx: &mut Context<Self>) -> bool {
+        let Some(Entry::Collection(d)) = self.stack.last_mut() else {
+            return false;
+        };
+        if !d.can_edit() {
+            return false;
+        }
+        let items = d.listing.items();
+        let tokens: Vec<String> = items.iter().filter_map(|r| r.occurrence.clone()).collect();
+        // A row with no token cannot be named to the service, so the page cannot be reordered.
+        if tokens.len() != items.len() {
+            return false;
+        }
+        let Some(plan) = plan_move(items.len(), from, slot) else {
+            return false;
+        };
+        let edit = PageEdit::Move {
+            occurrence: tokens[from].clone(),
+            before: plan.before.map(|i| tokens[i].clone()),
+            desired: moved(&tokens, from, slot),
+        };
+        d.listing.move_item(from, slot);
+        let collection = d.collection.clone();
+        self.queue_edit(collection, edit, cx);
+        cx.notify();
+        true
+    }
+
+    fn queue_edit(&mut self, collection: Collection, edit: PageEdit, cx: &mut Context<Self>) {
+        // The account is named now, when the person acted, not when the edit goes out.
+        let token = self.source.as_ref().and_then(|s| s.account_token());
+        let key = collection.library_key().to_owned();
+        edits::Stale::Collection(key.clone()).invalidate(cx);
+        self.edit_queues
+            .entry(key.clone())
+            .or_insert_with(|| EditQueue {
+                collection,
+                items: VecDeque::new(),
+                busy: false,
+            })
+            .items
+            .push_back((edit, token));
+        self.pump_edits(&key, cx);
+    }
+
+    /// Send the next waiting edit of a playlist, unless one is already out.
+    fn pump_edits(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let Some(queue) = self.edit_queues.get_mut(key) else {
+            return;
+        };
+        if queue.busy {
+            return;
+        }
+        let Some((edit, token)) = queue.items.pop_front() else {
+            self.edit_queues.remove(key);
+            return;
+        };
+        queue.busy = true;
+        let collection = queue.collection.clone();
+        let (key, generation) = (key.to_owned(), self.edit_epoch);
+        let kind = match &edit {
+            PageEdit::Remove { .. } => Edit::RemoveSong,
+            PageEdit::Move { .. } => Edit::MoveSong,
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match edit {
+                        PageEdit::Remove {
+                            video_id,
+                            occurrence,
+                        } => edits::remove(&*source, &token, &collection, &video_id, &occurrence),
+                        PageEdit::Move {
+                            occurrence,
+                            before,
+                            desired,
+                        } => edits::move_row(
+                            &*source,
+                            &token,
+                            &collection,
+                            &occurrence,
+                            before.as_deref(),
+                            &desired,
+                        ),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |m, cx| {
+                // The account changed while it was out: its answer is not for this library.
+                if m.edit_epoch == generation {
+                    m.edit_settled(&key, kind, result, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn edit_settled(
+        &mut self,
+        key: &str,
+        kind: Edit,
+        result: Result<(), apollo_domain::library::WriteFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        // Whatever a read cached while the write was out is not the playlist as it is now.
+        edits::Stale::Collection(key.to_owned()).invalidate(cx);
+        match result {
+            Ok(()) => {
+                if let Some(queue) = self.edit_queues.get_mut(key) {
+                    queue.busy = false;
+                }
+                self.pump_edits(key, cx);
+            }
+            Err(failure) => {
+                // What is shown was ahead of the service: put the service's own list back, and
+                // drop what was waiting behind the edit that failed (it assumed that one landed).
+                self.edit_queues.remove(key);
+                let text = edits::failure_text(kind, failure);
+                self.writes.update(cx, |w, cx| w.raise(text, cx));
+                let ids: Vec<u64> = self
+                    .stack
+                    .iter()
+                    .filter_map(|e| match e {
+                        Entry::Collection(d) if d.collection.library_key() == key => Some(d.id),
+                        _ => None,
+                    })
+                    .collect();
+                for id in ids {
+                    self.refresh_detail(id, cx);
+                }
+            }
+        }
+    }
+
+    /// A playlist's edits are still going out (tests).
+    pub fn edits_pending(&self, key: &str) -> bool {
+        self.edit_queues.contains_key(key)
     }
 
     // ---- artist --------------------------------------------------------------------------
@@ -1284,6 +1737,25 @@ impl LibraryModel {
         while self.thumbs.order.len() > ART_CACHE_CAP {
             if let Some(old) = self.thumbs.order.pop_front() {
                 self.thumbs.map.remove(&old);
+            }
+        }
+    }
+}
+
+/// A collection into the lists: a playlist right after Liked Music (where a new or saved one
+/// appears in the service's own order), an album first. One already listed is left alone.
+fn insert_collection(lists: &mut Collections, collection: Collection) {
+    let key = collection.library_key().to_owned();
+    match collection.kind {
+        CollectionKind::Playlist => {
+            if !lists.playlists.iter().any(|c| c.library_key() == key) {
+                let at = usize::from(lists.playlists.first().is_some_and(Collection::is_liked_music));
+                lists.playlists.insert(at, collection);
+            }
+        }
+        CollectionKind::Album => {
+            if !lists.albums.iter().any(|c| c.library_key() == key) {
+                lists.albums.insert(0, collection);
             }
         }
     }
