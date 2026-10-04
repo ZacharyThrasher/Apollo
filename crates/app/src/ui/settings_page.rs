@@ -51,6 +51,11 @@ impl SettingsPage {
         }
     }
 
+    /// The settings the page edits.
+    pub fn settings(&self) -> &Entity<SettingsModel> {
+        &self.settings
+    }
+
     /// The first `n` focus handles, created as needed. They share the Account page's tab
     /// position, so tabbing follows paint order down the column.
     fn handles(&mut self, n: usize, cx: &mut Context<Self>) -> Vec<FocusHandle> {
