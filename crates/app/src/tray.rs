@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use apollo_theme::Accent;
 
 use crate::os_media::{MediaState, MediaTrack, OsCommand};
+use crate::sleep_timer::SleepChoice;
 
 /// What the tooltip says when nothing is loaded, and the name on the tray menu's window item.
 pub const APP_NAME: &str = "Apollo";
@@ -33,6 +34,8 @@ pub enum TrayCommand {
     PlayPause,
     Next,
     Previous,
+    /// An entry of the "Sleep timer" submenu.
+    Sleep(SleepChoice),
     Quit,
 }
 
@@ -43,7 +46,10 @@ impl TrayCommand {
             TrayCommand::PlayPause => Some(OsCommand::Toggle),
             TrayCommand::Next => Some(OsCommand::Next),
             TrayCommand::Previous => Some(OsCommand::Previous),
-            TrayCommand::ToggleWindow | TrayCommand::ShowWindow | TrayCommand::Quit => None,
+            TrayCommand::ToggleWindow
+            | TrayCommand::ShowWindow
+            | TrayCommand::Sleep(_)
+            | TrayCommand::Quit => None,
         }
     }
 }
@@ -52,6 +58,8 @@ impl TrayCommand {
 pub trait TraySink {
     fn set_tooltip(&mut self, text: &str);
     fn set_playing(&mut self, playing: bool);
+    /// Check the "Sleep timer" submenu's entry for `choice` and clear the others.
+    fn set_sleep(&mut self, choice: SleepChoice);
 }
 
 /// Tooltip for the current track. The title alone when there is no artist; `Apollo` when
@@ -90,6 +98,7 @@ pub struct TrayBridge<S: TraySink> {
     sink: S,
     tooltip: Option<String>,
     playing: Option<bool>,
+    sleep: Option<SleepChoice>,
 }
 
 impl<S: TraySink> TrayBridge<S> {
@@ -98,11 +107,26 @@ impl<S: TraySink> TrayBridge<S> {
             sink,
             tooltip: None,
             playing: None,
+            sleep: None,
         }
     }
 
     pub fn sink(&self) -> &S {
         &self.sink
+    }
+
+    /// Show which sleep timer entry is on, when that changed.
+    pub fn apply_sleep(&mut self, choice: SleepChoice) {
+        if self.sleep != Some(choice) {
+            self.force_sleep(choice);
+        }
+    }
+
+    /// Show it regardless: the native menu flips a check mark by itself when it is clicked, so
+    /// after a click the mark has to be put back to what the player says.
+    pub fn force_sleep(&mut self, choice: SleepChoice) {
+        self.sink.set_sleep(choice);
+        self.sleep = Some(choice);
     }
 
     pub fn apply(&mut self, state: &MediaState) {
@@ -235,6 +259,7 @@ mod tests {
     struct Recorder {
         tooltips: Vec<String>,
         playing: Vec<bool>,
+        sleep: Vec<SleepChoice>,
     }
 
     impl TraySink for Recorder {
@@ -243,6 +268,9 @@ mod tests {
         }
         fn set_playing(&mut self, playing: bool) {
             self.playing.push(playing);
+        }
+        fn set_sleep(&mut self, choice: SleepChoice) {
+            self.sleep.push(choice);
         }
     }
 
@@ -296,6 +324,22 @@ mod tests {
     }
 
     #[test]
+    fn the_sleep_entry_is_only_restated_when_it_changed_or_forced() {
+        let mut bridge = TrayBridge::new(Recorder::default());
+        bridge.apply_sleep(SleepChoice::Off);
+        bridge.apply_sleep(SleepChoice::Off);
+        bridge.apply_sleep(SleepChoice::Minutes(30));
+        bridge.apply_sleep(SleepChoice::Minutes(30));
+        assert_eq!(
+            bridge.sink().sleep,
+            [SleepChoice::Off, SleepChoice::Minutes(30)]
+        );
+        // The native menu flipped the mark of the entry that was clicked: put it back.
+        bridge.force_sleep(SleepChoice::Minutes(30));
+        assert_eq!(bridge.sink().sleep.len(), 3);
+    }
+
+    #[test]
     fn nothing_loaded_never_shows_pause() {
         let mut bridge = TrayBridge::new(Recorder::default());
         bridge.apply(&state(None, true));
@@ -333,6 +377,10 @@ mod tests {
         );
         assert_eq!(TrayCommand::Quit.player_command(), None);
         assert_eq!(TrayCommand::ToggleWindow.player_command(), None);
+        assert_eq!(
+            TrayCommand::Sleep(SleepChoice::EndOfTrack).player_command(),
+            None
+        );
     }
 
     #[test]
