@@ -28,7 +28,7 @@ Segoe UI Variable (Display optical size at >=20px, Text below); fallback Segoe U
 
 ## Layout
 Title bar: custom, Mica, 32px drag region, native-style caption buttons.
-Nav rail (left): 64px icons-only collapsed / 220px expanded; Home, Search, Library; tooltips when collapsed.
+Nav rail (left): 64px icons-only collapsed / 220px expanded; Home, Explore, Search, Library; tooltips when collapsed.
 Main content: scrollable; page title 28px, sections 20px.
 Player bar (bottom): 80px on bg.raised. Left: 56px art + title/artist. Center: shuffle, previous, play/pause (40px accent circle), next, repeat; progress bar below with times in text.tertiary. Right: volume, queue toggle.
 Queue: right panel 320px, toggled from player bar, slides in 200 ms.
@@ -150,6 +150,16 @@ Applied to the popover under the Search field (`ui/search_popover.rs`) and `sear
 5. **Pasted links:** a music.youtube.com, youtube.com or youtu.be link acts on Enter with no confirmation: a track plays now, a playlist, album or artist opens its page. A link is never searched for (nothing is typed into history). A link that is not one of those says "Can't open that link" with a Clear action.
 6. **Hide music videos:** removes the video versions from the Songs group (albums, artists and playlists are untouched). It applies to the answer already on screen, with no new request.
 7. **Settings > Search** (after Playback): "Save recent searches" (on) and "Hide music videos" (off). Turning the first off forgets the list. Signing out forgets it too.
+
+## Explore decisions (coordinator brief, 2026-10-04)
+Applied to the Explore route (`ui/explore_page.rs`, `explore.rs`, provider `explore.rs`).
+1. **Nav:** "Explore" sits right after Home with the Fluent compass icon (filled when selected). Choosing it while on it closes an open mood page.
+2. **Page:** the "Explore" page title, then sections in this order, each hidden when the service sends nothing for it: "New releases", "Top songs", the other shelves (such as "Trending"), "Moods & genres". No subtitles, no country picker; the country is the account's own.
+3. **New releases and other shelves:** one horizontal row of the shared cards, 16px apart, with Home's hover chevrons; albums and singles open their page, and Back returns to Explore. One Tab stop per row; Left and Right walk it.
+4. **Top songs:** a numbered list of the compact song rows Home uses, 560px wide, rank in text.tertiary (tabular numerals) in a 32px column, twenty rows. "Show all" is a text button under the list: it opens the chart's own playlist page when the service names one, else it opens the rest of the list in place. One Tab stop; Up and Down walk it. Clicking a row plays it with the whole chart as the queue.
+5. **Moods & genres:** one wrapping grid of 32px-high pills on bg.raised (full radius, 16px side padding, body label in text.primary, 12px apart, the hover tint fading over 120 ms). One Tab stop; Left and Right walk it. A pill opens a page titled with the mood: Back button, the mood in the page-title style, then the playlists as the shared cards in a wrapping grid. Esc and Alt+Left go back to the pills, scrolled to where they were. Opening a playlist from there and pressing Back returns to the mood page.
+6. **States:** the shared skeleton while loading, "Couldn't load Explore" or "Couldn't load playlists" with Retry, "Nothing to show" with Retry (or Back on a mood page); signed out offers the primary Sign in button. The page loads when first opened (not at startup), is kept for the session and refreshes in the background after 10 minutes. A different account drops it.
+7. **What the service sends varies:** Explore is built from four answers (explore, charts, new albums and singles, moods) and shows whatever came back. Podcasts and music-video shelves are left out (Apollo plays audio). No new Settings row.
 
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

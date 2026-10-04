@@ -36,6 +36,9 @@ impl BoolSetting {
     }
 }
 
+/// Playback > Add plays to history: Apollo tells YouTube Music what was played, as its web client
+/// does, so plays show in History and keep shaping Home and mixes. Off sends nothing at all.
+pub const ADD_PLAYS_TO_HISTORY: BoolSetting = BoolSetting::new("add_plays_to_history", true);
 /// Window > Close to tray: the close button hides the window and playback continues.
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.

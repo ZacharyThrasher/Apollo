@@ -5,10 +5,14 @@ use apollo_domain::library::{Collection, CollectionKind, PlaylistTarget, WriteFa
 use apollo_domain::links::ExternalLink;
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::BrowseId;
-use innertube::{Clients, InnerTube, Rating, Session, YouTubeClient, METADATA_CLIENT};
+use innertube::{
+    Clients, InnerTube, PlaybackTracking, Rating, Session, WatchtimePing, YouTubeClient,
+    METADATA_CLIENT,
+};
 use tokio::sync::Notify;
 
 use crate::artist::{page_from_artist, ArtistPage};
+use crate::explore::{explore_page, mood_playlists, worst, ExplorePage};
 use crate::home::{home_page, HomePage};
 use crate::map::{
     account_validation, classify, classify_write, collections_from_grid, history_days,
@@ -191,6 +195,53 @@ impl InnerTubeSource {
             .await
             .map_err(|e| classify(&e))?;
         home_page(&parsed)
+    }
+
+    /// Explore: new releases, the song chart, chart shelves and the mood tiles. The four answers
+    /// it is made of are asked for together and any of them may fail or be refused (some are
+    /// not offered to every account or country); the page shows what came back. It fails only
+    /// when nothing could be shown, naming the worst failure, and a rejected session fails it
+    /// at once.
+    pub async fn explore(&self) -> Result<ExplorePage, LoadFailure> {
+        let (explore, charts, releases, moods) = tokio::join!(
+            self.tube.explore(&self.client),
+            self.tube.charts(&self.client),
+            self.tube.new_releases(&self.client),
+            self.tube.moods(&self.client),
+        );
+        let failures: Vec<LoadFailure> = [
+            explore.as_ref().err(),
+            charts.as_ref().err(),
+            releases.as_ref().err(),
+            moods.as_ref().err(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(classify)
+        .collect();
+        if failures.contains(&LoadFailure::Session) {
+            return Err(LoadFailure::Session);
+        }
+        let page = explore_page(
+            explore.as_ref().ok(),
+            charts.as_ref().ok(),
+            releases.as_deref().ok(),
+            moods.as_deref().ok(),
+        );
+        match worst(failures) {
+            Some(failure) if page.is_empty() => Err(failure),
+            _ => Ok(page),
+        }
+    }
+
+    /// The playlists of one mood or genre tile (`params` from the Explore page's tiles).
+    pub async fn mood_playlists(&self, params: &str) -> Result<Vec<Collection>, LoadFailure> {
+        let cards = self
+            .tube
+            .mood_playlists(&self.client, params)
+            .await
+            .map_err(|e| classify(&e))?;
+        Ok(mood_playlists(&cards))
     }
 
     pub async fn continuation(&self, token: &str) -> Result<Page<ListedTrack>, LoadFailure> {
@@ -401,7 +452,7 @@ impl InnerTubeSource {
 
     /// How loud YouTube measured a track (`loudnessDb`, dB against its reference level), from one
     /// metadata-only `player` request. `Ok(None)` is an answer: the service had no measurement for
-    /// the track. Nothing else in the response is read, and it carries no plays or history.
+    /// the track. Nothing else in the response is read.
     pub async fn loudness_db(&self, video_id: &str) -> Result<Option<f32>, LoadFailure> {
         let loudness = self
             .tube
@@ -409,6 +460,47 @@ impl InnerTubeSource {
             .await
             .map_err(|e| classify(&e))?;
         Ok(loudness.loudness_db)
+    }
+
+    /// Where a play of `video_id` is reported, from one metadata-only `player` request (the same
+    /// one [`loudness_db`](Self::loudness_db) makes). `Ok(None)` is an answer: the response had
+    /// no tracking URLs. Reporting itself is [`report_start`](Self::report_start) and
+    /// [`report_watchtime`](Self::report_watchtime).
+    pub async fn playback_tracking(
+        &self,
+        video_id: &str,
+    ) -> Result<Option<PlaybackTracking>, LoadFailure> {
+        self.tube
+            .player_tracking(&self.client, video_id)
+            .await
+            .map_err(|e| classify(&e))
+    }
+
+    /// Tell YouTube Music the playback `nonce` has started. One attempt; the caller decides what
+    /// a failure means (the app only logs it).
+    pub async fn report_start(
+        &self,
+        tracking: &PlaybackTracking,
+        nonce: &str,
+        position_ms: u64,
+    ) -> Result<(), LoadFailure> {
+        self.tube
+            .report_playback_start(&self.client, tracking, nonce, position_ms)
+            .await
+            .map_err(|e| classify(&e))
+    }
+
+    /// One watch-time ping for the playback `nonce`. One attempt.
+    pub async fn report_watchtime(
+        &self,
+        tracking: &PlaybackTracking,
+        nonce: &str,
+        ping: &WatchtimePing,
+    ) -> Result<(), LoadFailure> {
+        self.tube
+            .report_watchtime(&self.client, tracking, nonce, ping)
+            .await
+            .map_err(|e| classify(&e))
     }
 
     /// Best-effort `visitorData`, which the service expects alongside the cookie. A failure
