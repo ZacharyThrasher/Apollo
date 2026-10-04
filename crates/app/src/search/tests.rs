@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use apollo_domain::model::{BrowseId, Track};
-use apollo_provider::{Hit, ListedTrack};
+use apollo_provider::{Hit, ListedTrack, SearchFilter, SearchPage};
 use gpui::{AppContext, Entity, TestAppContext};
 
 use super::*;
@@ -356,4 +356,165 @@ fn a_failing_suggestion_request_just_leaves_the_popover_empty(cx: &mut TestAppCo
         SearchState::Failed(LoadFailure::Network),
         "suggestions never put the page in an error state"
     );
+}
+
+// ---- chips and paging -------------------------------------------------------------------------
+
+/// Filtered lists: "a" answers a page of two songs (the second a video) with a token, the token
+/// answers two more, and a token whose page repeats the first is "stuck".
+#[derive(Default)]
+struct Paged {
+    filtered: Mutex<Vec<(String, SearchFilter)>>,
+    more: Mutex<Vec<String>>,
+}
+
+fn paged_song(i: usize) -> ListedTrack {
+    ListedTrack {
+        track: Track::new(format!("song{i:07}"), format!("Song {i}")),
+        occurrence: None,
+        thumbnail: None,
+        explicit: false,
+        liked: None,
+    }
+}
+
+impl SearchSource for Paged {
+    fn search(&self, _: &str) -> Result<SearchResults, LoadFailure> {
+        Ok(SearchResults::default())
+    }
+
+    fn search_filtered(&self, query: &str, filter: SearchFilter) -> Result<SearchPage, LoadFailure> {
+        self.filtered.lock().unwrap().push((query.to_owned(), filter));
+        let mut results = SearchResults {
+            songs: vec![paged_song(0), paged_song(1)],
+            ..SearchResults::default()
+        };
+        results.video_ids.insert("song0000001".into());
+        Ok(SearchPage {
+            results,
+            continuation: Some(if query == "stuck" { "again" } else { "next" }.into()),
+        })
+    }
+
+    fn search_more(&self, token: &str) -> Result<SearchPage, LoadFailure> {
+        self.more.lock().unwrap().push(token.to_owned());
+        let songs = if token == "again" {
+            // The same rows as the first page, with a token that leads nowhere new.
+            vec![paged_song(0), paged_song(1)]
+        } else {
+            vec![paged_song(2), paged_song(3)]
+        };
+        Ok(SearchPage {
+            results: SearchResults {
+                songs,
+                ..SearchResults::default()
+            },
+            continuation: Some(token.to_owned()),
+        })
+    }
+}
+
+fn paged_model(cx: &mut TestAppContext) -> (Entity<SearchModel>, Arc<Paged>) {
+    let source = Arc::new(Paged::default());
+    let model = cx.new(|_| SearchModel::new());
+    model.update(cx, |m, cx| m.install(source.clone(), cx));
+    (model, source)
+}
+
+#[gpui::test]
+fn a_query_typed_on_a_chip_asks_only_for_that_chips_list(cx: &mut TestAppContext) {
+    let (model, source) = paged_model(cx);
+    model.update(cx, |m, cx| m.set_chip(SearchChip::Songs, cx));
+    model.update(cx, |m, cx| m.set_query("daft", cx));
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    assert_eq!(
+        *source.filtered.lock().unwrap(),
+        [("daft".to_owned(), SearchFilter::Songs)]
+    );
+    assert_eq!(state(&model, cx), SearchState::Ready);
+    assert_eq!(song_titles(&model, cx), ["Song 0", "Song 1"]);
+}
+
+#[gpui::test]
+fn the_hide_music_videos_choice_applies_to_a_filtered_songs_list_and_its_next_pages(
+    cx: &mut TestAppContext,
+) {
+    let (model, _source) = paged_model(cx);
+    model.update(cx, |m, cx| m.set_options(true, true, cx));
+    model.update(cx, |m, cx| m.set_chip(SearchChip::Songs, cx));
+    model.update(cx, |m, cx| m.set_query("daft", cx));
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    assert_eq!(song_titles(&model, cx), ["Song 0"]);
+    model.update(cx, |m, cx| m.load_more(cx));
+    cx.run_until_parked();
+    assert_eq!(song_titles(&model, cx), ["Song 0", "Song 2", "Song 3"]);
+    model.update(cx, |m, cx| m.set_options(true, false, cx));
+    assert_eq!(
+        song_titles(&model, cx),
+        ["Song 0", "Song 1", "Song 2", "Song 3"],
+        "turning it off shows them again with no new request"
+    );
+}
+
+#[gpui::test]
+fn a_page_with_nothing_new_ends_the_list(cx: &mut TestAppContext) {
+    let (model, source) = paged_model(cx);
+    model.update(cx, |m, cx| m.set_chip(SearchChip::Songs, cx));
+    model.update(cx, |m, cx| m.set_query("stuck", cx));
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    assert!(model.read_with(cx, |m, _| m.has_more()));
+    model.update(cx, |m, cx| m.load_more(cx));
+    cx.run_until_parked();
+    assert!(
+        !model.read_with(cx, |m, _| m.has_more()),
+        "a page of repeats is the end, whatever token it carries"
+    );
+    model.update(cx, |m, cx| m.load_more(cx));
+    cx.run_until_parked();
+    assert_eq!(source.more.lock().unwrap().len(), 1);
+}
+
+#[gpui::test]
+fn a_page_for_a_query_that_was_replaced_is_dropped(cx: &mut TestAppContext) {
+    let (model, _source) = paged_model(cx);
+    model.update(cx, |m, cx| m.set_chip(SearchChip::Songs, cx));
+    model.update(cx, |m, cx| m.set_query("daft", cx));
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    model.update(cx, |m, cx| m.load_more(cx));
+    // The query changes before the page lands.
+    model.update(cx, |m, cx| m.set_query("punk", cx));
+    cx.run_until_parked();
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    assert_eq!(
+        song_titles(&model, cx),
+        ["Song 0", "Song 1"],
+        "only punk's first page is shown"
+    );
+}
+
+#[gpui::test]
+fn a_chip_that_was_left_loading_is_asked_again_when_it_comes_back(cx: &mut TestAppContext) {
+    let (model, source) = paged_model(cx);
+    model.update(cx, |m, cx| m.set_query("daft", cx));
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    model.update(cx, |m, cx| m.set_chip(SearchChip::Songs, cx));
+    // Away before the answer, onto a new query, then back.
+    model.update(cx, |m, cx| m.set_chip(SearchChip::Albums, cx));
+    model.update(cx, |m, cx| m.set_query("punk", cx));
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    model.update(cx, |m, cx| m.set_chip(SearchChip::Songs, cx));
+    cx.run_until_parked();
+    assert_eq!(state(&model, cx), SearchState::Ready);
+    assert!(source
+        .filtered
+        .lock()
+        .unwrap()
+        .contains(&("punk".to_owned(), SearchFilter::Songs)));
 }

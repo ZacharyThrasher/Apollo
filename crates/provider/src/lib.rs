@@ -16,5 +16,8 @@ pub use map::{
     history_days, liked_from_rating, HistoryDay, page_from_album, page_from_continuation, page_from_playlist,
     target_from_option, track_from_song, ListedTrack,
 };
-pub use search::{search_results, track_from_item, Hit, SearchResults};
+pub use search::{
+    search_page, search_results, track_from_item, Hit, SearchFilter, SearchPage, SearchResults,
+    TopResult,
+};
 pub use source::{InnerTubeSource, LinkTarget};

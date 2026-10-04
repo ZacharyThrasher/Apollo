@@ -143,5 +143,13 @@ Applied to the popover under the Search field (`ui/search_popover.rs`) and `sear
 6. **Hide music videos:** removes the video versions from the Songs group (albums, artists and playlists are untouched). It applies to the answer already on screen, with no new request.
 7. **Settings > Search** (after Playback): "Save recent searches" (on) and "Hide music videos" (off). Turning the first off forgets the list. Signing out forgets it too.
 
+## Search finishing decisions (coordinator brief, 2026-10-04)
+Applied to the Search page (`ui/search_page.rs`, `ui/search_chips.rs`, `ui/top_result.rs`) and `search.rs`.
+1. **Chips:** one row of pills under the field: All, Songs, Albums, Artists, Playlists, Community playlists. Pills are bg.raised, 32px high, body in text.secondary; the active one is filled bg.overlay with text.primary and a 1px accent outline (every pill reserves the outline, so nothing shifts). The row is one tab stop (the active chip); Left and Right walk it and Enter picks (Space stays play/pause). The row shows once there is a query and is gone for a pasted link. The chip survives a new query.
+2. **All:** the first row holds the Top result on the left (a 340px bg.raised 8px card) and the top 4 songs on the right under a "Songs" heading; below come Albums, Artists and Playlists as the card grids they were. Each group's heading has a "Show all" text button on its right that switches to that chip. A Top result that is an album, artist or playlist is not listed again in its group. With no Top result the songs fill the row.
+3. **Top result card:** art 96px (a circle for an artist), the name at 22px semibold, then "Song / Video / Album / Artist / Playlist \u2022 byline" in text.secondary, then a Play button (accent fill, accent.fg label, 32px pill). The art and text are one control (a song plays, anything else opens its page); Play plays a song, plays an album or playlist through, and plays the listed songs for an artist. Right-click opens the same menu as the cards.
+4. **Filtered lists:** Songs is the song rows, the other chips the card grid, with no heading. They page by scrolling: the next page is asked for within 600px of the end (or when the list does not fill the window), under it the shared skeleton pulse (3 rows, or one row of cards); a failed page is "Couldn't load more" with Retry. A page that adds nothing new ends the list.
+5. **No Settings rows** were added.
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

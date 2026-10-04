@@ -492,9 +492,10 @@ fn ctrl_k_from_an_opened_page_goes_to_search_and_closes_it(cx: &mut TestAppConte
 fn tab_reaches_the_cards_in_reading_order_and_enter_opens_the_focused_one(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     search(&page, vcx);
-    // From the field: its clear button is not a stop while empty, then the results list, then
-    // the cards: albums, artists, playlists.
-    vcx.simulate_keystrokes("tab tab tab tab enter");
+    // From the field: its clear button, the chip row (one stop), the results list, then the
+    // groups in reading order: each group's "Show all", then its cards (albums, artists,
+    // playlists).
+    vcx.simulate_keystrokes("tab tab tab tab tab tab tab enter");
     vcx.run_until_parked();
     page.model.read_with(vcx, |m, _| {
         let artist = m.artist().expect("the second card is the artist");
