@@ -326,17 +326,19 @@ impl RenderOnce for PlayerBar {
                 ),
             )
             .child(
-                button(
-                    "mini-player",
-                    &self.focus.mini,
-                    Icon::PictureInPicture,
-                    "Mini player",
-                    ready,
-                )
-                .on_click({
-                    let f = self.on_mini_player.clone();
-                    move |w, cx| f(w, cx)
-                }),
+                div().debug_selector(|| "bar-mini".into()).child(
+                    button(
+                        "mini-player",
+                        &self.focus.mini,
+                        Icon::PictureInPicture,
+                        "Mini player",
+                        ready,
+                    )
+                    .on_click({
+                        let f = self.on_mini_player.clone();
+                        move |w, cx| f(w, cx)
+                    }),
+                ),
             )
             .child(
                 button(
