@@ -12,7 +12,7 @@ use std::time::Duration;
 use apollo_domain::library::{Collection, PlaylistTarget, WriteFailure};
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::BrowseId;
-use apollo_provider::{HomePage, InnerTubeSource, ListedTrack};
+use apollo_provider::{HomePage, HomeShelf, InnerTubeSource, ListedTrack};
 use apollo_services_common::{unix_now, SecretString, SessionProvider};
 use innertube::{Locale, Session};
 
@@ -210,6 +210,14 @@ impl LibrarySource for InnerTubeLibrary {
         let source = self.source()?;
         self.rt
             .block_on(async { source.home_continuation(token).await })
+    }
+
+    fn related(&self, video_id: &str) -> Result<Vec<HomeShelf>, LoadFailure> {
+        let source = self.source()?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            Ok(source.related(video_id).await?.shelves)
+        })
     }
 
     fn radio(&self, video_id: &str) -> Result<Vec<TrackRow>, LoadFailure> {

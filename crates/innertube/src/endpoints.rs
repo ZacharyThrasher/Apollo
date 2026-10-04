@@ -157,6 +157,32 @@ impl InnerTube {
         Ok(next)
     }
 
+    /// The Related tab of a video: a `next` for the related browse id, then that page read like
+    /// the home feed (a shelf of songs, then album, artist and playlist shelves). A video whose
+    /// response names no related tab gives an empty page. Read-only; uses the same client as
+    /// `next`.
+    pub async fn related(
+        &self,
+        client: &YouTubeClient,
+        video_id: &str,
+    ) -> Result<HomePage, Error> {
+        let next = self.next(client, Some(video_id), None).await?;
+        let Some(browse_id) = next.related_browse_id else {
+            return Ok(HomePage {
+                chips: Vec::new(),
+                sections: Vec::new(),
+                continuation: None,
+                skipped_shelves: 0,
+            });
+        };
+        let value = self.browse(client, Some(&browse_id), None).await?;
+        let mut page = browse::parse_home(&value);
+        page.sections.retain(|s| !s.items.is_empty());
+        // The related page has no further batches.
+        page.continuation = None;
+        Ok(page)
+    }
+
     /// How loud YouTube measured a video, from the `player` endpoint (`playerConfig.audioConfig`).
     ///
     /// Metadata only. The response also carries stream URLs and playback-tracking pings; both are

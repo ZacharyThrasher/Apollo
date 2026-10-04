@@ -154,6 +154,17 @@ impl InnerTubeSource {
         home_page(&parsed)
     }
 
+    /// The Related tab of a track: related songs, then album, artist and playlist shelves.
+    /// Read-only. A track YouTube gives no related tab for comes back with no shelves.
+    pub async fn related(&self, video_id: &str) -> Result<HomePage, LoadFailure> {
+        let parsed = self
+            .tube
+            .related(&self.client, video_id)
+            .await
+            .map_err(|e| classify(&e))?;
+        home_page(&parsed)
+    }
+
     pub async fn continuation(&self, token: &str) -> Result<Page<ListedTrack>, LoadFailure> {
         let page = self
             .tube

@@ -18,8 +18,10 @@ use crate::ui::anchor;
 use crate::ui::art_tile::art_tile_fluid;
 use crate::ui::button::{Handler, IconButton};
 use crate::ui::lyrics_pane::LyricsPane;
+use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus, PaneTabs};
 use crate::ui::player_bar::text_line;
 use crate::ui::playlist_picker::PlaylistPicker;
+use crate::ui::related_pane::RelatedPane;
 use crate::ui::row_actions::{heart_icon, heart_label};
 use crate::ui::slider::SliderState;
 use crate::ui::transport::{self, on_off, TransportFocus};
@@ -62,6 +64,11 @@ pub struct NowPlaying {
     picker: Entity<PlaylistPicker>,
     /// Takes the right side of the page when it is open.
     lyrics: Entity<LyricsPane>,
+    /// ... or this one, the related songs.
+    related: Entity<RelatedPane>,
+    /// The Up next · Lyrics · Related control above either.
+    tabs: PaneFocus,
+    on_pick: OnPick,
     focus_close: FocusHandle,
     focus_like: FocusHandle,
     focus_playlist: FocusHandle,
@@ -76,6 +83,9 @@ impl NowPlaying {
         writes: Entity<LibraryWrites>,
         picker: Entity<PlaylistPicker>,
         lyrics: Entity<LyricsPane>,
+        related: Entity<RelatedPane>,
+        tabs: PaneFocus,
+        on_pick: OnPick,
         on_close: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -87,6 +97,7 @@ impl NowPlaying {
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         cx.observe(&progress, |_, _, cx| cx.notify()).detach();
         cx.observe(&lyrics, |_, _, cx| cx.notify()).detach();
+        cx.observe(&related, |_, _, cx| cx.notify()).detach();
         Self {
             focus_close: stop(cx, TAB_CLOSE),
             // Same slot as the transport: they sit above it, so they come first.
@@ -104,6 +115,9 @@ impl NowPlaying {
             writes,
             picker,
             lyrics,
+            related,
+            tabs,
+            on_pick,
             progress,
             on_close: Rc::new(Box::new(on_close)),
         }
@@ -283,25 +297,45 @@ impl Render for NowPlaying {
                             .child(controls),
                     ),
             );
-        // With lyrics open the page is two halves: the column on the left, the lyrics where the
-        // queue would be on the right.
-        let page = if self.lyrics.read(cx).is_open() {
-            div()
-                .size_full()
-                .flex()
-                .flex_row()
-                .child(div().flex_1().min_w_0().h_full().child(column))
-                .child(
-                    div()
-                        .debug_selector(|| "np-lyrics".into())
-                        .flex_1()
-                        .min_w(px(lyrics::MIN_PANE_WIDTH))
-                        .h_full()
-                        .child(self.lyrics.clone()),
-                )
-                .into_any_element()
+        // With lyrics or related songs open the page is two halves: the column on the left, the
+        // pane control over that pane where the queue would be on the right.
+        let right = if self.related.read(cx).is_open() {
+            Some((Pane::Related, self.related.clone().into_any_element()))
+        } else if self.lyrics.read(cx).is_open() {
+            Some((Pane::Lyrics, self.lyrics.clone().into_any_element()))
         } else {
-            column.into_any_element()
+            None
+        };
+        let page = match right {
+            Some((pane, content)) => {
+                let strip = PaneTabs::new(pane, &self.tabs, v.accent, self.on_pick.clone());
+                // Related is a dense list: it sits on the panel surface like the queue, with no
+                // ambient art behind it.
+                let solid = pane == Pane::Related;
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_row()
+                    .child(div().flex_1().min_w_0().h_full().child(column))
+                    .child(
+                        div()
+                            .debug_selector(|| "np-lyrics".into())
+                            .flex_1()
+                            .min_w(px(lyrics::MIN_PANE_WIDTH))
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .when(solid, |d| {
+                                d.bg(color::bg_raised())
+                                    .border_l_1()
+                                    .border_color(color::border_subtle())
+                            })
+                            .child(strip)
+                            .child(div().flex_1().min_h_0().child(content)),
+                    )
+                    .into_any_element()
+            }
+            None => column.into_any_element(),
         };
 
         div()

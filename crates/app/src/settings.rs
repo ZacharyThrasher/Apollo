@@ -22,6 +22,7 @@ const KEY_AUTOPLAY: &str = "autoplay";
 const KEY_NORMALIZE: &str = "normalize_volume";
 const KEY_GAPLESS: &str = "gapless_playback";
 const KEY_LYRICS_OPEN: &str = "lyrics_open";
+const KEY_RELATED_OPEN: &str = "related_open";
 
 /// A yes/no setting: the store key and what it is until the owner changes it.
 #[derive(Clone, Copy, Debug)]
@@ -149,6 +150,13 @@ pub trait LyricsOpenStore: Send + Sync {
     fn save(&self, on: bool);
 }
 
+/// Whether Now Playing shows the Related tab where the queue would be. Blocking: call off the UI
+/// thread.
+pub trait RelatedOpenStore: Send + Sync {
+    fn load(&self) -> Option<bool>;
+    fn save(&self, on: bool);
+}
+
 /// Whether gapless playback is on. Blocking: call off the UI thread.
 pub trait GaplessStore: Send + Sync {
     fn load(&self) -> Option<bool>;
@@ -253,6 +261,24 @@ impl NormalizeStore for SqliteSettings {
         if let Some(store) = self.open() {
             if let Err(err) = store.set_setting(KEY_NORMALIZE, if on { "on" } else { "off" }) {
                 eprintln!("could not save volume normalization: {err}");
+            }
+        }
+    }
+}
+
+impl RelatedOpenStore for SqliteSettings {
+    fn load(&self) -> Option<bool> {
+        match self.open()?.get_setting(KEY_RELATED_OPEN).ok()??.trim() {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => None,
+        }
+    }
+
+    fn save(&self, on: bool) {
+        if let Some(store) = self.open() {
+            if let Err(err) = store.set_setting(KEY_RELATED_OPEN, if on { "on" } else { "off" }) {
+                eprintln!("could not save the related choice: {err}");
             }
         }
     }
@@ -408,6 +434,23 @@ mod tests {
             .set_setting(KEY_LYRICS_OPEN, "maybe")
             .unwrap();
         assert_eq!(LyricsOpenStore::load(&store), None);
+    }
+
+    #[test]
+    fn the_related_choice_round_trips_and_garbage_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apollo.db");
+        let store = SqliteSettings::at(path.clone());
+        assert_eq!(RelatedOpenStore::load(&store), None);
+        RelatedOpenStore::save(&store, true);
+        assert_eq!(RelatedOpenStore::load(&store), Some(true));
+        RelatedOpenStore::save(&store, false);
+        assert_eq!(RelatedOpenStore::load(&store), Some(false));
+        Store::open(&path)
+            .unwrap()
+            .set_setting(KEY_RELATED_OPEN, "maybe")
+            .unwrap();
+        assert_eq!(RelatedOpenStore::load(&store), None);
     }
 
     #[test]

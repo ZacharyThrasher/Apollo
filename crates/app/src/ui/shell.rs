@@ -16,9 +16,10 @@ use crate::library::{LibraryWrites, Notice, Target};
 use crate::lyrics::LyricsModel;
 use crate::motion::PanelSlide;
 use crate::player::PlayerModel;
+use crate::related::RelatedModel;
 use crate::search::{SearchModel, SearchSource};
 use crate::settings::SettingsModel;
-use crate::settings::LyricsOpenStore;
+use crate::settings::{LyricsOpenStore, RelatedOpenStore};
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
 use crate::ui::home_page::{self, HomeView};
@@ -26,10 +27,12 @@ use crate::ui::library::{self, LibraryView};
 use crate::ui::lyrics_pane::LyricsPane;
 use crate::ui::nav::{NavRail, Route};
 use crate::ui::now_playing::NowPlaying;
+use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus};
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::playlist_picker::{self, PlaylistPicker};
 use crate::ui::queue_panel::QueuePanel;
+use crate::ui::related_pane::RelatedPane;
 use crate::ui::search_page::{self, SearchPage};
 use crate::ui::settings_page::{self, SettingsPage};
 use crate::ui::slider::{SliderState, StepBack, StepForward};
@@ -123,6 +126,9 @@ pub struct Shell {
     /// Lyrics of the playing track, and the pane that shows them in Now Playing.
     lyrics: Entity<LyricsModel>,
     lyrics_pane: Entity<LyricsPane>,
+    /// Related songs of the playing track, and the pane that shows them in Now Playing.
+    related: Entity<RelatedModel>,
+    related_pane: Entity<RelatedPane>,
     now_playing_open: bool,
     now_playing: Entity<NowPlaying>,
     root_focus: FocusHandle,
@@ -226,12 +232,41 @@ impl Shell {
         let lyrics = cx.new(|cx| LyricsModel::new(player.clone(), cx));
         let lyrics_pane = cx.new(|cx| LyricsPane::new(player.clone(), lyrics.clone(), cx));
         cx.observe(&lyrics_pane, |_, _, cx| cx.notify()).detach();
+        let thumbs = cx.new(|_| ThumbStore::new());
+        let related = cx.new(|cx| RelatedModel::new(player.clone(), cx));
+        let related_pane = cx.new(|cx| {
+            RelatedPane::new(
+                player.clone(),
+                related.clone(),
+                thumbs.clone(),
+                {
+                    let weak = weak.clone();
+                    move |target, window, cx| {
+                        let _ = weak.update(cx, |s, cx| s.open_target(target, window, cx));
+                    }
+                },
+                cx,
+            )
+        });
+        cx.observe(&related_pane, |_, _, cx| cx.notify()).detach();
+        // The Up next · Lyrics · Related control, shared by the three panes.
+        let pane_focus = PaneFocus::new(cx);
+        let on_pick: OnPick = Rc::new({
+            let weak = weak.clone();
+            move |pane, _, cx| {
+                let _ = weak.update(cx, |s, cx| s.show_pane(pane, cx));
+            }
+        });
+        queue_panel.update(cx, |p, _| p.set_tabs(pane_focus.clone(), on_pick.clone()));
         let now_playing = cx.new(|cx| {
             NowPlaying::new(
                 player.clone(),
                 writes.clone(),
                 picker.clone(),
                 lyrics_pane.clone(),
+                related_pane.clone(),
+                pane_focus.clone(),
+                on_pick.clone(),
                 {
                     let (weak, root) = (weak.clone(), root_focus.clone());
                     move |window, cx| {
@@ -278,7 +313,6 @@ impl Shell {
         cx.observe(&progress, |_, _, cx| cx.notify()).detach();
         cx.observe(&volume, |_, _, cx| cx.notify()).detach();
         let search_model = cx.new(|_| SearchModel::new());
-        let thumbs = cx.new(|_| ThumbStore::new());
         let search = cx.new(|cx| {
             SearchPage::new(
                 player.clone(),
@@ -342,6 +376,8 @@ impl Shell {
             queue_panel,
             lyrics,
             lyrics_pane,
+            related,
+            related_pane,
             now_playing_open: false,
             now_playing,
             root_focus,
@@ -561,7 +597,9 @@ impl Shell {
     /// Lyrics are on screen: Now Playing is open and lyrics are chosen. They take the right
     /// side of the page, the queue's place, so the queue is hidden meanwhile.
     pub fn lyrics_showing(&self, cx: &App) -> bool {
-        self.now_playing_open && self.lyrics_pane.read(cx).is_open()
+        self.now_playing_open
+            && self.lyrics_pane.read(cx).is_open()
+            && !self.related_pane.read(cx).is_open()
     }
 
     pub fn lyrics_pane(&self) -> &Entity<LyricsPane> {
@@ -572,13 +610,56 @@ impl Shell {
         &self.lyrics
     }
 
+    /// The Related tab is on screen: Now Playing is open and Related is chosen. It takes the
+    /// right side of the page like lyrics do, so the queue is hidden meanwhile.
+    pub fn related_showing(&self, cx: &App) -> bool {
+        self.now_playing_open && self.related_pane.read(cx).is_open()
+    }
+
+    pub fn related_pane(&self) -> &Entity<RelatedPane> {
+        &self.related_pane
+    }
+
+    pub fn related(&self) -> &Entity<RelatedModel> {
+        &self.related
+    }
+
+    /// What Now Playing's right side shows (the queue when nothing else is chosen).
+    pub fn pane(&self, cx: &App) -> Pane {
+        if self.related_showing(cx) {
+            Pane::Related
+        } else if self.lyrics_showing(cx) {
+            Pane::Lyrics
+        } else {
+            Pane::UpNext
+        }
+    }
+
     /// The Lyrics button: shows lyrics (opening Now Playing if need be), or hides them.
     pub fn toggle_lyrics(&mut self, cx: &mut Context<Self>) {
         if self.lyrics_showing(cx) {
             self.lyrics_pane.update(cx, |p, cx| p.set_open(false, cx));
         } else {
-            self.lyrics_pane.update(cx, |p, cx| p.set_open(true, cx));
-            self.set_now_playing(true, cx);
+            self.show_pane(Pane::Lyrics, cx);
+        }
+        cx.notify();
+    }
+
+    /// The pane control: shows the queue, the lyrics or the related songs on Now Playing's right
+    /// side (opening Now Playing for the last two). The choice is remembered.
+    pub fn show_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        self.lyrics_pane
+            .update(cx, |p, cx| p.set_open(pane == Pane::Lyrics, cx));
+        self.related_pane
+            .update(cx, |p, cx| p.set_open(pane == Pane::Related, cx));
+        match pane {
+            Pane::UpNext => {
+                if !self.queue.is_open() {
+                    self.queue.set(true, Instant::now(), !cx.reduce_motion());
+                    self.queue_panel.update(cx, |p, cx| p.reveal_current(cx));
+                }
+            }
+            Pane::Lyrics | Pane::Related => self.set_now_playing(true, cx),
         }
         cx.notify();
     }
@@ -606,10 +687,36 @@ impl Shell {
         .detach();
     }
 
+    /// Where the Related choice is remembered, and the saved choice applied.
+    pub fn install_related(
+        &mut self,
+        store: Option<Arc<dyn RelatedOpenStore>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.related_pane
+            .update(cx, |p, _| p.set_store(store.clone()));
+        let Some(store) = store else { return };
+        let pane = self.related_pane.downgrade();
+        let lyrics = self.lyrics_pane.downgrade();
+        cx.spawn(async move |_, cx| {
+            let saved = cx
+                .background_executor()
+                .spawn(async move { store.load() })
+                .await;
+            // Lyrics and Related are exclusive: if both were saved on, Related wins.
+            if saved == Some(true) {
+                let _ = lyrics.update(cx, |p, cx| p.restore_open(Some(false), cx));
+            }
+            let _ = pane.update(cx, |p, cx| p.restore_open(saved, cx));
+        })
+        .detach();
+    }
+
     pub fn toggle_queue(&mut self, cx: &mut Context<Self>) {
-        if self.lyrics_showing(cx) {
-            // The queue asked for the side the lyrics are on: lyrics give way.
+        if self.lyrics_showing(cx) || self.related_showing(cx) {
+            // The queue asked for the side the lyrics or related songs are on: they give way.
             self.lyrics_pane.update(cx, |p, cx| p.set_open(false, cx));
+            self.related_pane.update(cx, |p, cx| p.set_open(false, cx));
             if !self.queue.is_open() {
                 self.queue.set(true, Instant::now(), !cx.reduce_motion());
                 self.queue_panel.update(cx, |p, cx| p.reveal_current(cx));
@@ -863,7 +970,16 @@ impl Render for Shell {
             window.request_animation_frame();
         }
         let lyrics_showing = self.lyrics_showing(cx);
-        let queue = (openness > 0.0 && !lyrics_showing).then(|| {
+        let related_showing = self.related_showing(cx);
+        // Lyrics and Related take the queue's side of Now Playing; the pane control sits over the
+        // queue only while Now Playing is open. Related loads only while it is on screen.
+        let other_pane = lyrics_showing || related_showing;
+        self.related
+            .update(cx, |m, cx| m.set_active(related_showing, cx));
+        let tabs_visible = self.now_playing_open;
+        self.queue_panel
+            .update(cx, |p, cx| p.set_tabs_visible(tabs_visible, cx));
+        let queue = (openness > 0.0 && !other_pane).then(|| {
             div()
                 .id("queue-slot")
                 .relative()
@@ -897,7 +1013,7 @@ impl Render for Shell {
             focus: self.bar.clone(),
             progress: self.progress.clone(),
             volume: self.volume.clone(),
-            queue_open: self.queue.is_open() && !lyrics_showing,
+            queue_open: self.queue.is_open() && !other_pane,
             lyrics_open: lyrics_showing,
             on_lyrics_toggle: Rc::new(Box::new({
                 let shell = shell.clone();
