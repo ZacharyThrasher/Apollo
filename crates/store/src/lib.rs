@@ -12,6 +12,7 @@
 //! * The saved queue is bound to an opaque account key; a different account
 //!   (or logout) purges it instead of replaying it.
 
+mod crate_list;
 mod lyrics;
 mod loudness;
 mod migrations;
@@ -23,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
+pub use crate_list::CrateRow;
 pub use lyrics::CachedLyrics;
 pub use loudness::LoudnessRow;
 pub use migrations::{Migration, MIGRATIONS};

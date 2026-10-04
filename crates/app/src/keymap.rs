@@ -25,6 +25,9 @@ actions!(
         SeekForward,
         ToggleLyrics,
         LikeCurrent,
+        CrateCurrent,
+        UndoQueue,
+        RedoQueue,
         ToggleFullscreen
     ]
 );
@@ -51,6 +54,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-right", NextTrack, plain),
         KeyBinding::new("ctrl-l", ToggleLyrics, plain),
         KeyBinding::new("l", LikeCurrent, plain),
+        KeyBinding::new("c", CrateCurrent, plain),
+        KeyBinding::new("ctrl-z", UndoQueue, plain),
+        KeyBinding::new("ctrl-shift-z", RedoQueue, plain),
+        KeyBinding::new("ctrl-y", RedoQueue, plain),
         KeyBinding::new("f11", ToggleFullscreen, plain),
     ]);
     // The shell context is what the plain keys hang off; keep the constant honest.

@@ -19,17 +19,20 @@ pub enum Route {
     Explore,
     Search,
     Library,
+    /// The Crate: songs set aside to remember, under Library.
+    Crate,
     Settings,
 }
 
 impl Route {
     /// The destinations at the top of the rail.
     pub const MAIN: [Route; 4] = [Route::Home, Route::Explore, Route::Search, Route::Library];
-    pub const ALL: [Route; 5] = [
+    pub const ALL: [Route; 6] = [
         Route::Home,
         Route::Explore,
         Route::Search,
         Route::Library,
+        Route::Crate,
         Route::Settings,
     ];
 
@@ -39,6 +42,7 @@ impl Route {
             Route::Explore => "Explore",
             Route::Search => "Search",
             Route::Library => "Library",
+            Route::Crate => "Crate",
             Route::Settings => "Settings",
         }
     }
@@ -53,6 +57,8 @@ impl Route {
             (Route::Search, true) => Icon::SearchFilled,
             (Route::Library, false) => Icon::LibraryRegular,
             (Route::Library, true) => Icon::LibraryFilled,
+            (Route::Crate, false) => Icon::BoxRegular,
+            (Route::Crate, true) => Icon::BoxFilled,
             (Route::Settings, false) => Icon::SettingsRegular,
             (Route::Settings, true) => Icon::SettingsFilled,
         }
@@ -64,6 +70,7 @@ impl Route {
             Route::Explore => "nav-explore",
             Route::Search => "nav-search",
             Route::Library => "nav-library",
+            Route::Crate => "nav-crate",
             Route::Settings => "nav-settings",
         }
     }
@@ -87,7 +94,9 @@ pub struct NavRail {
     route: Route,
     accent: Accent,
     toggle_focus: FocusHandle,
-    item_focus: [FocusHandle; 5],
+    item_focus: [FocusHandle; 6],
+    /// How many songs the Crate holds, shown at the right of its label.
+    crate_count: usize,
     /// Warning dot on Settings, with its accessible name: why the account needs the owner.
     attention: Option<&'static str>,
     on_toggle: Option<Handler>,
@@ -101,7 +110,7 @@ impl NavRail {
         route: Route,
         accent: Accent,
         toggle_focus: &FocusHandle,
-        item_focus: &[FocusHandle; 5],
+        item_focus: &[FocusHandle; 6],
     ) -> Self {
         Self {
             expanded,
@@ -110,10 +119,16 @@ impl NavRail {
             accent,
             toggle_focus: toggle_focus.clone(),
             item_focus: item_focus.clone(),
+            crate_count: 0,
             attention: None,
             on_toggle: None,
             on_route: None,
         }
+    }
+
+    pub fn crate_count(mut self, count: usize) -> Self {
+        self.crate_count = count;
+        self
     }
 
     pub fn attention(mut self, attention: Option<&'static str>) -> Self {
@@ -192,6 +207,7 @@ impl RenderOnce for NavRail {
                 } else {
                     None
                 },
+                count: (route == Route::Crate && self.crate_count > 0).then_some(self.crate_count),
                 focus: focus.clone(),
                 on_click: Box::new(move |w, cx| {
                     if let Some(f) = &on_route {
@@ -229,6 +245,8 @@ struct NavItem {
     accent: Accent,
     /// A warning dot over the icon; the text is its accessible name and part of the item's.
     badge: Option<&'static str>,
+    /// A count at the right of the label (the Crate's songs), in text.tertiary.
+    count: Option<usize>,
     focus: FocusHandle,
     on_click: Handler,
 }
@@ -328,6 +346,16 @@ impl RenderOnce for NavItem {
                         .text_color(icon_color)
                         .child(label.clone()),
                 )
+                .when_some(self.count, |d, count| {
+                    d.child(div().flex_1()).child(
+                        style::tabular(style::text_style(div(), typography::CAPTION, cx))
+                            .id("nav-count")
+                            .debug_selector(|| "nav-crate-count".into())
+                            .pr(px(spacing::S3))
+                            .text_color(color::text_tertiary())
+                            .child(format!("{count}")),
+                    )
+                })
             })
             .when(ring, |d| d.child(focus_ring(accent, radius::SMALL)));
         if self.expanded {

@@ -145,12 +145,13 @@ fn cycle(shell: &Entity<Shell>, vcx: &mut VisualTestContext, key: &str) -> Vec<S
     panic!("Tab never came back to a stop it had already visited: {order:?}");
 }
 
-const NAV: [&str; 6] = [
+const NAV: [&str; 7] = [
     "nav-toggle",
     "nav-home",
     "nav-explore",
     "nav-search",
     "nav-library",
+    "nav-crate",
     "nav-settings",
 ];
 /// The player bar, left to right. The seek slider is a stop only while a track has a length.

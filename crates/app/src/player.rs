@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use apollo_domain::audio::{self, AudioDevice, Equalizer};
 use apollo_domain::model::{QueueEntryId, Track};
 use apollo_domain::playback::{EngineEvent, Event, Failure, Intent, Phase};
-use apollo_domain::queue::{Heading, Queue, QueueEntry, QueueSource, Repeat};
+use apollo_domain::queue::{Heading, Queue, QueueEntry, QueueSnapshot, QueueSource, Repeat};
+use apollo_domain::undo::{put_back, UndoHistory};
 use apollo_runtime::Driver;
 use apollo_theme::Accent;
 use gpui::{Context, RenderImage, SharedString};
@@ -208,6 +209,11 @@ pub struct PlayerModel {
     /// Settings > Playback > Add plays to history. Off until the app says otherwise.
     report_plays: bool,
     report_feed: Feed,
+    /// Queue-changing actions, for Ctrl+Z / Ctrl+Shift+Z.
+    undo: UndoHistory,
+    /// The undo history's generation right after Start radio recorded its step: the radio that
+    /// arrives next joins that step instead of making its own, so one undo takes both back.
+    radio_step: Option<u64>,
     radio_inflight: bool,
     /// The last track a radio was asked for. Not asked again until the queue's tail changes or
     /// [`RADIO_RETRY`] has passed, so a failure is not retried on every tick.
@@ -254,6 +260,8 @@ impl PlayerModel {
             reporter: None,
             report_plays: false,
             report_feed: Feed::default(),
+            undo: UndoHistory::new(),
+            radio_step: None,
             radio_inflight: false,
             radio_tried: None,
         }
@@ -560,6 +568,7 @@ impl PlayerModel {
             saver.flush();
         }
         self.saved_row = false;
+        self.clear_queue_history();
     }
 
     /// Where the "time to first audio" lines go (none in tests).
@@ -739,23 +748,22 @@ impl PlayerModel {
     /// Play `track` now and carry on with the existing queue after it: the track goes in front of
     /// the up-next list and playback moves to it. Nothing already queued is lost.
     pub fn play_now(&mut self, track: Track, cx: &mut Context<Self>) {
+        let before = self.undo_capture();
         if let Some(d) = self.driver.as_mut() {
             d.edit_queue(|q| {
                 q.play_next(vec![track]);
             });
         }
         self.handle_as(Some("play_now"), Event::Next, cx);
+        self.undo_commit(before);
         self.prefetch_upcoming();
     }
 
     /// Add `track` to the end of the up-next list, ahead of the rest of the context.
     pub fn add_to_queue(&mut self, track: Track, cx: &mut Context<Self>) {
-        if let Some(d) = self.driver.as_mut() {
-            d.edit_queue(|q| {
-                q.add_to_queue(vec![track]);
-            });
-        }
-        self.sync(cx);
+        self.edit_queue(cx, |q| {
+            q.add_to_queue(vec![track]);
+        });
     }
 
     /// Put `track` right after the one playing.
@@ -777,20 +785,30 @@ impl PlayerModel {
     /// ([`PlayerModel::finish_radio`]). The queue is left as it is until then, so a radio that
     /// cannot be fetched loses nothing.
     pub fn start_radio(&mut self, seed: Track, cx: &mut Context<Self>) {
-        self.edit_queue(cx, |q| {
+        let before = self.undo_capture();
+        self.edit_queue_untracked(cx, |q| {
             q.play_next(vec![seed]);
         });
         self.handle_as(Some("start_radio"), Event::Next, cx);
+        self.undo_commit(before);
+        self.radio_step = Some(self.undo.generation());
     }
 
     /// The radio's tracks replace everything that was up next, and the queue now plays from
     /// `source` (the radio).
     pub fn finish_radio(&mut self, tracks: Vec<Track>, source: QueueSource, cx: &mut Context<Self>) {
-        self.edit_queue(cx, |q| {
+        let edit = |q: &mut Queue| {
             q.clear_upcoming();
             q.append_radio(tracks);
             q.set_source(Some(source));
-        });
+        };
+        // The radio belongs to the Start radio that asked for it, unless something else was
+        // recorded since: then it is a step of its own.
+        if self.radio_step.take() == Some(self.undo.generation()) {
+            self.edit_queue_untracked(cx, edit);
+        } else {
+            self.edit_queue(cx, edit);
+        }
         self.prefetch_upcoming();
     }
 
@@ -846,6 +864,7 @@ impl PlayerModel {
         if tracks.is_empty() || self.driver.is_none() {
             return;
         }
+        let before = self.undo_capture();
         let seed = self.next_seed();
         let shuffle_on = match (shuffle, self.driver.as_ref()) {
             (Some(on), _) => on,
@@ -866,17 +885,18 @@ impl PlayerModel {
             });
         }
         self.handle(Event::PlayContext { tracks, start }, cx);
-        self.edit_queue(cx, |q| q.set_source(source));
+        self.edit_queue_untracked(cx, |q| q.set_source(source));
+        self.undo_commit(before);
         self.prefetch_upcoming();
     }
 
     pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         let seed = self.next_seed();
-        if let Some(d) = self.driver.as_mut() {
-            let on = !d.coordinator().queue().shuffle();
-            d.edit_queue(|q| q.set_shuffle(on, seed));
-        }
-        self.sync(cx);
+        let on = match self.driver.as_ref() {
+            Some(d) => !d.coordinator().queue().shuffle(),
+            None => return,
+        };
+        self.edit_queue(cx, |q| q.set_shuffle(on, seed));
     }
 
     pub fn cycle_repeat(&mut self, cx: &mut Context<Self>) {
@@ -910,15 +930,85 @@ impl PlayerModel {
         self.edit_queue(cx, |q| q.clear_upcoming());
     }
 
-    fn edit_queue(
-        &mut self,
-        cx: &mut Context<Self>,
-        f: impl FnOnce(&mut apollo_domain::queue::Queue),
-    ) {
+    /// A queue edit the user can take back with Ctrl+Z.
+    fn edit_queue(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Queue)) {
+        let before = self.undo_capture();
+        self.edit_queue_untracked(cx, f);
+        self.undo_commit(before);
+    }
+
+    fn edit_queue_untracked(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Queue)) {
         if let Some(d) = self.driver.as_mut() {
             d.edit_queue(f);
         }
         self.sync(cx);
+    }
+
+    // ---- undo ----------------------------------------------------------------
+
+    /// The queue and position as they are before an action, for [`PlayerModel::undo_commit`].
+    fn undo_capture(&self) -> Option<(QueueSnapshot, u64)> {
+        let c = self.driver.as_ref()?.coordinator();
+        Some((c.queue().snapshot(), c.position_ms()))
+    }
+
+    /// The action is done: it becomes a step if it changed the queue.
+    fn undo_commit(&mut self, before: Option<(QueueSnapshot, u64)>) {
+        let (Some((snapshot, position_ms)), Some(d)) = (before, self.driver.as_ref()) else {
+            return;
+        };
+        self.undo
+            .record(snapshot, position_ms, &d.coordinator().queue().snapshot());
+    }
+
+    pub fn can_undo_queue(&self) -> bool {
+        self.undo.can_undo()
+    }
+
+    pub fn can_redo_queue(&self) -> bool {
+        self.undo.can_redo()
+    }
+
+    /// Forget the undo history (sign-out, a different account).
+    pub fn clear_queue_history(&mut self) {
+        self.undo.clear();
+        self.radio_step = None;
+    }
+
+    /// Ctrl+Z: put the queue back as it was before the last queue-changing action. What is
+    /// playing keeps playing unless that action changed it; then the old track comes back
+    /// paused where it was. False when there was nothing to undo.
+    pub fn undo_queue(&mut self, cx: &mut Context<Self>) -> bool {
+        self.step_queue(true, cx)
+    }
+
+    /// Ctrl+Shift+Z: do again what Ctrl+Z took back.
+    pub fn redo_queue(&mut self, cx: &mut Context<Self>) -> bool {
+        self.step_queue(false, cx)
+    }
+
+    fn step_queue(&mut self, undo: bool, cx: &mut Context<Self>) -> bool {
+        let Some(d) = self.driver.as_mut() else {
+            return false;
+        };
+        let live = d.coordinator().queue().snapshot();
+        let position = d.coordinator().position_ms();
+        let step = if undo {
+            self.undo.undo(live, position)
+        } else {
+            self.undo.redo(live, position)
+        };
+        let Some(step) = step else {
+            return false;
+        };
+        self.radio_step = None;
+        let Some(queue) = put_back(&step, d.coordinator().queue()) else {
+            return false;
+        };
+        d.replace_queue(queue, step.position_ms);
+        self.sync(cx);
+        self.prefetch_upcoming();
+        true
     }
 
     pub fn set_volume(&mut self, percent: u8, cx: &mut Context<Self>) {
@@ -1307,7 +1397,8 @@ impl PlayerModel {
             self.retry_radio_later(cx);
             return;
         }
-        self.edit_queue(cx, |q| {
+        // Autoplay is not something the user did: it is not an undo step.
+        self.edit_queue_untracked(cx, |q| {
             q.append_autoplay(tracks, &seed_title);
         });
         self.prefetch_upcoming();

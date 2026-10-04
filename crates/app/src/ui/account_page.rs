@@ -266,6 +266,10 @@ fn sign_out_handler(
             // The saved queue is the account's own: it goes with the session.
             m.forget_saved_queue();
         });
+        // So is the Crate.
+        if let Some(crate_model) = crate::crate_list::handle(cx) {
+            crate_model.update(cx, |m, cx| m.forget(cx));
+        }
         model.update(cx, |m, cx| m.sign_out(cx));
     }
 }

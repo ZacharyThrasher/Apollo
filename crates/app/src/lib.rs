@@ -4,6 +4,7 @@ pub mod accent_anim;
 pub mod account;
 pub mod app;
 pub mod art;
+pub mod crate_list;
 pub mod assets;
 pub mod audio;
 pub mod autostart;
