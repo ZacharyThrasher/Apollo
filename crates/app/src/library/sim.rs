@@ -68,6 +68,17 @@ pub enum HomeBehaviour {
     FailMore(LoadFailure),
 }
 
+/// How the simulated service answers a Related tab request (tests drive the states with this).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RelatedBehaviour {
+    #[default]
+    Shelves,
+    /// Every request fails.
+    Fail(LoadFailure),
+    /// The service has no related tab for the track.
+    Empty,
+}
+
 /// Songs on the simulated chart: more than Explore shows, so "Show all" has somewhere to go.
 pub const CHART_SONGS: usize = 24;
 /// The chart's own page, where "Show all" leads.
@@ -145,6 +156,10 @@ struct SimState {
     radio: Option<LoadFailure>,
     /// The seeds `radio` was asked about, in order.
     radio_seeds: Vec<String>,
+    /// How `related` answers (tests drive the states with this).
+    related: RelatedBehaviour,
+    /// The videos `related` was asked about, in order.
+    related_log: Vec<String>,
     /// Channel ids the account is subscribed to.
     subscribed: Vec<String>,
     /// Mix playlist ids `mix` was asked for, in order.
@@ -169,6 +184,8 @@ impl SimState {
             tabs: None,
             radio: None,
             radio_seeds: Vec::new(),
+            related: RelatedBehaviour::default(),
+            related_log: Vec::new(),
             subscribed: Vec::new(),
             mixes: Vec::new(),
             artist_fails: None,
@@ -221,6 +238,16 @@ impl SimLibrary {
     /// The home requests received, `""` for a first batch and the token for a following one.
     pub fn home_log(&self) -> Vec<String> {
         self.state().home_log.clone()
+    }
+
+    /// How the Related tab is answered from now on (tests).
+    pub fn set_related_behaviour(&self, behaviour: RelatedBehaviour) {
+        self.state().related = behaviour;
+    }
+
+    /// The videos the Related tab was asked about, in order.
+    pub fn related_log(&self) -> Vec<String> {
+        self.state().related_log.clone()
     }
 
     /// How Explore is answered from now on (tests).
@@ -729,6 +756,40 @@ fn explore_content() -> ExplorePage {
     }
 }
 
+/// The simulated Related tab: a song shelf, then albums and artists. The fixtures are rotated by
+/// the video id, so two tracks do not read the same.
+fn related_shelves(video_id: &str) -> Vec<HomeShelf> {
+    let spin = video_id.bytes().map(usize::from).sum::<usize>() % FIXTURES.len();
+    let order: Vec<(usize, &Fixture)> = FIXTURES
+        .iter()
+        .enumerate()
+        .cycle()
+        .skip(spin)
+        .take(FIXTURES.len())
+        .collect();
+    let shelf = |title: &str, items: Vec<HomeItem>| HomeShelf {
+        title: title.into(),
+        items,
+    };
+    vec![
+        shelf(
+            "You might also like",
+            order
+                .iter()
+                .map(|(n, f)| home_song(fixture_row(f, *n), f.art))
+                .collect(),
+        ),
+        shelf(
+            "Albums",
+            order.iter().take(6).map(|(_, f)| home_album(f)).collect(),
+        ),
+        shelf(
+            "Similar artists",
+            order.iter().take(6).map(|(_, f)| home_artist(f)).collect(),
+        ),
+    ]
+}
+
 /// The simulated home feed: three batches, a song shelf, shelves of cards of every kind and one
 /// that mixes songs with albums.
 fn home_batch(token: Option<&str>) -> Option<HomePage> {
@@ -963,6 +1024,20 @@ impl LibrarySource for SimLibrary {
         match behaviour {
             HomeBehaviour::Fail(f) | HomeBehaviour::FailMore(f) => Err(f),
             _ => home_batch(Some(token)).ok_or(LoadFailure::Parse),
+        }
+    }
+
+    fn related(&self, video_id: &str) -> Result<Vec<HomeShelf>, LoadFailure> {
+        self.wait(PAGE_LATENCY);
+        let behaviour = {
+            let mut state = self.state();
+            state.related_log.push(video_id.to_owned());
+            state.related
+        };
+        match behaviour {
+            RelatedBehaviour::Fail(f) => Err(f),
+            RelatedBehaviour::Empty => Ok(Vec::new()),
+            RelatedBehaviour::Shelves => Ok(related_shelves(video_id)),
         }
     }
 

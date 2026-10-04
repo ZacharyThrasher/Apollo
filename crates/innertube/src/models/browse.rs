@@ -2800,4 +2800,50 @@ mod tests {
         let c = parse_playlist_continuation(&modern);
         assert_eq!((c.items.len(), c.skipped), (1, 2));
     }
+
+    /// The Related tab is read like the home feed: a shelf of song rows, then album and artist
+    /// cards. The "About the artist" description shelf is not read and is counted, not hidden.
+    #[test]
+    fn a_related_page_reads_songs_then_albums_and_artists() {
+        let song = |id: &str, title: &str| {
+            json!({ "musicResponsiveListItemRenderer": {
+                "playlistItemData": { "videoId": id },
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": title }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "The Artist" }, { "text": " • " }, { "text": "3:47" }
+                    ] } } }
+                ]
+            } })
+        };
+        let card = |title: &str, browse_id: &str| {
+            json!({ "musicTwoRowItemRenderer": {
+                "title": { "runs": [{ "text": title }] },
+                "subtitle": { "runs": [{ "text": "Somebody" }] },
+                "navigationEndpoint": { "browseEndpoint": { "browseId": browse_id } }
+            } })
+        };
+        let shelf = |title: &str, contents: Vec<Value>| {
+            json!({ "musicCarouselShelfRenderer": {
+                "header": { "musicCarouselShelfBasicHeaderRenderer": {
+                    "title": { "runs": [{ "text": title }] } } },
+                "contents": contents
+            } })
+        };
+        let root = json!({ "contents": { "sectionListRenderer": { "contents": [
+            shelf("You might also like", vec![song("aaaaaaaaaaa", "One"), song("bbbbbbbbbbb", "Two")]),
+            shelf("Recommended albums", vec![card("An Album", "MPREb_one")]),
+            shelf("Similar artists", vec![card("Someone", "UCone")]),
+            { "musicDescriptionShelfRenderer": { "description": { "runs": [{ "text": "About" }] } } }
+        ] } } });
+        let page = parse_home(&root);
+        let titles: Vec<&str> = page.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["You might also like", "Recommended albums", "Similar artists"]);
+        assert_eq!(page.sections[0].items.len(), 2);
+        assert_eq!(page.sections[0].items[0].kind, "song");
+        assert_eq!(page.sections[1].items[0].kind, "album");
+        assert_eq!(page.sections[2].items[0].kind, "artist");
+        assert_eq!(page.skipped_shelves, 1);
+        assert_eq!(page.continuation, None);
+    }
 }
