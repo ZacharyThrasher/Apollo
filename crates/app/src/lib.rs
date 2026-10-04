@@ -21,6 +21,7 @@ pub mod loudness;
 pub mod mini;
 pub mod motion;
 pub mod os_media;
+pub mod page_cache;
 pub mod pc_watch;
 #[cfg(windows)]
 pub mod pc_watch_win;

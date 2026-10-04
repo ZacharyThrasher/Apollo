@@ -13,6 +13,7 @@ use gpui::{
 use crate::account::AccountModel;
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
+use crate::page_cache::PageCache;
 use crate::library::{LibraryWrites, Notice, Target};
 use crate::lyrics::LyricsModel;
 use crate::keymap::{
@@ -469,6 +470,15 @@ impl Shell {
         let view = self.account.read(cx).service().view();
         let epoch = view.epoch;
         let usable = account_usable(&view, self.library_usable);
+        // The page cache serves one account at a time: before anything below asks it for a page.
+        let signed_out_by_choice = self.account.read(cx).is_signed_out_by_choice();
+        if let Some(cache) = PageCache::try_global(cx) {
+            if signed_out_by_choice {
+                cache.sign_out();
+            } else {
+                cache.set_account(cache_account(&view));
+            }
+        }
         // A new login imports before the service has confirmed it, so what the library loaded
         // then failed with "sign-in expired": it loads again once the session is confirmed.
         let became_usable = usable && !self.library_usable;
@@ -505,6 +515,8 @@ impl Shell {
             self.explore
                 .update(cx, |e, cx| e.set_access(access, epoch, cx));
         }
+        // Last session's feed is on screen at once, before the session is confirmed.
+        self.home.update(cx, |h, cx| h.restore_cached(cx));
         self.library
             .update(cx, |l, cx| l.set_signed_out(by_choice, cx));
         if !self.routed_to_sign_in && signed_out {
@@ -959,6 +971,15 @@ fn account_usable(view: &apollo_account::service::AccountView, previous: bool) -
         SessionState::Valid => matches!(view.identity, IdentityState::Selected(_)),
         SessionState::Absent | SessionState::Expired => false,
         SessionState::Validating | SessionState::Unreachable => previous,
+    }
+}
+
+/// The key the page cache files an account's pages under: the chosen channel, the same
+/// identity the saved queue is bound to. `None` while none is chosen.
+fn cache_account(view: &apollo_account::service::AccountView) -> Option<String> {
+    match &view.identity {
+        apollo_account::service::IdentityState::Selected(identity) => Some(identity.key()),
+        _ => None,
     }
 }
 
