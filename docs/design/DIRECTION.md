@@ -252,15 +252,15 @@ The plain mini player (`ui/mini_player.rs` `render_plain`, `mini.rs`, `hud.rs` `
 
 ## HUD (coordinator brief, 2026-10-04)
 Applied to the mini player in HUD mode (`ui/mini_player.rs` `render_hud`, `mini.rs`, `hud.rs`). Settings > Mini player: "HUD mode" (off), "Auto-hide HUD" (on). Ctrl+Alt+H shows or hides it while Global hotkeys is on.
-1. **Panel:** 320x64, 12px corners (`radius::LARGE`), a 1px border of white at 8%, a soft shadow (0 4px 16px, black 40%). The window is the panel plus 20px of see-through room on every side so the shadow has somewhere to fall; only the panel counts for hover, clicks and snapping.
-2. **Fill:** decided (coordinator, 2026-10-04): solid bg.overlay at 92% with the shadow and 12px corners, and no acrylic. System backdrops fill the whole window rectangle with the system's 8px corner, which would square off the shadow room and the 12px corners, and over a moving game a crisp, readable panel matters more than blur.
+1. **Panel:** 320x64 with 8px corners (the corner Windows 11 gives the window itself, so the two agree), and the window is exactly the panel: no see-through margin, no painted shadow, no painted border, and the DWM border colour is turned off (`DWMWA_BORDER_COLOR` = none). Changed 2026-10-04: the old 20px see-through margin for a soft shadow drew as a visible translucent grey frame on Zach's PC, and a clean edge matters more than a shadow.
+2. **Fill:** solid bg.overlay at 92% and no acrylic. System backdrops fill the whole window rectangle with the system's own corner, and over a moving game a crisp, readable panel matters more than blur.
 3. **Content at rest:** a 48px square of art with 6px corners at 8px from the left, top and bottom; the title in Segoe UI Variable 14px semibold text.primary and the artist in 12px text.secondary, one line each with an ellipsis. Nothing else: no buttons, time or labels.
-4. **Progress:** a 2px line along the bottom edge, drawn in 12px (the corner radius) from each side, the art accent over the track in white at 10%.
+4. **Progress:** a 2px line along the bottom edge, drawn in 8px (the corner radius) from each side, the art accent over the track in white at 10%.
 5. **On hover:** the panel goes fully opaque over 120 ms. Previous, play/pause, next and a heart appear on the right over the end of the text (28px buttons, text.primary icons, the heart in the accent when liked); the text ellipsises earlier to make room. No focus ring, and the window never takes focus.
 6. **Track change:** the title and artist slide up 6px and cross-fade over 160 ms, and the art cross-fades. Art arriving later than the title cross-fades alone.
 7. **Auto-hide:** the HUD fades to 30% after 4 s, and returns to 100% for 4 s on a track change, and while hovered. Off keeps it solid.
 8. **Animation effects off (Windows):** the fade, the opaque change, and the track change are instant.
-9. **Snap:** dropping the panel within 48px of a screen edge or corner moves it to 16px from it (above the taskbar), once it has sat still for half a second.
+9. **Snap:** dropping the window within 48px of a screen edge or corner moves it to 16px from it (above the taskbar), once it has sat still for half a second.
 10. **Limit:** topmost windows show over windowed and borderless games, not exclusive fullscreen; that would need DLL injection, which risks anti-cheat bans, so it is not done.
 
 ## Out of scope for v1

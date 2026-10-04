@@ -529,7 +529,7 @@ fn with_auto_hide_off_the_hud_stays_solid(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_hud_snaps_to_the_nearest_corner_once_it_sits_still(cx: &mut TestAppContext) {
     // Left near the bottom-right corner of the 1920x1080 test display.
-    let store = MemoryStore::with(&[(KEY_HUD, "1550,960,360,104,0")]);
+    let store = MemoryStore::with(&[(KEY_HUD, "1580,1000,320,64,0")]);
     let (_world, handle, hand) = open_hud(cx, Some(store));
     hand.pass(0.3, cx);
     assert_eq!(
@@ -542,10 +542,9 @@ fn the_hud_snaps_to_the_nearest_corner_once_it_sits_still(cx: &mut TestAppContex
         .read_with(cx, |m, _| m.last_snap())
         .unwrap()
         .expect("snapped");
-    // It is the 320x64 panel that sits 16px in; the window has 20px of shadow room around it.
-    let pad = mini_player::HUD_PAD;
+    // It is the 320x64 panel (the whole window) that sits 16px in.
     assert_eq!(
-        (snap.x + pad, snap.y + pad),
+        (snap.x, snap.y),
         (1920.0 - 320.0 - 16.0, 1080.0 - 64.0 - 16.0),
         "16px in from the corner"
     );
@@ -575,7 +574,7 @@ fn the_hud_hotkey_shows_and_hides_without_closing_the_mini_player(cx: &mut TestA
 }
 
 #[gpui::test]
-fn the_hud_is_a_320_by_64_panel_with_room_for_its_shadow_and_its_own_saved_place(
+fn the_hud_window_is_exactly_the_320_by_64_panel_and_has_its_own_saved_place(
     cx: &mut TestAppContext,
 ) {
     let store = MemoryStore::with(&[(KEY_MINI, "100,100,360,96,0")]);
@@ -594,7 +593,12 @@ fn the_hud_is_a_320_by_64_panel_with_room_for_its_shadow_and_its_own_saved_place
     );
     assert_eq!(
         (f32::from(panel.origin.x), f32::from(panel.origin.y)),
-        (mini_player::HUD_PAD, mini_player::HUD_PAD)
+        (0.0, 0.0),
+        "nothing round the panel: no margin, so no frame"
+    );
+    assert_eq!(
+        (f32::from(window.width), f32::from(window.height)),
+        (320.0, 64.0)
     );
     // Its place is not the mini player's: the mini player's saved spot is left alone.
     assert!(store.writes_of(KEY_MINI).is_empty());
@@ -623,7 +627,7 @@ fn under_the_pointer_the_panel_goes_opaque_and_the_controls_appear(cx: &mut Test
         .expect("controls under the pointer");
     // Previous, play/pause, next and the heart, 28px each, at the panel's right.
     assert!(f32::from(controls.size.width) >= 4.0 * 28.0);
-    assert_eq!(f32::from(controls.size.height), 64.0 - 2.0);
+    assert_eq!(f32::from(controls.size.height), 64.0);
 
     hand.inside.set(false);
     hand.pass(0.3, cx);

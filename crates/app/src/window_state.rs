@@ -24,8 +24,9 @@ use crate::settings::SettingsBackend;
 pub const KEY_MAIN: &str = "window_main";
 /// The mini player's record.
 pub const KEY_MINI: &str = "window_mini";
-/// The game HUD's own place (it is a different size from the mini player).
-pub const KEY_HUD: &str = "window_hud";
+/// The game HUD's own place (it is a different size from the mini player). The `2` is for the
+/// HUD's size change (it lost its shadow margin): places saved at the old size are not reused.
+pub const KEY_HUD: &str = "window_hud2";
 
 /// How long a window must sit still before its place is written down.
 const SAVE_DELAY: Duration = Duration::from_millis(600);

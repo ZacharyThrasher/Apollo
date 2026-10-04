@@ -36,7 +36,7 @@ pub const PLACEMENT: Constraints = Constraints {
     home: Home::BottomRight,
 };
 
-/// The HUD's window: the panel plus room for its shadow, parked in the same corner.
+/// The HUD's window: the panel and nothing round it, parked in the same corner.
 pub const HUD_PLACEMENT: Constraints = Constraints {
     default_size: (mini_player::HUD_WIDTH, mini_player::HUD_HEIGHT),
     min_size: (mini_player::HUD_WIDTH, mini_player::HUD_HEIGHT),

@@ -14,7 +14,7 @@
 //!
 //! **HUD mode** (Settings > Mini player) turns the same window into an overlay for watching and
 //! controlling music over a game: a 320x64 panel (art, title, artist, a thin progress line) on
-//! a transparent window with room around it for its shadow, always on top, never the active
+//! a window of exactly that size (no margin, no shadow, no frame), always on top, never the active
 //! window (it cannot take the keyboard), and click-through until the pointer is over it. Over
 //! it, the panel goes opaque, takes clicks and shows previous, play/pause, next and the heart.
 //! It snaps to screen edges and corners where it is dropped, and with auto-hide on it dims
@@ -30,8 +30,7 @@ use std::time::{Duration, Instant};
 use apollo_lyrics::Lyrics;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use gpui::{
-    actions, black, canvas, div, point, prelude::*, px, relative, white, AnyElement, App,
-    BoxShadow, ClickEvent, Context, DispatchPhase, Div, Entity, FocusHandle, Focusable,
+    actions, canvas, div, prelude::*, px, relative, white, AnyElement, App, ClickEvent, Context, DispatchPhase, Div, Entity, FocusHandle, Focusable,
     IntoElement, KeyBinding, ParentElement, Render, RenderImage, ScrollDelta, ScrollWheelEvent,
     SharedString, Styled, Subscription, Window, WindowControlArea,
 };
@@ -82,12 +81,12 @@ const LYRIC_LINE_H: f32 = 16.0;
 pub const POLL: Duration = Duration::from_millis(50);
 
 // ---- HUD (DIRECTION.md, HUD) ----
-/// The panel's size. The window is this plus [`HUD_PAD`] on every side, room for the shadow.
+/// The panel's size, which is also the window's: no margin, so nothing but the panel is ever
+/// on screen (a see-through margin showed up as a translucent frame on Windows).
 pub const HUD_PANEL_W: f32 = 320.0;
 pub const HUD_PANEL_H: f32 = 64.0;
-pub const HUD_PAD: f32 = 20.0;
-pub const HUD_WIDTH: f32 = HUD_PANEL_W + 2.0 * HUD_PAD;
-pub const HUD_HEIGHT: f32 = HUD_PANEL_H + 2.0 * HUD_PAD;
+pub const HUD_WIDTH: f32 = HUD_PANEL_W;
+pub const HUD_HEIGHT: f32 = HUD_PANEL_H;
 /// The panel's fill at rest: bg.overlay, a little see-through. (No acrylic blur: see
 /// DIRECTION.md, HUD, for why this is the 92% fallback.)
 const HUD_FILL_ALPHA: f32 = 0.92;
@@ -97,9 +96,7 @@ const HUD_EDGE: f32 = 8.0;
 const HUD_BUTTON: f32 = 28.0;
 /// The four controls and the gaps between them.
 const HUD_CONTROLS_W: f32 = 4.0 * HUD_BUTTON + 3.0 * spacing::S1;
-const HUD_BORDER_ALPHA: f32 = 0.08;
 const HUD_TRACK_ALPHA: f32 = 0.10;
-const HUD_SHADOW_ALPHA: f32 = 0.40;
 
 /// The transport keys that work while the mini player has the keyboard, and Esc to go back.
 pub fn bind_keys(cx: &mut App) {
@@ -266,10 +263,7 @@ impl MiniPlayer {
             lyric_fade: LineFade::default(),
             lyrics,
             pointer_inside: false,
-            // In HUD mode the shadow's margin around the panel is not the HUD.
-            pointer: Rc::new(move |window| {
-                crate::platform::pointer_over(window, if hud { HUD_PAD } else { 0.0 })
-            }),
+            pointer: Rc::new(|window| crate::platform::pointer_over(window, 0.0)),
             clock: Rc::new(Instant::now),
             click_through: None,
             shown: Shown {
@@ -321,7 +315,10 @@ impl MiniPlayer {
         let line = self.current_lyric(cx);
         if line != self.lyric {
             self.lyric_prev = std::mem::replace(&mut self.lyric, line);
-            self.lyric_fade.start((self.clock)());
+            // Nothing crosses over while the line is not on screen.
+            if self.settings.read(cx).get(&MINI_SHOW_LYRICS) {
+                self.lyric_fade.start((self.clock)());
+            }
             cx.notify();
         }
     }
@@ -459,16 +456,15 @@ impl MiniPlayer {
             let _ = self.swap.progress(now, !cx.reduce_motion());
             changed = true;
         }
-        changed |= self.lyric_fade.is_running();
+        changed |= self.step_lyric_fade(now, cx);
 
-        // The panel is what snaps, not the window around it.
         let rect = Rect::from_bounds(window.bounds());
         match self.settle {
             Some((at, since)) if at == rect => {
                 if now.saturating_duration_since(since) >= SETTLE && self.snapped != Some(rect) {
                     let displays = window_state::usable_displays(cx, window.scale_factor());
-                    let panel = window_state::snap(rect.inset(HUD_PAD), &displays);
-                    let target = panel.outset(HUD_PAD);
+                    let panel = window_state::snap(rect, &displays);
+                    let target = panel;
                     self.snapped = Some(target);
                     if target != rect {
                         crate::platform::move_window(window, target.x, target.y);
@@ -494,7 +490,16 @@ impl MiniPlayer {
         self.idle.set_hovered(self.expand_visible(), now);
         self.idle.step(now);
         let moved = before != (self.idle.controls(), self.idle.window());
-        moved || self.lyric_fade.is_running()
+        moved | self.step_lyric_fade(now, cx)
+    }
+
+    /// Keeps a lyric cross-fade coming (and ends it) from the poll as well as from drawing.
+    fn step_lyric_fade(&mut self, now: Instant, cx: &App) -> bool {
+        let running = self.lyric_fade.is_running();
+        if running {
+            let _ = self.lyric_fade.progress(now, !cx.reduce_motion());
+        }
+        running
     }
 
     /// A turn of the mouse wheel or a touchpad scroll: five percent of volume a notch.
@@ -545,6 +550,10 @@ impl MiniPlayer {
         if !self.rounded {
             self.rounded = true;
             crate::platform::round_corners(window);
+            if self.hud {
+                // A clean edge: no frame drawn round the panel.
+                crate::platform::hide_border(window);
+            }
         }
         // The HUD is always above everything; the setting is for the plain mini player.
         let on_top = self.hud || self.settings.read(cx).get(&MINI_PLAYER_ON_TOP);
@@ -948,7 +957,7 @@ impl MiniPlayer {
             .when_some(lyric, |d, parts| d.child(Self::lyric_row(parts, cx)))
     }
 
-    /// The HUD: only the 320x64 panel, with the window around it left see-through for its shadow.
+    /// The HUD: the 320x64 panel, which is the whole window.
     fn render_hud(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let v = self.player.read(cx).view();
         if v.accent_moving {
@@ -1145,8 +1154,8 @@ impl MiniPlayer {
         let line = div()
             .id("mini-progress")
             .absolute()
-            .left(px(radius::LARGE))
-            .right(px(radius::LARGE))
+            .left(px(radius::MEDIUM))
+            .right(px(radius::MEDIUM))
             .bottom_0()
             .h(px(PROGRESS_HEIGHT))
             .bg(white().opacity(HUD_TRACK_ALPHA))
@@ -1161,21 +1170,13 @@ impl MiniPlayer {
             .id("mini-hud")
             .debug_selector(|| "hud-panel".into())
             .absolute()
-            .top(px(HUD_PAD))
-            .left(px(HUD_PAD))
+            .top_0()
+            .left_0()
             .w(px(HUD_PANEL_W))
             .h(px(HUD_PANEL_H))
-            .rounded(px(radius::LARGE))
+            // The corner Windows 11 gives the window itself, so the two agree.
+            .rounded(px(radius::MEDIUM))
             .bg(color::bg_overlay().opacity(fill))
-            .border_1()
-            .border_color(white().opacity(HUD_BORDER_ALPHA))
-            .shadow(vec![BoxShadow {
-                color: black().opacity(HUD_SHADOW_ALPHA),
-                offset: point(px(0.0), px(4.0)),
-                blur_radius: px(16.0),
-                spread_radius: px(0.0),
-                inset: false,
-            }])
             .opacity(self.fade.level())
             // Under everything: wherever nothing else is, the pointer drags the window.
             .child(
