@@ -230,6 +230,10 @@ pub struct NextResult {
     /// The lyrics tab's browseId (`MPLYt…`) — feed it to a lyrics `browse` (models::lyrics).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lyrics_browse_id: Option<String>,
+    /// The related tab's browseId (`MPTRt…`) — feed it to a `browse` and read it with
+    /// `parse_home` (songs, albums and artists as carousel shelves).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related_browse_id: Option<String>,
     /// The mix the panel says it continues into (`automixPreviewVideoRenderer`, context/08): a
     /// radio playlist id to re-request `next` with. Present on a bare `next(videoId)`, which is
     /// otherwise just the seed song — that's how a dead `RDAMVM` radio finds a live one.
@@ -305,7 +309,8 @@ pub fn parse_next(root: &Value) -> NextResult {
     NextResult {
         items,
         continuation,
-        lyrics_browse_id: lyrics_browse_id(root),
+        lyrics_browse_id: tab_browse_id(root, "MUSIC_PAGE_TYPE_TRACK_LYRICS"),
+        related_browse_id: tab_browse_id(root, "MUSIC_PAGE_TYPE_TRACK_RELATED"),
         automix_playlist_id,
         // Scoped to the overlay on purpose: a bare `find_first_str` over the whole response would
         // read whatever a future panel row starts carrying instead of the requested video's own.
@@ -335,11 +340,11 @@ fn panel_rows<'a>(node: &'a Value, out: &mut Vec<&'a Value>) {
     }
 }
 
-/// The lyrics tab's browseId from a `next` response: the browseEndpoint whose pageType is
-/// `MUSIC_PAGE_TYPE_TRACK_LYRICS`. context/08 §lyrics.
-fn lyrics_browse_id(root: &Value) -> Option<String> {
+/// A tab's browseId from a `next` response: the browseEndpoint whose pageType is `page_type`
+/// (`MUSIC_PAGE_TYPE_TRACK_LYRICS`, `MUSIC_PAGE_TYPE_TRACK_RELATED`). context/08 §lyrics.
+fn tab_browse_id(root: &Value, page_type: &str) -> Option<String> {
     find_all(root, "browseEndpoint").into_iter().find_map(|be| {
-        (find_first_str(be, "pageType").as_deref() == Some("MUSIC_PAGE_TYPE_TRACK_LYRICS"))
+        (find_first_str(be, "pageType").as_deref() == Some(page_type))
             .then(|| be.get("browseId").and_then(Value::as_str).map(str::to_owned))
             .flatten()
     })
@@ -1577,6 +1582,10 @@ mod tests {
                 "browseId": "MPLYt_abc123",
                 "browseEndpointContextSupportedConfigs": { "browseEndpointContextMusicConfig": {
                     "pageType": "MUSIC_PAGE_TYPE_TRACK_LYRICS" } }
+            } } } }, { "tabRenderer": { "title": "Related", "endpoint": { "browseEndpoint": {
+                "browseId": "MPTRt_xyz789",
+                "browseEndpointContextSupportedConfigs": { "browseEndpointContextMusicConfig": {
+                    "pageType": "MUSIC_PAGE_TYPE_TRACK_RELATED" } }
             } } } }]
         });
         let r = parse_next(&root);
@@ -1587,6 +1596,7 @@ mod tests {
         assert_eq!(r.items[0].duration.as_deref(), Some("4:05"));
         assert_eq!(r.continuation.as_deref(), Some("CONT_TOKEN"));
         assert_eq!(r.lyrics_browse_id.as_deref(), Some("MPLYt_abc123"));
+        assert_eq!(r.related_browse_id.as_deref(), Some("MPTRt_xyz789"));
         // No overlay in this response, and the panel row carries no `likeStatus` either: the
         // rating has to read as unknown, not as "not liked".
         assert_eq!(r.rating, None);

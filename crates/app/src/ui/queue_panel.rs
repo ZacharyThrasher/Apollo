@@ -24,6 +24,7 @@ use crate::player::{format_time, PlayerModel, QueueRow, QueueView, Status};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
+use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus, PaneTabs};
 use crate::ui::player_bar::text_line;
 use crate::ui::playing_row;
 use crate::ui::row_actions::{heart_action, more_slot, ACTION_SIZE};
@@ -217,6 +218,10 @@ pub struct QueuePanel {
     items: Vec<Item>,
     accent: Accent,
     on_search: Rc<Handler>,
+    /// Now Playing's pane control, drawn above the header while Now Playing is open (the control
+    /// is then the panel's title).
+    tabs: Option<(PaneFocus, OnPick)>,
+    tabs_visible: bool,
 }
 
 impl QueuePanel {
@@ -246,6 +251,21 @@ impl QueuePanel {
             items: Vec::new(),
             accent: Accent::fallback(),
             on_search: Rc::new(Box::new(on_search)),
+            tabs: None,
+            tabs_visible: false,
+        }
+    }
+
+    /// The control that switches Now Playing's right pane, shown while [`Self::set_tabs_visible`].
+    pub fn set_tabs(&mut self, focus: PaneFocus, on_pick: OnPick) {
+        self.tabs = Some((focus, on_pick));
+    }
+
+    /// Whether the pane control sits above the header (Now Playing is open).
+    pub fn set_tabs_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.tabs_visible != visible {
+            self.tabs_visible = visible;
+            cx.notify();
         }
     }
 
@@ -725,6 +745,12 @@ impl Render for QueuePanel {
             Repeat::One => (Icon::RepeatOneFilled, "Repeat one", true),
         };
         let player = self.player.clone();
+        let tabs = self
+            .tabs
+            .clone()
+            .filter(|_| self.tabs_visible)
+            .map(|(focus, on_pick)| PaneTabs::new(Pane::UpNext, &focus, accent, on_pick));
+        let titled = tabs.is_none();
         let header = div()
             .flex()
             .flex_row()
@@ -733,11 +759,14 @@ impl Render for QueuePanel {
             .justify_between()
             .h(px(ROW_HEIGHT))
             .px(px(spacing::S4))
-            .child(
+            .child(if titled {
                 style::text_style(div(), typography::SECTION, cx)
                     .text_color(color::text_primary())
-                    .child("Queue"),
-            )
+                    .child("Queue")
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            })
             .child(
                 div()
                     .flex()
@@ -868,6 +897,7 @@ impl Render for QueuePanel {
             .bg(color::bg_raised())
             .border_l_1()
             .border_color(color::border_subtle())
+            .children(tabs)
             .child(header)
             .child(list)
     }
