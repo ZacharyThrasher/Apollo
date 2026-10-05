@@ -16,6 +16,8 @@ pub struct CrateRow {
     pub track: Track,
     /// The cover URL the row that added it knew, so the song has art when it is listed.
     pub thumbnail: Option<String>,
+    /// The service marks the song explicit, as far as it is known (`false` is "not known to be").
+    pub explicit: bool,
     /// When it was added, in milliseconds since the Unix epoch.
     pub added_ms: i64,
 }
@@ -29,7 +31,7 @@ impl Store {
             [account_key],
         )?;
         let mut items = self.conn.prepare(
-            "SELECT video_id, title, album_title, album_id, duration_ms, thumbnail, added_ms
+            "SELECT video_id, title, album_title, album_id, duration_ms, thumbnail, added_ms, explicit
              FROM crate_items WHERE account_key = ?1 ORDER BY pos, rowid",
         )?;
         let mut artists = self.conn.prepare(
@@ -67,6 +69,7 @@ impl Store {
                         .map(Duration::from_millis),
                 },
                 thumbnail: r.get(5)?,
+                explicit: r.get::<_, i64>(7)? != 0,
                 added_ms: r.get(6)?,
             });
         }
@@ -75,54 +78,68 @@ impl Store {
 
     /// Add a song at the bottom. One already in the crate stays where it is.
     pub fn crate_add(&mut self, account_key: &str, row: &CrateRow) -> Result<(), StoreError> {
-        let t = &row.track;
         let tx = self.conn.transaction()?;
         let exists = tx
             .query_row(
                 "SELECT 1 FROM crate_items WHERE account_key = ?1 AND video_id = ?2",
-                params![account_key, t.video_id.as_str()],
+                params![account_key, row.track.video_id.as_str()],
                 |_| Ok(()),
             )
             .optional()?
             .is_some();
         if !exists {
-            tx.execute(
-                "INSERT INTO crate_items
-                    (account_key, video_id, title, album_title, album_id, duration_ms, thumbnail,
-                     added_ms, pos)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                         (SELECT COALESCE(MAX(pos) + 1, 0) FROM crate_items WHERE account_key = ?1))",
-                params![
-                    account_key,
-                    t.video_id.as_str(),
-                    t.title,
-                    t.album.as_ref().map(|a| a.title.as_str()),
-                    t.album
-                        .as_ref()
-                        .and_then(|a| a.id.as_ref())
-                        .map(|b| b.as_str()),
-                    t.duration
-                        .map(|d| d.as_millis().min(i64::MAX as u128) as i64),
-                    row.thumbnail,
-                    row.added_ms,
-                ],
+            insert(
+                &tx,
+                account_key,
+                row,
+                "(SELECT COALESCE(MAX(pos) + 1, 0) FROM crate_items WHERE account_key = ?1)",
             )?;
-            for (i, a) in t.artists.iter().enumerate() {
-                tx.execute(
-                    "INSERT INTO crate_artists (account_key, video_id, pos, name, browse_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        account_key,
-                        t.video_id.as_str(),
-                        i as i64,
-                        a.name,
-                        a.id.as_ref().map(|b| b.as_str())
-                    ],
-                )?;
-            }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Put `row` in the place of the song `old_video_id` (a swap to another version of it): same
+    /// slot in the list. Does nothing when `old_video_id` is not in the crate, or when `row`'s
+    /// song already is elsewhere in it (a crate holds a song once). Returns whether it swapped.
+    pub fn crate_swap(
+        &mut self,
+        account_key: &str,
+        old_video_id: &str,
+        row: &CrateRow,
+    ) -> Result<bool, StoreError> {
+        let tx = self.conn.transaction()?;
+        let pos: Option<i64> = tx
+            .query_row(
+                "SELECT pos FROM crate_items WHERE account_key = ?1 AND video_id = ?2",
+                params![account_key, old_video_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(pos) = pos else {
+            return Ok(false);
+        };
+        let new_id = row.track.video_id.as_str();
+        if new_id != old_video_id {
+            let taken = tx
+                .query_row(
+                    "SELECT 1 FROM crate_items WHERE account_key = ?1 AND video_id = ?2",
+                    params![account_key, new_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if taken {
+                return Ok(false);
+            }
+        }
+        tx.execute(
+            "DELETE FROM crate_items WHERE account_key = ?1 AND video_id = ?2",
+            params![account_key, old_video_id],
+        )?;
+        insert(&tx, account_key, row, &pos.to_string())?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Put the crate in this order: the songs of `video_ids` take places 0, 1, 2… top to bottom.
@@ -164,4 +181,51 @@ impl Store {
         self.conn.execute_batch("DELETE FROM crate_items;")?;
         Ok(())
     }
+}
+
+/// Insert a row and its artists; `pos` is the SQL for its place in the list.
+fn insert(
+    tx: &rusqlite::Transaction<'_>,
+    account_key: &str,
+    row: &CrateRow,
+    pos: &str,
+) -> Result<(), StoreError> {
+    let t = &row.track;
+    tx.execute(
+        &format!(
+            "INSERT INTO crate_items
+                (account_key, video_id, title, album_title, album_id, duration_ms, thumbnail,
+                 added_ms, explicit, pos)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, {pos})"
+        ),
+        params![
+            account_key,
+            t.video_id.as_str(),
+            t.title,
+            t.album.as_ref().map(|a| a.title.as_str()),
+            t.album
+                .as_ref()
+                .and_then(|a| a.id.as_ref())
+                .map(|b| b.as_str()),
+            t.duration
+                .map(|d| d.as_millis().min(i64::MAX as u128) as i64),
+            row.thumbnail,
+            row.added_ms,
+            row.explicit,
+        ],
+    )?;
+    for (i, a) in t.artists.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO crate_artists (account_key, video_id, pos, name, browse_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                account_key,
+                t.video_id.as_str(),
+                i as i64,
+                a.name,
+                a.id.as_ref().map(|b| b.as_str())
+            ],
+        )?;
+    }
+    Ok(())
 }

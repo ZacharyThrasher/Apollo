@@ -124,6 +124,19 @@ impl<K: Clone + Eq + Hash> Selection<K> {
         order.iter().filter(|k| self.picked.contains(*k)).collect()
     }
 
+    /// Rows that took another key (`(old, new)`: a song swapped for another version of itself):
+    /// whatever was picked, or the anchor, under the old key is under the new one.
+    pub fn remap(&mut self, pairs: &[(K, K)]) {
+        for (old, new) in pairs {
+            if self.picked.remove(old) {
+                self.picked.insert(new.clone());
+            }
+            if self.anchor.as_ref() == Some(old) {
+                self.anchor = Some(new.clone());
+            }
+        }
+    }
+
     /// Forget keys that are no longer in the list.
     pub fn keep(&mut self, order: &[K]) {
         if self.picked.is_empty() {

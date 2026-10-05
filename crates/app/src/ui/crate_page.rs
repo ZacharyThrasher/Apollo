@@ -35,7 +35,7 @@ use gpui::{
 };
 
 use crate::assets::Icon;
-use crate::crate_list::CrateModel;
+use crate::crate_list::{CrateEvent, CrateModel};
 use crate::library::LibraryWrites;
 use crate::ui::anchor;
 use crate::ui::playlist_dialog::{self, Mode, CRATE_PLAYLIST_NAME};
@@ -43,7 +43,7 @@ use crate::ui::playlist_picker::PlaylistPicker;
 use crate::player::{format_time, PlayerModel};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
-use crate::ui::button::{focus_ring, keyboard_focused, Handler};
+use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::dock_tabs::{Dock, DockFocus, DockTabs, OnPick as DockPick};
 use crate::ui::library::DraggedRow as LibraryRow;
 use crate::ui::song_drag::SongDrag;
@@ -123,6 +123,7 @@ const TAB_ADD_ALL: isize = 8;
 const TAB_SAVE: isize = 9;
 const TAB_ADD_TO: isize = 10;
 const TAB_CLEAR: isize = 11;
+const TAB_MORE: isize = 11;
 const TAB_LIST: isize = 12;
 const TAB_SEARCH: isize = 13;
 
@@ -130,11 +131,15 @@ const TAB_SEARCH: isize = 13;
 /// Queue · Crate control.
 const DOCK_TAB_SAVE: isize = 14;
 const DOCK_TAB_ADD_TO: isize = 15;
+const DOCK_TAB_MORE: isize = 15;
 const DOCK_TAB_LIST: isize = 17;
 
 /// Where the "Add all to…" popover hangs from.
 const ADD_TO_ANCHOR: &str = "crate-add-to-playlist";
 const DOCK_ADD_TO_ANCHOR: &str = "crate-dock-add-to-playlist";
+/// Where the header's More menu hangs from.
+const MORE_ANCHOR: &str = "crate-more";
+const DOCK_MORE_ANCHOR: &str = "crate-dock-more";
 
 struct Focus {
     play: FocusHandle,
@@ -142,6 +147,7 @@ struct Focus {
     add_all: FocusHandle,
     save: FocusHandle,
     add_to: FocusHandle,
+    more: FocusHandle,
     clear: FocusHandle,
     confirm: FocusHandle,
     cancel: FocusHandle,
@@ -304,6 +310,19 @@ impl CratePage {
             cx.notify();
         })
         .detach();
+        // A song swapped for another version of itself keeps its place, its pick and the cursor.
+        cx.subscribe(&crate_, |this, _, event: &CrateEvent, cx| {
+            if let CrateEvent::Swapped(pairs) = event {
+                this.selection.remap(pairs);
+                if let Some(cursor) = this.cursor.as_mut() {
+                    if let Some((_, now)) = pairs.iter().find(|(was, _)| was == cursor) {
+                        *cursor = now.clone();
+                    }
+                }
+                cx.notify();
+            }
+        })
+        .detach();
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         let dock = layout == Layout::Dock;
@@ -315,6 +334,7 @@ impl CratePage {
             add_all: stop(cx, at(TAB_ADD_ALL, DOCK_TAB_SAVE)),
             save: stop(cx, at(TAB_SAVE, DOCK_TAB_SAVE)),
             add_to: stop(cx, at(TAB_ADD_TO, DOCK_TAB_ADD_TO)),
+            more: stop(cx, at(TAB_MORE, DOCK_TAB_MORE)),
             clear: stop(cx, at(TAB_CLEAR, DOCK_TAB_ADD_TO)),
             // The confirmation takes the Clear button's place in the tab order.
             confirm: stop(cx, at(TAB_CLEAR, DOCK_TAB_ADD_TO)),
@@ -471,6 +491,20 @@ impl CratePage {
     pub fn cancel_clear(&mut self, cx: &mut Context<Self>) {
         self.confirming = false;
         cx.notify();
+    }
+
+    /// The header's More menu: its verbs act on the picked songs, or on the whole Crate when none
+    /// is picked.
+    pub fn open_more(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = self.ids(cx);
+        let picked: Vec<String> = self.selection.members(&ids).into_iter().cloned().collect();
+        let key = if self.docked() { DOCK_MORE_ANCHOR } else { MORE_ANCHOR };
+        track_menu::open(
+            Subject::Crate(picked),
+            track_menu::Anchor::Key(key.into()),
+            window,
+            cx,
+        );
     }
 
     fn ids(&self, cx: &App) -> Vec<String> {
@@ -863,10 +897,10 @@ impl CratePage {
         };
         let docked = self.docked();
         // Names that tell the docked list's rows from the page's, so tests find the right ones.
-        let (name, row_id, like_id, remove_id) = if docked {
-            ("dock", "dock-row", "dock-like", "dock-remove")
+        let (name, row_id, like_id, remove_id, explicit_id) = if docked {
+            ("dock", "dock-row", "dock-like", "dock-remove", "dock-explicit")
         } else {
-            ("crate", "crate-row", "crate-like", "crate-remove")
+            ("crate", "crate-row", "crate-like", "crate-remove", "crate-explicit")
         };
         let video: String = row.track.video_id.as_str().to_owned();
         let playing = self.player.read(cx).current_video().as_deref() == Some(video.as_str());
@@ -1069,13 +1103,32 @@ impl CratePage {
                         color::text_primary(),
                         cx,
                     ))
-                    .child(text_line(
-                        "artist",
-                        artists,
-                        typography::BODY,
-                        color::text_secondary(),
-                        cx,
-                    )),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(spacing::S1))
+                            .min_w_0()
+                            // The service's "E", as on the other song lists.
+                            .when(row.explicit, |d| {
+                                d.child(
+                                    style::text_style(div(), typography::CAPTION, cx)
+                                        .id((explicit_id, ix))
+                                        .debug_selector(move || format!("{name}-explicit-{ix}"))
+                                        .flex_none()
+                                        .text_color(color::text_tertiary())
+                                        .aria_label("Explicit")
+                                        .child("E"),
+                                )
+                            })
+                            .child(div().min_w_0().overflow_hidden().child(text_line(
+                                "artist",
+                                artists,
+                                typography::BODY,
+                                color::text_secondary(),
+                                cx,
+                            ))),
+                    ),
             )
             .child(heart)
             .children(duration_cell)
@@ -1220,6 +1273,24 @@ impl CratePage {
                     ))
                 }
             })
+            // Swap to explicit / clean versions live in this menu.
+            .child(
+                div().debug_selector(|| "crate-more".into()).child(anchor::anchored(
+                    MORE_ANCHOR,
+                    IconButton::new(
+                        "crate-more",
+                        &self.focus.more,
+                        Icon::MoreHorizontal,
+                        "More",
+                        accent,
+                    )
+                    .enabled(has_rows)
+                    .on_click({
+                        let page = page.clone();
+                        move |window, cx| page.update(cx, |p, cx| p.open_more(window, cx))
+                    }),
+                )),
+            )
             // "N selected" at the right end while 2 or more songs are picked.
             .child(
                 div()
@@ -1301,6 +1372,23 @@ impl CratePage {
                     }),
                 ),
             ))
+            .child(
+                div().debug_selector(|| "dock-more".into()).child(anchor::anchored(
+                    DOCK_MORE_ANCHOR,
+                    IconButton::new(
+                        "dock-more",
+                        &self.focus.more,
+                        Icon::MoreHorizontal,
+                        "More",
+                        accent,
+                    )
+                    .enabled(has_rows)
+                    .on_click({
+                        let page = page.clone();
+                        move |window, cx| page.update(cx, |p, cx| p.open_more(window, cx))
+                    }),
+                )),
+            )
             .child(
                 div()
                     .ml_auto()

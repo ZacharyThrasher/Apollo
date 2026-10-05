@@ -805,6 +805,12 @@ impl LibraryWrites {
         self.log.newest_note()
     }
 
+    /// The newest playlist edit's place in time (`apollo_domain::undo::next_seq`), which is how
+    /// Ctrl+Z tells it from a Crate swap.
+    pub fn playlist_undo_seq(&self) -> Option<u64> {
+        self.log.newest_seq()
+    }
+
     /// The newest playlist edit is an add the service has not answered yet.
     pub fn newest_edit_pending(&self) -> bool {
         self.log.last().is_some_and(Step::is_pending)

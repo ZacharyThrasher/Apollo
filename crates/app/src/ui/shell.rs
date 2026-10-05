@@ -13,7 +13,7 @@ use gpui::{
 
 use crate::account::AccountModel;
 use crate::blocked_artists::{BlockHandle, BlockModel};
-use crate::crate_list::{CrateHandle, CrateModel};
+use crate::crate_list::{CrateEvent, CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
@@ -33,7 +33,9 @@ use crate::page_cache::PageCache;
 use crate::player::PlayerModel;
 use crate::related::RelatedModel;
 use crate::search::{SearchModel, SearchSource};
-use crate::settings::{SettingsModel, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES};
+use crate::settings::{
+    SettingsModel, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES, PREFER_EXPLICIT,
+};
 use crate::settings::{LibrarySortStore, LyricsOpenStore, RelatedOpenStore, SettingsBackend};
 use crate::style::{self, color};
 use crate::assets::Icon;
@@ -345,6 +347,19 @@ impl Shell {
         cx.observe(&picker, |_, _, cx| cx.notify()).detach();
         let crate_model = cx.new(|_| CrateModel::new());
         cx.observe(&crate_model, |_, _, cx| cx.notify()).detach();
+        // Swapping the Crate's songs for explicit or clean versions: progress and the result
+        // show in the tip pill.
+        cx.subscribe(&crate_model, |this, _, event: &CrateEvent, cx| match event {
+            CrateEvent::Progress { want, done, total } => {
+                this.show_tip(crate::crate_swap::progress_text(*want, *done, *total).into(), cx)
+            }
+            CrateEvent::Finished { want, swapped, total, unreachable } => this.show_tip(
+                crate::crate_swap::finished_text(*want, *swapped, *total, *unreachable).into(),
+                cx,
+            ),
+            CrateEvent::Swapped(_) => {}
+        })
+        .detach();
         cx.set_global(CrateHandle(crate_model.clone()));
         let target_model =
             cx.new(|cx| TargetModel::new(settings.clone(), writes.clone(), &edits, cx));
@@ -634,6 +649,17 @@ impl Shell {
             cx.observe(&settings, move |_, settings, cx| {
                 let on = settings.read(cx).get(&MORE_LIKE_THIS);
                 library.update(cx, |l, cx| l.set_more_like_enabled(on, cx));
+            })
+            .detach();
+        }
+        // Playlists > Prefer explicit versions follows its switch.
+        {
+            let on = settings.read(cx).get(&PREFER_EXPLICIT);
+            crate_model.update(cx, |m, _| m.set_prefer_explicit(on));
+            let crate_model = crate_model.clone();
+            cx.observe(&settings, move |_, settings, cx| {
+                let on = settings.read(cx).get(&PREFER_EXPLICIT);
+                crate_model.update(cx, |m, _| m.set_prefer_explicit(on));
             })
             .detach();
         }
@@ -1545,17 +1571,38 @@ impl Shell {
         }
     }
 
-    /// Ctrl+Z: take back the last thing done to the queue or to a playlist, whichever came last.
+    /// Ctrl+Z: take back the last thing done to the queue, to a playlist or to the Crate's songs
+    /// (a swap to explicit or clean versions), whichever came last.
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         let (depth, queue_undoable) = {
             let player = self.player.read(cx);
             (player.queue_undo_depth(), player.queue_undoable())
         };
-        let note = self.writes.read(cx).playlist_undo_note();
-        match apollo_domain::undo::newest(depth, queue_undoable, note) {
+        let playlist = self
+            .writes
+            .read(cx)
+            .playlist_undo_note()
+            .zip(self.writes.read(cx).playlist_undo_seq());
+        let crate_swap = self.crate_model.read(cx).undo_stamp();
+        // Of the two histories that are not the queue's, the newer one stands for both.
+        let (other, is_crate) = match (playlist, crate_swap) {
+            (Some(p), Some(c)) if c.1 > p.1 => (Some(c.0), true),
+            (Some(p), _) => (Some(p.0), false),
+            (None, Some(c)) => (Some(c.0), true),
+            (None, None) => (None, false),
+        };
+        match apollo_domain::undo::newest(depth, queue_undoable, other) {
             apollo_domain::undo::Newest::Queue => self.undo_queue(cx),
+            apollo_domain::undo::Newest::Playlist if is_crate => self.undo_crate_swap(cx),
             apollo_domain::undo::Newest::Playlist => self.undo_playlist(cx),
             apollo_domain::undo::Newest::Nothing => {}
+        }
+    }
+
+    /// Take back the newest swap of Crate songs; the pill says what was undone.
+    fn undo_crate_swap(&mut self, cx: &mut Context<Self>) {
+        if let Some(words) = self.crate_model.update(cx, |m, cx| m.undo_swap(cx)) {
+            self.show_tip(format!("Undid: {words}").into(), cx);
         }
     }
 
@@ -1799,6 +1846,7 @@ impl Shell {
         thumbs: Arc<dyn ThumbSource>,
         cx: &mut Context<Self>,
     ) {
+        self.crate_model.update(cx, |m, _| m.install_search(search.clone()));
         self.search_model.update(cx, |m, cx| m.install(search, cx));
         self.thumbs.update(cx, |t, cx| t.install(thumbs, cx));
     }

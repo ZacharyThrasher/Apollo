@@ -151,6 +151,14 @@ impl UndoHistory {
     }
 }
 
+/// A number that only grows, from one call to the next anywhere in the process. The histories
+/// that are not the queue's (playlist edits, Crate swaps) stamp each step with one when they
+/// make it, which is how Ctrl+Z tells which of them is newest.
+pub fn next_seq() -> u64 {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
 /// Which history Ctrl+Z takes from. The queue's steps and the playlist edits' steps are kept
 /// apart (different things to put back), but they are one line in time: the newest of either
 /// goes first. A playlist edit notes the queue history's [`UndoHistory::depth`] when it is
@@ -441,6 +449,12 @@ mod tests {
         assert_eq!(newest(1, true, Some(2)), Newest::Playlist);
         // A queue that cannot undo (empty, or a skim) leaves the playlist step.
         assert_eq!(newest(3, false, Some(2)), Newest::Playlist);
+    }
+
+    #[test]
+    fn stamps_only_grow() {
+        let (a, b, c) = (next_seq(), next_seq(), next_seq());
+        assert!(a < b && b < c);
     }
 
     #[test]

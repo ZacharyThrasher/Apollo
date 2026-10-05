@@ -110,6 +110,9 @@ pub enum Subject {
     /// Two songs or more picked in a list (see `ui::selection`): the verbs act on all of them,
     /// in the list's order.
     Tracks(Vec<TrackSubject>),
+    /// The Crate, from the More button of its header. The video ids are the songs picked in it:
+    /// with some picked its verbs act on those, with none on the whole Crate.
+    Crate(Vec<String>),
 }
 
 /// An artist the menu is about.
@@ -245,6 +248,10 @@ pub enum Command {
     OpenOnYoutubeMusic,
     /// Keep the artist's songs out of radio, autoplay and the personal shelves (or let them back).
     BlockArtist,
+    /// Crate: replace songs with their explicit versions, where the service has them.
+    SwapToExplicit,
+    /// Crate: replace songs with their clean versions.
+    SwapToClean,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,6 +306,9 @@ pub struct Facts {
     pub artist_blocked: bool,
     /// The playlist is the target playlist now (its item then clears the target).
     pub is_target: bool,
+    /// The song is in the Crate and not known to be explicit: it can be swapped for the explicit
+    /// version. For a selection, true when any of its songs is.
+    pub swappable: bool,
 }
 
 /// The menu's items in groups (a separator sits between groups). `liked` is the song's heart.
@@ -368,7 +378,12 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                     } else {
                         item(Command::AddToCrate, Icon::BoxRegular, "Add to Crate")
                     },
-                ],
+                ]
+                .into_iter()
+                .chain(facts.swappable.then(|| {
+                    item(Command::SwapToExplicit, Icon::ArrowSwap, "Swap to explicit version")
+                }))
+                .collect(),
                 {
                     let mut group = vec![if liked {
                         item(Command::ToggleLike, Icon::HeartFilled, "Remove from Liked")
@@ -450,6 +465,13 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             } else {
                 item(Command::AddToCrate, Icon::BoxRegular, "Add to Crate")
             });
+            if facts.swappable {
+                keep.push(item(
+                    Command::SwapToExplicit,
+                    Icon::ArrowSwap,
+                    "Swap to explicit versions",
+                ));
+            }
             out.push(keep);
             // `liked` is true when every song is liked: the item then takes them all out.
             out.push(vec![if liked {
@@ -481,6 +503,10 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             Icon::PlaylistAdd,
             "Save as playlist\u{2026}",
         )]],
+        Subject::Crate(_) => vec![vec![
+            item(Command::SwapToExplicit, Icon::ArrowSwap, "Swap to explicit versions"),
+            item(Command::SwapToClean, Icon::ArrowSwap, "Swap to clean versions"),
+        ]],
     }
 }
 
@@ -534,7 +560,7 @@ pub fn link_of(subject: &Subject) -> String {
     match subject {
         Subject::Track(t) => links::track_url(&t.track.video_id),
         Subject::Collection(c) => links::collection_url(c),
-        Subject::Queue | Subject::Tracks(_) => String::new(),
+        Subject::Queue | Subject::Tracks(_) | Subject::Crate(_) => String::new(),
         Subject::Artist(a) => format!("https://music.youtube.com/channel/{}", a.id.as_str()),
     }
 }
@@ -800,6 +826,11 @@ impl TrackMenu {
                 Facts {
                     in_crate: crate::crate_list::handle(cx)
                         .is_some_and(|c| c.read(cx).contains(t.track.video_id.as_str())),
+                    swappable: crate::crate_list::handle(cx).is_some_and(|c| {
+                        let crate_ = c.read(cx);
+                        crate_.contains(t.track.video_id.as_str())
+                            && !crate_.is_explicit(t.track.video_id.as_str())
+                    }),
                     song_saved: self
                         .edits
                         .read(cx)
@@ -842,10 +873,17 @@ impl TrackMenu {
                         let crate_ = c.read(cx);
                         songs.iter().all(|t| crate_.contains(t.track.video_id.as_str()))
                     }),
+                    swappable: crate::crate_list::handle(cx).is_some_and(|c| {
+                        let crate_ = c.read(cx);
+                        songs.iter().any(|t| {
+                            crate_.contains(t.track.video_id.as_str())
+                                && !crate_.is_explicit(t.track.video_id.as_str())
+                        })
+                    }),
                     ..Facts::default()
                 },
             ),
-            Subject::Queue => (false, Facts::default()),
+            Subject::Queue | Subject::Crate(_) => (false, Facts::default()),
         };
         groups_with(&open.subject, liked, facts)
     }
@@ -1150,7 +1188,10 @@ impl TrackMenu {
                 let artist = match &subject {
                     Subject::Track(t) => blocked_artist_of(&t.track),
                     Subject::Artist(a) => Some(a.blocked()),
-                    Subject::Collection(_) | Subject::Queue | Subject::Tracks(_) => None,
+                    Subject::Collection(_)
+                    | Subject::Queue
+                    | Subject::Tracks(_)
+                    | Subject::Crate(_) => None,
                 };
                 if let (Some(artist), Some(model)) = (artist, crate::blocked_artists::handle(cx)) {
                     model.update(cx, |m, cx| {
@@ -1163,6 +1204,27 @@ impl TrackMenu {
             }
             (Command::AddToCrate, Subject::Track(t)) => {
                 crate::crate_list::add_track(&self.player, t.track, t.thumbnail, cx);
+            }
+            (Command::SwapToExplicit | Command::SwapToClean, subject) => {
+                let want = if command == Command::SwapToExplicit {
+                    crate::crate_swap::Want::Explicit
+                } else {
+                    crate::crate_swap::Want::Clean
+                };
+                // A song or a selection: just those. The Crate's own menu: the songs picked in
+                // it, or all of it when none is.
+                let only: Option<Vec<String>> = match subject {
+                    Subject::Track(t) => Some(vec![t.track.video_id.as_str().to_owned()]),
+                    Subject::Tracks(songs) => Some(
+                        songs
+                            .iter()
+                            .map(|s| s.track.video_id.as_str().to_owned())
+                            .collect(),
+                    ),
+                    Subject::Crate(picked) => (!picked.is_empty()).then_some(picked),
+                    Subject::Collection(_) | Subject::Queue | Subject::Artist(_) => return,
+                };
+                crate::crate_list::swap(&self.player, want, only, cx);
             }
             (Command::RemoveFromCrate, Subject::Track(t)) => {
                 if let Some(model) = crate::crate_list::handle(cx) {

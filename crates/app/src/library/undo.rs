@@ -72,6 +72,9 @@ pub struct Step {
     pub action: Action,
     /// The queue history's depth when the edit was made.
     pub note: i64,
+    /// Where the edit sits in time among the other non-queue histories
+    /// ([`apollo_domain::undo::next_seq`]).
+    pub seq: u64,
 }
 
 impl Step {
@@ -116,7 +119,7 @@ impl PlaylistLog {
     pub fn record(&mut self, playlist: PlaylistRef, action: Action, note: i64) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
-        self.steps.push_back(Step { id, playlist, action, note });
+        self.steps.push_back(Step { id, playlist, action, note, seq: apollo_domain::undo::next_seq() });
         while self.steps.len() > LIMIT {
             self.steps.pop_front();
         }
@@ -139,6 +142,11 @@ impl PlaylistLog {
     /// The queue depth noted by the newest step.
     pub fn newest_note(&self) -> Option<i64> {
         self.last().map(|s| s.note)
+    }
+
+    /// The place in time of the newest step.
+    pub fn newest_seq(&self) -> Option<u64> {
+        self.last().map(|s| s.seq)
     }
 
     /// Take the newest step to undo it.
