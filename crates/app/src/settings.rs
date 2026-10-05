@@ -98,6 +98,9 @@ pub const AUTO_ADVANCE: BoolSetting = BoolSetting::new("auto_advance", true);
 /// (A, the P picker, "Add all to…") leaves the Crate. Ctrl+Z puts it back. Off: a song can belong
 /// in two playlists, so nothing leaves unasked.
 pub const CRATE_FILE_AND_FORGET: BoolSetting = BoolSetting::new("crate_file_and_forget", false);
+/// Playlists > Prefer explicit versions: a clean song added to the Crate is swapped for its
+/// explicit version at once, when the service has one. Off until the owner asks for it.
+pub const PREFER_EXPLICIT: BoolSetting = BoolSetting::new("prefer_explicit", false);
 /// Window > Close to tray: the close button hides the window and playback continues.
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
@@ -184,6 +187,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     INSTANT_PLAYLISTS.key,
     AUTO_ADVANCE.key,
     CRATE_FILE_AND_FORGET.key,
+    PREFER_EXPLICIT.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
     PAUSE_ON_OTHER_AUDIO.key,

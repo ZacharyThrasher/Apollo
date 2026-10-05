@@ -301,7 +301,7 @@ mod tests {
         if let Some(name) = artist {
             track.artists = vec![ArtistRef { name: name.into(), id: None }];
         }
-        CrateRow { track, thumbnail: None, added_ms: 0 }
+        CrateRow { track, thumbnail: None, added_ms: 0, explicit: false }
     }
 
     fn by(artist: &str, n: usize) -> CrateRow {
