@@ -9,6 +9,7 @@ pub mod lease_store;
 pub mod loudness;
 pub mod secret;
 pub mod session;
+pub mod throttle;
 #[cfg(windows)]
 pub mod win;
 
@@ -19,6 +20,7 @@ pub use loudness::{
 };
 pub use secret::SecretString;
 pub use session::{SessionProvider, SessionSnapshot, SessionUnavailable};
+pub use throttle::{parse_retry_after, Lane, Pacer, Throttle};
 
 /// How adapters feed completions back to whoever owns the coordinator. Called from
 /// adapter threads; implementations must be cheap and must not call into the UI

@@ -23,7 +23,8 @@ memory and a few extra requests to hide that wait.
 3. **Speculative resolve.** The app asks the resolver to `prefetch` the queue head and the next
    two tracks in play order, the first row of a freshly listed page, and the track the pointer
    rests on for 250 ms (debounced). Prefetch is background priority: at most 2 of the 3 workers,
-   at most 6 pending, never ahead of a foreground request.
+   at most 6 pending (since ADR 0005: 2 pending and 10 a minute, none during a 429 cooldown),
+   never ahead of a foreground request.
 4. **Fallback.** If the plugin does not load or a worker will not start twice in a row, the pool
    marks itself unusable and the old process-per-track path runs, with the reason in
    diagnostics. `APOLLO_RESOLVER=legacy` forces it.
