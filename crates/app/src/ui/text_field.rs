@@ -11,6 +11,7 @@
 //! move between rows.
 
 use std::ops::Range;
+use std::rc::Rc;
 
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
@@ -93,6 +94,10 @@ pub fn focus(field: &Entity<TextField>, window: &mut Window, cx: &mut App) {
     window.focus(&handle, cx);
 }
 
+/// What a paste does instead of typing: it is given the clipboard's text and says whether it took
+/// it (`true`: nothing is typed). It must not update the field itself.
+pub type PasteHook = Rc<dyn Fn(&str, &mut Window, &mut App) -> bool>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextFieldEvent {
     /// The text changed (typing, paste, clear).
@@ -127,6 +132,8 @@ pub struct TextField {
     /// (the playlist picker marks the row under its cursor with it).
     space_to_owner_when_empty: bool,
     max_chars: usize,
+    /// Offered every paste before it is typed (the Crate's add box reads links and lists).
+    on_paste: Option<PasteHook>,
 }
 
 impl EventEmitter<TextFieldEvent> for TextField {}
@@ -156,7 +163,14 @@ impl TextField {
             title: false,
             space_to_owner_when_empty: false,
             max_chars: MAX_CHARS,
+            on_paste: None,
         }
+    }
+
+    /// Offer every paste to `hook` before it is typed.
+    pub fn on_paste(mut self, hook: PasteHook) -> Self {
+        self.on_paste = Some(hook);
+        self
     }
 
     /// While the field is empty, Space propagates to the owner's `InsertSpace` handler rather
@@ -355,6 +369,11 @@ impl TextField {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            if let Some(hook) = self.on_paste.clone() {
+                if hook(&text, window, cx) {
+                    return;
+                }
+            }
             let text = if self.is_multiline() {
                 multi_line(&text)
             } else {

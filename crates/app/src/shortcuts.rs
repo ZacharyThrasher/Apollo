@@ -169,6 +169,8 @@ pub const ENTRIES: &[Entry] = &[
     .all_keys(),
     entry("crate-top", "Crate: move to top", Group::Collect, &["CrateMoveTop"]),
     entry("crate-bottom", "Crate: move to bottom", Group::Collect, &["CrateMoveBottom"]),
+    entry("crate-add", "Crate: add songs by search", Group::Collect, &["CrateFocusAdd"]),
+    entry("crate-paste", "Crate: paste links or lines", Group::Collect, &["CratePaste"]),
     entry("undo", "Undo", Group::Collect, &["UndoQueue"]),
     entry("redo", "Redo", Group::Collect, &["RedoQueue"]).all_keys(),
     entry("skim-from", "Skim from here", Group::Play, &["SkimRow"]),
