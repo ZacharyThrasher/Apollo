@@ -294,10 +294,11 @@ Audition a list (`player/skim.rs`). Settings > Playback > "Skim" (on) and "Secon
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.
 
 ## Multi-select decisions (coordinator, 2026-10-05)
-Shared helper `ui/selection.rs`; first on Search results and playlist pages.
+Shared helper `ui/selection.rs`; on Search results, playlist and album pages, the Library Songs tab, the Crate and the queue.
 1. **Picked rows:** background is the accent at 16% alpha (`selection::row_tint`). The keyboard cursor row keeps its existing look (focus ring on pages, marker bar on Search) on top of the tint. One picked row is drawn tinted too, but is not yet a selection: the verbs act from 2 up.
 2. **Count:** "N selected" in caption text.secondary at the right end of the list's header (the chip row on Search; beside the filter field on a playlist page, in a fixed 96px slot so the header does not shift), shown while 2 or more are picked. No floating action bar.
-3. **Menu:** the selection's menu is the track menu's usual popover with Play next, Add to queue, Add to playlist… (the picker takes the whole list), Add to Crate, Like (or Remove from Liked when all are liked), and Remove from playlist on a playlist of your own. No success toasts.
+3. **Menu:** the selection's menu is the track menu's usual popover with Play next, Add to queue, Add to playlist… (the picker takes the whole list), Add to Crate (Remove from Crate when every picked song is in it), Like (or Remove from Liked when all are liked), Remove from playlist on a playlist of your own and Remove from queue in the queue panel (its own last group, as in a single row's menu). No success toasts.
+4. **Everywhere else the same (built choices flagged):** album pages and the Songs tab use the playlist page's look. On the Songs tab "N selected" sits at the right end of the Play / Shuffle row (built choice: the filter lives in the tab row there). The Crate puts it at the right end of its button row, in the same 96px slot. The queue panel shows it beside the "Queue" title in the header with no slot (built choice: the panel is 320px wide and the title never moves). Delete removes the picks in the Crate and the queue (the playing row stays); a Crate row still drags alone.
 
 ## Crate arranging decisions (coordinator brief, 2026-10-05; built choices flagged)
 Applied to `crate_list.rs`, `ui/crate_page.rs` and the `crate_items.pos` column (migration 9).

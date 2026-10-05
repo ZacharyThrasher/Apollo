@@ -31,8 +31,8 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 
 ## Picking several songs
 
-On Search results and on a playlist page (albums, Library Songs, the Crate and the queue come
-later). The cursor row keeps its own ring; the picked rows are tinted with the accent.
+On Search results, playlist and album pages, the Library Songs tab, the Crate and the queue. The
+cursor row keeps its own ring; the picked rows are tinted with the accent.
 
 | Key | Does |
 |---|---|
@@ -42,12 +42,17 @@ later). The cursor row keeps its own ring; the picked rows are tinted with the a
 | Ctrl+A | Pick every song in the list |
 | Esc | Clear the picks (the next Esc does what it did before: leave the list, close the page) |
 | Up / Down | Move the cursor and clear the picks |
-| L / C / P / Ctrl+Enter | With 2 or more picked: like all (or un-like when all are liked) / Crate all / Add all to a playlist (the picker opens at the cursor row) / Add all to the queue (Search) |
+| L / C / P / Ctrl+Enter | With 2 or more picked: like all (or un-like when all are liked) / Crate all / Add all to a playlist (the picker opens at the cursor row; in the Crate and the queue it opens in the middle) / Add all to the queue (Search). C is not bound in the Crate |
+| Delete / Backspace | With 2 or more picked, in the Crate or the queue: take them all out (the playing row stays in the queue) |
 
 With 2 or more picked, right-click on any picked row (or its More button) opens a menu for all
-of them: Play next, Add to queue, Add to playlist…, Add to Crate, Like, and on a playlist of your own Remove from
-playlist. A row that is not picked keeps its own menu. A plain click plays the song as before
-and clears the picks. Likes and removals go to the account one at a time.
+of them: Play next, Add to queue, Add to playlist…, Add to Crate (Remove from Crate when they are
+all in it, as on the Crate page), Like, and on a playlist of your own Remove from playlist; in the
+queue Remove from queue. A row that is not picked keeps its own menu. A plain click plays the song
+as before and clears the picks. Likes and playlist removals go to the account one at a time;
+Remove from queue is one step for Ctrl+Z, whatever the count. The Crate still drags one row at a
+time (a drag does not take the picks with it). The picks belong to the list: another page, tab
+or search starts with none.
 
 ## In lists
 
