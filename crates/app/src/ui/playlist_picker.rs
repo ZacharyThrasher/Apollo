@@ -19,8 +19,8 @@
 //!
 //! The same panel also chooses the target playlist (see `target_playlist`): opened that way its
 //! caption says so, a click or Enter on a playlist makes it the target (and adds the songs it was
-//! opened with, if any) instead of just adding, the current target carries the accent check, and
-//! a Clear button takes the target away. Typing a new name makes a playlist and targets it.
+//! opened with, if any) instead of just adding, and a Clear button takes the target away. In both
+//! modes the current target's row carries a star in the accent colour. Typing a new name makes a playlist and targets it.
 //! There is nothing to mark there, so Space does nothing.
 //!
 //! The add is optimistic and rolls back with an error if the service refuses (see
@@ -1017,8 +1017,7 @@ pub fn create_label(name: &str) -> String {
     format!("Create \u{201C}{name}\u{201D}")
 }
 
-/// What one playlist row shows. A later "target playlist" star is one more field here and one
-/// more element in [`playlist_row`].
+/// What one playlist row shows.
 struct RowView {
     ix: usize,
     title: SharedString,
@@ -1026,6 +1025,8 @@ struct RowView {
     held: bool,
     /// Marked for Enter: a check in the accent colour.
     marked: bool,
+    /// The target playlist (what A adds to): a star in the accent colour.
+    target: bool,
     cursor: bool,
 }
 
@@ -1037,8 +1038,8 @@ impl Render for PlaylistPicker {
         let (accent, _) = self.player.read(cx).accent_now();
         let ring = keyboard_focused(&self.field.read(cx).focus_handle(cx), window);
         let target_mode = open.target_mode;
-        // Choosing the target: the current one carries the check.
-        let current_target = target_mode.then(|| self.current_target(cx)).flatten();
+        // The playlist that is the target now carries a star.
+        let current_target = self.current_target(cx);
 
         let body: AnyElement = match &open.playlists {
             Load::Idle | Load::Loading => skeleton_rows(!cx.reduce_motion()),
@@ -1085,10 +1086,10 @@ impl Render for PlaylistPicker {
                                         ix,
                                         title: target.title.clone().into(),
                                         held: self.holds_all(ix, cx),
-                                        marked: open.marked.contains(&target.id)
-                                            || current_target
-                                                .as_ref()
-                                                .is_some_and(|t| t.id == target.id),
+                                        marked: open.marked.contains(&target.id),
+                                        target: current_target
+                                            .as_ref()
+                                            .is_some_and(|t| t.id == target.id),
                                         cursor,
                                     },
                                     accent,
@@ -1121,10 +1122,12 @@ impl Render for PlaylistPicker {
         let caption = if target_mode {
             let clear = current_target.is_some().then(|| {
                 let entity = cx.entity();
-                TextButton::new("picker-clear-target", &self.clear_focus, "Clear", accent)
-                    .on_click(move |window, cx| {
-                        entity.update(cx, |m, cx| m.clear_target(window, cx))
-                    })
+                div().debug_selector(|| "picker-clear-target".into()).child(
+                    TextButton::new("picker-clear-target", &self.clear_focus, "Clear", accent)
+                        .on_click(move |window, cx| {
+                            entity.update(cx, |m, cx| m.clear_target(window, cx))
+                        }),
+                )
             });
             Some(
                 style::text_style(div(), typography::CAPTION, cx)
@@ -1294,6 +1297,7 @@ fn playlist_row(
         title,
         held,
         marked,
+        target,
         cursor,
     } = view;
     let title_color = if held {
@@ -1335,6 +1339,15 @@ fn playlist_row(
                 .text_color(title_color)
                 .child(title),
         )
+        .when(target, |d| {
+            d.child(
+                gpui::svg()
+                    .path(Icon::StarFilled.path())
+                    .size(px(layout::ICON_SIZE))
+                    .flex_none()
+                    .text_color(color::accent(accent)),
+            )
+        })
         .when(held || marked, |d| {
             d.child(
                 gpui::svg()

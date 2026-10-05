@@ -424,17 +424,39 @@ fn on_a_library_list_a_adds_the_cursor_row(cx: &mut TestAppContext) {
     assert_eq!(added(&page), [("PLsimempty".to_owned(), first)]);
 }
 
+fn focus_panel<V: gpui::Focusable + 'static>(vcx: &mut VisualTestContext, panel: &Entity<V>) {
+    vcx.update(|window, cx| {
+        let focus = panel.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+    });
+}
+
 #[gpui::test]
-fn the_crate_and_the_queue_add_their_cursor_row(cx: &mut TestAppContext) {
+fn the_crate_adds_its_cursor_row(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     set_target(&page, vcx, "PLsimroad", "Road Trip");
-    // The Crate page.
     let crate_model = page.shell.read_with(vcx, |s, _| s.crate_model().clone());
     crate_model.update(vcx, |m, cx| m.add(Track::new("crateAAAA01", "In the crate"), None, cx));
     page.shell
         .update(vcx, |s, cx| s.show_route(Route::Crate, cx));
     vcx.run_until_parked();
+    let crate_page = page.shell.read_with(vcx, |s, _| s.crate_page().clone());
+    focus_panel(vcx, &crate_page);
     vcx.simulate_keystrokes("down a");
     vcx.run_until_parked();
     assert_eq!(added(&page), [("PLsimroad".to_owned(), "crateAAAA01".to_owned())]);
+}
+
+#[gpui::test]
+fn the_queue_adds_its_cursor_row_not_the_playing_song(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    set_target(&page, vcx, "PLsimroad", "Road Trip");
+    page.shell.update(vcx, |s, cx| s.toggle_queue(cx));
+    vcx.run_until_parked();
+    let panel = page.shell.read_with(vcx, |s, _| s.queue_panel().clone());
+    focus_panel(vcx, &panel);
+    // The first press shows the cursor on the playing row; one more reaches the song up next.
+    vcx.simulate_keystrokes("down down a");
+    vcx.run_until_parked();
+    assert_eq!(added(&page), [("PLsimroad".to_owned(), NEXT.to_owned())]);
 }
