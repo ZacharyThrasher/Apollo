@@ -26,6 +26,24 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Esc | Close Now Playing |
 | F11 | Fullscreen while Now Playing is open (leaves fullscreen when Now Playing closes) |
 
+### While skimming
+
+Skim (the **Skim** button beside Play and Shuffle on playlist, album and Songs headers, and on
+Explore's Top songs) plays each song from about a third in for a few seconds. These keys exist
+only then, and a text field or popup still keeps its own keys:
+
+| Key | Does |
+|---|---|
+| K | Set the song aside in the Crate; the skim carries on |
+| Enter | Stop skimming and play this song from its start; the rest of the list plays after it (Ctrl+Z goes back to what was queued before) |
+| Esc | Stop skimming and put back what was playing before (nothing, if nothing was) |
+| Shift+Right / Shift+Left | Next / previous song's window |
+
+Ctrl+Z does not touch a skim. The list is played in order with shuffle and repeat off for as long
+as it lasts, and it is not saved: a restart brings back what was queued before. Skimmed songs are
+never added to YouTube Music history or the local stats. Settings > Playback > Skim (on) and
+Seconds per song (10, 20 or 30; default 20).
+
 Undo covers what changes the queue: playing a new list (replacing it), Clear, Remove, reorder,
 Play next / Add to queue, Start radio (with the radio that follows it, as one step), and the
 Shuffle switch. Fifty steps are kept for the session. It never interrupts the song that is
@@ -52,6 +70,7 @@ registered hotkey while the keys are held, so each press is one step.
 
 ## Where it lives
 
+- `crates/app/src/player/skim.rs`: Skim itself (the window, the ticker, Enter and Esc).
 - `crates/app/src/keymap.rs`: the in-app bindings (one key context predicate decides where they
   apply) and what each global hotkey does.
 - `crates/app/src/hotkeys_win.rs`: registers the global hotkeys with Windows (`global-hotkey` on

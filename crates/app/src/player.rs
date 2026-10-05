@@ -30,6 +30,9 @@ use crate::stats::tally::{PlayTally, TallyEvent};
 use crate::stats::{PlayLog, PlayRecord};
 use crate::thumbs::Thumbs;
 
+mod skim;
+pub use skim::{start_ms as skim_start_ms, SkimView, DEFAULT_SECONDS as SKIM_DEFAULT_SECONDS, SECONDS_CHOICES as SKIM_SECONDS_CHOICES};
+
 type AppDriver =
     Driver<Box<dyn apollo_runtime::Resolver + Send>, Box<dyn apollo_runtime::MediaEngine + Send>>;
 
@@ -154,6 +157,8 @@ pub struct PlayerView {
     pub sleep_minutes: Option<u32>,
     pub accent: Accent,
     pub accent_moving: bool,
+    /// Where Skim stands while it runs.
+    pub skim: Option<SkimView>,
 }
 
 pub struct PlayerModel {
@@ -227,6 +232,11 @@ pub struct PlayerModel {
     /// The last track a radio was asked for. Not asked again until the queue's tail changes or
     /// [`RADIO_RETRY`] has passed, so a failure is not retried on every tick.
     radio_tried: Option<String>,
+    /// Skim (audition a list) while it runs, Settings > Playback > Skim and Seconds per song.
+    skim: Option<skim::Skim>,
+    skim_enabled: bool,
+    skim_seconds: u32,
+    skim_ticking: bool,
 }
 
 impl PlayerModel {
@@ -277,6 +287,10 @@ impl PlayerModel {
             radio_step: None,
             radio_inflight: false,
             radio_tried: None,
+            skim: None,
+            skim_enabled: true,
+            skim_seconds: skim::DEFAULT_SECONDS,
+            skim_ticking: false,
         }
     }
 
@@ -452,6 +466,10 @@ impl PlayerModel {
     }
 
     fn report_snapshot(&self) -> Option<Snapshot> {
+        // Skimmed songs are not plays: neither YouTube's history nor the stats hear of them.
+        if self.skim.is_some() {
+            return None;
+        }
         let c = self.driver.as_ref()?.coordinator();
         let entry = c.queue().current()?;
         let activity = match (c.intent(), c.phase()) {
@@ -708,9 +726,11 @@ impl PlayerModel {
         let active = c.active_load();
         let begin = |l: &mut Latency, default: &'static str| l.begin(kind.unwrap_or(default), now);
         match event {
-            Event::PlayContext { .. } => begin(&mut self.latency, "play_tracks"),
+            Event::PlayContext { .. } | Event::PlayContextAt { .. } => {
+                begin(&mut self.latency, "play_tracks")
+            }
             Event::PlayEntry { .. } => begin(&mut self.latency, "queue_entry"),
-            Event::Next => begin(&mut self.latency, "next"),
+            Event::Next | Event::NextAt { .. } => begin(&mut self.latency, "next"),
             Event::Previous => begin(&mut self.latency, "previous"),
             Event::Play if c.phase() == Phase::Idle => begin(&mut self.latency, "play"),
             Event::Pause | Event::Stop | Event::Logout => self.latency.cancel(),
@@ -790,6 +810,8 @@ impl PlayerModel {
                     | Event::PlayContext { .. }
                     | Event::PlayEntry { .. }
                     | Event::Next
+                    | Event::NextAt { .. }
+                    | Event::PlayContextAt { .. }
                     | Event::Previous
             )
         {
@@ -814,10 +836,16 @@ impl PlayerModel {
     }
 
     pub fn next(&mut self, cx: &mut Context<Self>) {
+        if self.skim.is_some() {
+            return self.skim_next(cx);
+        }
         self.handle(Event::Next, cx);
     }
 
     pub fn previous(&mut self, cx: &mut Context<Self>) {
+        if self.skim.is_some() {
+            return self.skim_previous(cx);
+        }
         self.handle(Event::Previous, cx);
     }
 
@@ -828,6 +856,7 @@ impl PlayerModel {
     /// Play `track` now and carry on with the existing queue after it: the track goes in front of
     /// the up-next list and playback moves to it. Nothing already queued is lost.
     pub fn play_now(&mut self, track: Track, cx: &mut Context<Self>) {
+        self.skim_yield();
         let before = self.undo_capture();
         if let Some(d) = self.driver.as_mut() {
             d.edit_queue(|q| {
@@ -865,6 +894,7 @@ impl PlayerModel {
     /// ([`PlayerModel::finish_radio`]). The queue is left as it is until then, so a radio that
     /// cannot be fetched loses nothing.
     pub fn start_radio(&mut self, seed: Track, cx: &mut Context<Self>) {
+        self.skim_yield();
         let before = self.undo_capture();
         self.edit_queue_untracked(cx, |q| {
             q.play_next(vec![seed]);
@@ -947,6 +977,7 @@ impl PlayerModel {
         if tracks.is_empty() || self.driver.is_none() {
             return;
         }
+        self.skim_yield();
         let before = self.undo_capture();
         let seed = self.next_seed();
         let shuffle_on = match (shuffle, self.driver.as_ref()) {
@@ -1062,12 +1093,13 @@ impl PlayerModel {
     /// playing keeps playing unless that action changed it; then the old track comes back
     /// paused where it was. False when there was nothing to undo.
     pub fn undo_queue(&mut self, cx: &mut Context<Self>) -> bool {
-        self.step_queue(true, cx)
+        // A skim's queue is not a step: Esc takes it back.
+        self.skim.is_none() && self.step_queue(true, cx)
     }
 
     /// Ctrl+Shift+Z: do again what Ctrl+Z took back.
     pub fn redo_queue(&mut self, cx: &mut Context<Self>) -> bool {
-        self.step_queue(false, cx)
+        self.skim.is_none() && self.step_queue(false, cx)
     }
 
     fn step_queue(&mut self, undo: bool, cx: &mut Context<Self>) -> bool {
@@ -1371,6 +1403,10 @@ impl PlayerModel {
     /// (or when nothing is saved yet and something is playing), otherwise only the position, at
     /// most every [`CHECKPOINT_EVERY`] while playing and at once after a pause or a seek.
     fn persist(&mut self) {
+        // A skim's queue is not kept: a restart brings back what was there before it.
+        if self.skim.is_some() {
+            return;
+        }
         let (Some(saver), Some(d)) = (self.saver.as_ref(), self.driver.as_ref()) else {
             return;
         };
@@ -1401,7 +1437,7 @@ impl PlayerModel {
     /// the last track and queue it behind everything else. Repeat-all wins: it loops the queue,
     /// so there is nothing to run out of.
     fn top_up_radio(&mut self, cx: &mut Context<Self>) {
-        if !self.autoplay || self.radio_inflight {
+        if !self.autoplay || self.radio_inflight || self.skim.is_some() {
             return;
         }
         let (Some(d), Some(library)) = (self.driver.as_ref(), self.library.clone()) else {
@@ -1574,6 +1610,13 @@ impl PlayerModel {
 
     /// A media key or overlay button. Same coordinator events as the on-screen controls.
     pub fn os_command(&mut self, command: OsCommand, cx: &mut Context<Self>) {
+        if self.skim.is_some() {
+            match command {
+                OsCommand::Next => return self.skim_next(cx),
+                OsCommand::Previous => return self.skim_previous(cx),
+                _ => {}
+            }
+        }
         let Some(d) = self.driver.as_ref() else {
             return;
         };
@@ -1625,6 +1668,7 @@ impl PlayerModel {
             sleep_minutes: self.sleep.minutes_left(Instant::now()),
             accent,
             accent_moving,
+            skim: None,
         };
         let Some(d) = self.driver.as_ref() else {
             return base;
@@ -1660,6 +1704,7 @@ impl PlayerModel {
             shuffle: c.queue().shuffle(),
             repeat: c.queue().repeat(),
             error: c.error(),
+            skim: self.skim_view(),
             ..base
         }
     }

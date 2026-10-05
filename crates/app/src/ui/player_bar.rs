@@ -21,6 +21,9 @@ use crate::ui::tooltip::Tooltip;
 use crate::ui::transport::{self, TransportFocus};
 
 const VOLUME_WIDTH: f32 = 96.0;
+/// The Skim pill: 20px high, with a 6px accent dot.
+const SKIM_PILL_HEIGHT: f32 = 20.0;
+const SKIM_DOT: f32 = 6.0;
 /// The slider narrows to this when the right block is at its minimum width and holds four
 /// buttons beside it (mini player, lyrics, queue, heart and mute at 32px, with their gaps).
 const VOLUME_MIN_WIDTH: f32 = 40.0;
@@ -116,6 +119,31 @@ impl RenderOnce for PlayerBar {
             color::text_secondary(),
             cx,
         );
+        // While skimming, a pill says where in the list it is.
+        let skim_pill = v.skim.map(|skim| {
+            style::text_style(div(), typography::CAPTION, cx)
+                .id("skim-pill")
+                .debug_selector(|| "skim-pill".into())
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_none()
+                .gap(px(spacing::S1))
+                .px(px(spacing::S2))
+                .h(px(SKIM_PILL_HEIGHT))
+                .rounded(px(SKIM_PILL_HEIGHT / 2.0))
+                .bg(color::bg_overlay())
+                .text_color(color::text_secondary())
+                .aria_label(skim.label())
+                .child(
+                    div()
+                        .size(px(SKIM_DOT))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(accent_hsla),
+                )
+                .child(skim.label())
+        });
         // The block opens (and closes) Now Playing. Inert while nothing is queued.
         let ring = controls && keyboard_focused(&self.focus.now_playing, window);
         let left = div()
@@ -153,6 +181,7 @@ impl RenderOnce for PlayerBar {
                     })
             })
             .when(ring, |d| d.child(focus_ring(accent_hsla, radius::MEDIUM)))
+            .children(skim_pill)
             .child(art)
             .child(
                 div()

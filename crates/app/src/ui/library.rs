@@ -138,6 +138,8 @@ struct Focus {
     sort_menu: FocusHandle,
     play: FocusHandle,
     shuffle: FocusHandle,
+    /// Skim, after Shuffle on a playlist, album or Songs header.
+    skim: FocusHandle,
     /// A playlist page's description, when it opens the Edit playlist dialog.
     description: FocusHandle,
     list: FocusHandle,
@@ -324,6 +326,7 @@ impl LibraryView {
             sort_menu: cx.focus_handle(),
             play: stop(cx, 7),
             shuffle: stop(cx, 8),
+            skim: stop(cx, 8),
             description: stop(cx, 8),
             list: stop(cx, 9),
             retry: stop(cx, 10),
@@ -1342,13 +1345,20 @@ impl LibraryView {
         pending: Option<PlayRequest>,
         name: &'static str,
         accent: Accent,
+        cx: &App,
     ) -> AnyElement {
-        let play_busy = pending.is_some_and(|p| p.shuffle != Some(true));
-        let shuffle_busy = pending.is_some_and(|p| p.shuffle == Some(true));
-        let (model, model2) = (self.model.clone(), self.model.clone());
-        let (play_name, shuffle_name) = match name {
-            "songs" => ("songs-play", "songs-shuffle"),
-            _ => ("detail-play", "detail-shuffle"),
+        let play_busy = pending.is_some_and(|p| !p.skim && p.shuffle != Some(true));
+        let shuffle_busy = pending.is_some_and(|p| !p.skim && p.shuffle == Some(true));
+        let skim_busy = pending.is_some_and(|p| p.skim);
+        let skim_shown = self.model.read(cx).skim_enabled(cx);
+        let (model, model2, model3) = (
+            self.model.clone(),
+            self.model.clone(),
+            self.model.clone(),
+        );
+        let (play_name, shuffle_name, skim_name) = match name {
+            "songs" => ("songs-play", "songs-shuffle", "songs-skim"),
+            _ => ("detail-play", "detail-shuffle", "detail-skim"),
         };
         div()
             .flex()
@@ -1376,6 +1386,18 @@ impl LibraryView {
                         }),
                 ),
             )
+            .when(skim_shown, |d| {
+                d.child(
+                    div().debug_selector(move || skim_name.into()).child(
+                        TextButton::new("library-skim", &self.focus.skim, "Skim", accent)
+                            .enabled(enabled)
+                            .busy(skim_busy)
+                            .on_click(move |_, cx| {
+                                model3.update(cx, |m, cx| m.request_play(PlayRequest::SKIM, cx))
+                            }),
+                    ),
+                )
+            })
             .into_any_element()
     }
 
@@ -1473,7 +1495,7 @@ impl LibraryView {
             .then(|| track_count_text(collection.subtitle.as_deref(), items))
             .flatten();
         let blurb = self.description_line(&collection, blurb, editable, accent, window, cx);
-        let buttons = self.play_buttons(can_play || loading, pending, "detail", accent);
+        let buttons = self.play_buttons(can_play || loading, pending, "detail", accent, cx);
 
         let header = div()
             .flex()

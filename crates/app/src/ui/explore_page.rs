@@ -154,6 +154,8 @@ pub struct ExploreView {
     stops: Vec<FocusHandle>,
     action_focus: FocusHandle,
     show_all_focus: FocusHandle,
+    /// The chart's Skim button.
+    skim_focus: FocusHandle,
     back_focus: FocusHandle,
     /// The stop that last took keyboard focus and was scrolled into view.
     scrolled_to: Option<usize>,
@@ -189,6 +191,7 @@ impl ExploreView {
             stops: Vec::new(),
             action_focus: stop(cx),
             show_all_focus: stop(cx),
+            skim_focus: stop(cx),
             back_focus: stop(cx),
             scrolled_to: None,
             expanded: false,
@@ -884,7 +887,22 @@ impl ExploreView {
                     ),
                 )
         });
+        // Skim: audition the chart, a few seconds of each song.
+        let skim = self.player.read(cx).skim_enabled().then(|| {
+            let (player, songs) = (self.player.clone(), queue.clone());
+            div()
+                .flex()
+                .flex_row()
+                .mb(px(spacing::S2))
+                .child(
+                    div().debug_selector(|| "explore-skim".into()).child(
+                        TextButton::new("explore-skim", &self.skim_focus, "Skim", accent)
+                            .on_click(move |_, cx| skim_from(&player, &songs, "Top songs", cx)),
+                    ),
+                )
+        });
         div()
+            .children(skim)
             .child(
                 div()
                     .id("explore-chart")
@@ -1071,6 +1089,17 @@ fn play_from(
             p.hint_art(song.track.video_id.as_str(), song.thumbnail.as_deref());
         }
         p.play_tracks_from(tracks, Some(start), None, Some(queue_source::named(name)), cx);
+    });
+}
+
+/// Skims `songs` from the first, from the section called `name`.
+fn skim_from(player: &Entity<PlayerModel>, songs: &[ListedTrack], name: &str, cx: &mut App) {
+    let tracks: Vec<Track> = songs.iter().map(|s| s.track.clone()).collect();
+    player.update(cx, |p, cx| {
+        for song in songs {
+            p.hint_art(song.track.video_id.as_str(), song.thumbnail.as_deref());
+        }
+        p.start_skim(tracks, Some(queue_source::named(name)), cx);
     });
 }
 
