@@ -76,6 +76,8 @@ pub enum Edit {
     Create,
     /// Create a playlist from the queue.
     SaveQueue,
+    /// Create a playlist from the Crate.
+    SaveCrate,
     /// Change a playlist's title, description or visibility.
     Update,
     Delete,
@@ -93,6 +95,7 @@ pub fn failure_text(edit: Edit, failure: WriteFailure) -> &'static str {
         _ => match edit {
             Edit::Create => "Couldn't create playlist",
             Edit::SaveQueue => "Couldn't save queue",
+            Edit::SaveCrate => "Couldn't save Crate",
             Edit::Update => "Couldn't update playlist",
             Edit::Delete => "Couldn't delete playlist",
             Edit::RemoveSong => "Couldn't remove song",
@@ -738,6 +741,26 @@ impl LibraryEdits {
         video_ids: Vec<String>,
         cx: &mut Context<Self>,
     ) {
+        self.create_songs(Edit::SaveQueue, title, video_ids, cx);
+    }
+
+    /// [`Self::create_with_songs`] for the Crate: the same write, its failure worded for the Crate.
+    pub fn create_with_crate(
+        &mut self,
+        title: String,
+        video_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_songs(Edit::SaveCrate, title, video_ids, cx);
+    }
+
+    fn create_songs(
+        &mut self,
+        edit: Edit,
+        title: String,
+        video_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         let known = self.membership.playlists.clone();
         let asked = title.clone();
         self.run(
@@ -762,7 +785,7 @@ impl LibraryEdits {
                     }
                     cx.emit(EditEvent::Created(collection));
                 }
-                Err(failure) => m.fail(Edit::SaveQueue, failure, cx),
+                Err(failure) => m.fail(edit, failure, cx),
             },
         );
     }

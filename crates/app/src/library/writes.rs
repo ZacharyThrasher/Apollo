@@ -576,6 +576,91 @@ impl LibraryWrites {
         .detach();
     }
 
+    /// Add several tracks to a playlist, in order, as one request (the Crate's "Add all to…"):
+    /// shown as held at once, taken back (with one error) if the service does not take them.
+    /// Tracks the playlist already holds are skipped by the service.
+    pub fn add_many_to_playlist(
+        &mut self,
+        playlist: &PlaylistTarget,
+        video_ids: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        // What this call marks as held, so a failure takes back only that.
+        let fresh: Vec<(String, String)> = video_ids
+            .iter()
+            .map(|video| (playlist.id.clone(), video.clone()))
+            .filter(|key| self.added.insert(key.clone()))
+            .collect();
+        if video_ids.is_empty() {
+            return;
+        }
+        if let Some(cache) = PageCache::try_global(cx) {
+            cache.invalidate_collection(&playlist.id);
+        }
+        cx.notify();
+        let Some(source) = self.source(cx) else {
+            self.add_many_failed(&fresh, WriteFailure::Unsupported, cx);
+            return;
+        };
+        let generation = self.generation;
+        let playlist_id = playlist.id.clone();
+        let videos = video_ids.to_vec();
+        cx.spawn(async move |this, cx| {
+            let result = {
+                let (source, playlist_id, videos) =
+                    (source.clone(), playlist_id.clone(), videos.clone());
+                cx.background_executor()
+                    .spawn(async move { source.add_many_to_playlist(&playlist_id, &videos) })
+                    .await
+            };
+            let result = match result {
+                Err(failure) if failure.outcome_unknown() => {
+                    // One request carries them all, so the last one being there means they are.
+                    let (playlist_id, last) = (playlist_id.clone(), videos.last().cloned());
+                    let held = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let last = last?;
+                            source.playlists_for(&last).ok().map(|list| {
+                                list.iter().any(|p| p.id == playlist_id && p.holds_track)
+                            })
+                        })
+                        .await;
+                    match held {
+                        Some(true) => Ok(()),
+                        _ => Err(failure),
+                    }
+                }
+                other => other,
+            };
+            let _ = this.update(cx, |m, cx| {
+                if m.generation != generation {
+                    return;
+                }
+                if let Some(cache) = PageCache::try_global(cx) {
+                    cache.invalidate_collection(&playlist_id);
+                }
+                if let Err(failure) = result {
+                    m.add_many_failed(&fresh, failure, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn add_many_failed(
+        &mut self,
+        keys: &[(String, String)],
+        failure: WriteFailure,
+        cx: &mut Context<Self>,
+    ) {
+        for key in keys {
+            self.added.remove(key);
+        }
+        self.raise(add_failure_text(failure), cx);
+        cx.notify();
+    }
+
     fn add_failed(
         &mut self,
         key: &(String, String),

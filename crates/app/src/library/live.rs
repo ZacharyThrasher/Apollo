@@ -405,6 +405,18 @@ impl LibrarySource for InnerTubeLibrary {
         })
     }
 
+    fn add_many_to_playlist(
+        &self,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.add_many_to_playlist(playlist_id, video_ids).await
+        })
+    }
+
     fn account_token(&self) -> Option<String> {
         let snapshot = self.session.snapshot()?;
         let channel = (self.data_sync_id)().unwrap_or_default();

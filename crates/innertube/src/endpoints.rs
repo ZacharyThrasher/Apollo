@@ -783,6 +783,27 @@ impl InnerTube {
         }
     }
 
+    /// Add several videos to a playlist the account owns in one request, in the order given: one
+    /// `ACTION_ADD_VIDEO` per video, each with `DEDUPE_OPTION_SKIP` like [`Self::add_to_playlist`]
+    /// (so the request is as safe to repeat). An empty list sends nothing.
+    pub async fn add_many_to_playlist(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<(), Error> {
+        if video_ids.is_empty() {
+            return Ok(());
+        }
+        let body = add_many_to_playlist_body(self.context_for(client), playlist_id, video_ids);
+        let value = self.post("browse/edit_playlist", client, &body, true).await?;
+        if browse::edit_succeeded(&value) {
+            Ok(())
+        } else {
+            Err(Error::Refused("playlist edit was not accepted".into()))
+        }
+    }
+
     // --- playlist editing (Apollo addition, see NOTICE.md). ------------------------------------
     //
     // Every one goes out once (`post_once`): none of them is retried by the transport, because a
@@ -1223,12 +1244,20 @@ fn save_playlist_body(context: Context, playlist_id: &str) -> serde_json::Value 
 }
 
 fn add_to_playlist_body(context: Context, playlist_id: &str, video_id: &str) -> serde_json::Value {
+    add_many_to_playlist_body(context, playlist_id, std::slice::from_ref(&video_id.to_owned()))
+}
+
+fn add_many_to_playlist_body(
+    context: Context,
+    playlist_id: &str,
+    video_ids: &[String],
+) -> serde_json::Value {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Body {
         context: Context,
         playlist_id: String,
-        actions: [Action; 1],
+        actions: Vec<Action>,
     }
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -1240,11 +1269,14 @@ fn add_to_playlist_body(context: Context, playlist_id: &str, video_id: &str) -> 
     serde_json::to_value(Body {
         context,
         playlist_id: playlist_id.to_owned(),
-        actions: [Action {
-            action: "ACTION_ADD_VIDEO",
-            added_video_id: video_id.to_owned(),
-            dedupe_option: "DEDUPE_OPTION_SKIP",
-        }],
+        actions: video_ids
+            .iter()
+            .map(|video_id| Action {
+                action: "ACTION_ADD_VIDEO",
+                added_video_id: video_id.clone(),
+                dedupe_option: "DEDUPE_OPTION_SKIP",
+            })
+            .collect(),
     })
     .expect("a plain struct serialises")
 }
@@ -1332,6 +1364,19 @@ mod tests {
                 "dedupeOption": "DEDUPE_OPTION_SKIP"
             }])
         );
+    }
+
+    #[test]
+    fn adding_several_sends_one_action_per_video_in_order() {
+        let (tube, client) = tube();
+        let ids = ["a1".to_owned(), "b2".to_owned(), "c3".to_owned()];
+        let body = add_many_to_playlist_body(tube.context_for(&client), "PLabc", &ids);
+        assert_eq!(body["playlistId"], "PLabc");
+        let actions = body["actions"].as_array().unwrap();
+        let sent: Vec<_> = actions.iter().map(|a| a["addedVideoId"].as_str().unwrap()).collect();
+        assert_eq!(sent, ["a1", "b2", "c3"]);
+        assert!(actions.iter().all(|a| a["action"] == "ACTION_ADD_VIDEO"
+            && a["dedupeOption"] == "DEDUPE_OPTION_SKIP"));
     }
 
     #[test]
