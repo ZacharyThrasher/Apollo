@@ -567,7 +567,7 @@ fn picking_on_a_playlist_page_and_removing_the_picked_songs(cx: &mut TestAppCont
     right_click(vcx, at);
     assert_eq!(
         commands(&page, vcx),
-        [PlayNext, AddToQueue, AddToPlaylist, AddToCrate, ToggleLike, RemoveFromPlaylist]
+        [PlayNext, AddToQueue, AddToPlaylist, AddToCrate, ToggleLike, MoveToTop, MoveToBottom, RemoveFromPlaylist]
     );
     choose(&page, vcx, RemoveFromPlaylist);
     vcx.run_until_parked();

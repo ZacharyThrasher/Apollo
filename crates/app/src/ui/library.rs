@@ -27,7 +27,7 @@ use gpui::{
 
 use crate::assets::Icon;
 use crate::library::model::{
-    ArtSize, ArtistDetail, ArtistTarget, Detail, LibraryModel, Load, PlayRequest, Tab, Target,
+    Arrange, ArtSize, ArtistDetail, ArtistTarget, Detail, LibraryModel, Load, PlayRequest, Tab, Target,
 };
 use apollo_domain::model::Track;
 use crate::library::edits::{EditEvent, LibraryEdits};
@@ -78,6 +78,8 @@ actions!(
         ExtendUp,
         ExtendDown,
         SelectAllRows,
+        MoveRowUp,
+        MoveRowDown,
         Back
     ]
 );
@@ -103,6 +105,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-up", ExtendUp, Some(LIST_CONTEXT)),
         KeyBinding::new("shift-down", ExtendDown, Some(LIST_CONTEXT)),
         KeyBinding::new("ctrl-a", SelectAllRows, Some(LIST_CONTEXT)),
+        KeyBinding::new("alt-up", MoveRowUp, Some(LIST_CONTEXT)),
+        KeyBinding::new("alt-down", MoveRowDown, Some(LIST_CONTEXT)),
         KeyBinding::new("alt-left", Back, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Back, Some(KEY_CONTEXT)),
     ]);
@@ -1112,6 +1116,8 @@ impl LibraryView {
         .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.extend_selection(-1, cx)))
         .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.extend_selection(1, cx)))
         .on_action(cx.listener(|this, _: &SelectAllRows, _, cx| this.select_all_rows(cx)))
+        .on_action(cx.listener(|this, _: &MoveRowUp, _, cx| this.move_rows(-1, cx)))
+        .on_action(cx.listener(|this, _: &MoveRowDown, _, cx| this.move_rows(1, cx)))
         .on_action(cx.listener(|this, _: &ListPageUp, _, cx| {
             let step = this.page_rows(cx);
             this.move_selection(this.selected as isize - step, cx)
@@ -1308,6 +1314,52 @@ impl LibraryView {
         let to = (from as isize + delta).clamp(0, keys.len() as isize - 1) as usize;
         self.selection.extend(keys.get(from), &keys[to], &keys);
         self.move_selection(to as isize, cx);
+    }
+
+    /// The token of the row the cursor is on, on a page whose rows have them.
+    fn cursor_token(&self, cx: &App) -> Option<String> {
+        let real = self.visible(cx).get(self.selected)?;
+        self.model.read(cx).list_rows().get(real)?.occurrence.clone()
+    }
+
+    /// Alt+Up / Alt+Down on a playlist of your own: the cursor row, or every picked song, moves one
+    /// place and the cursor goes with it. Not while a filter hides some rows (a row's place on
+    /// screen is then not its place in the playlist), and not at the end it moves towards.
+    fn move_rows(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if !self.selection_enabled(cx) || !self.filter_text(cx).is_empty() {
+            return;
+        }
+        let Some(collection) = self.model.read(cx).arrangeable() else {
+            return;
+        };
+        let Some(cursor) = self.cursor_token(cx) else {
+            return;
+        };
+        let tokens: Vec<String> = if self.selection.is_bulk() {
+            self.picked_songs(cx)
+                .into_iter()
+                .filter_map(|s| s.playlist_row.map(|r| r.occurrence))
+                .collect()
+        } else {
+            vec![cursor.clone()]
+        };
+        let key = collection.library_key().to_owned();
+        let moved = self
+            .model
+            .update(cx, |m, cx| m.arrange_rows(&key, &tokens, Arrange::Nudge(delta), cx));
+        if !moved {
+            return;
+        }
+        let at = self
+            .model
+            .read(cx)
+            .list_rows()
+            .iter()
+            .position(|r| r.occurrence.as_deref() == Some(cursor.as_str()));
+        if let Some(at) = at {
+            self.move_selection(at as isize, cx);
+        }
+        cx.notify();
     }
 
     /// Ctrl+A: every row shown.

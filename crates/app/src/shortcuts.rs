@@ -164,7 +164,7 @@ pub const ENTRIES: &[Entry] = &[
         "move",
         "Move up / down",
         Group::Collect,
-        &["MoveCursorUp", "MoveCursorDown"],
+        &["MoveCursorUp", "MoveCursorDown", "MoveRowUp", "MoveRowDown"],
     )
     .all_keys(),
     entry("undo", "Undo queue change", Group::Collect, &["UndoQueue"]),
