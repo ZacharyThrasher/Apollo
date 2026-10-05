@@ -14,7 +14,7 @@ use crate::player::PlayerModel;
 use crate::search::{HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES};
 use crate::settings::{
     BoolSetting, SettingsModel, AUTO_ADVANCE, CLOSE_TO_TRAY, CONFIRM_ADDS, CRATE_FILE_AND_FORGET,
-    DISCORD_PRESENCE,
+    DIG_KEY, DIG_LEAVE_OUT, DISCORD_PRESENCE,
     GLOBAL_HOTKEYS, HUD_AUTO_HIDE,
     INSTANT_PLAYLISTS, KEY_BADGES, SHOW_SHORTCUT_HINTS,
     MINI_COLLAPSE_ON_BLUR, MINI_DIM, MINI_FADE_CONTROLS, MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP,
@@ -109,7 +109,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(26, cx);
+        let h = self.handles(28, cx);
 
         let home_section = SettingsSection::new("Home")
             .row(self.bool_row(
@@ -183,6 +183,22 @@ impl Render for SettingsPage {
                 "Take songs out of the Crate once filed",
                 &CRATE_FILE_AND_FORGET,
                 &h[24],
+                accent,
+                cx,
+            ))
+            .row(self.bool_row(
+                "setting-dig-key",
+                "Dig key",
+                &DIG_KEY,
+                &h[26],
+                accent,
+                cx,
+            ))
+            .row(self.bool_row(
+                "setting-dig-leave-out",
+                "Leave out songs I already have",
+                &DIG_LEAVE_OUT,
+                &h[27],
                 accent,
                 cx,
             ));

@@ -259,6 +259,12 @@ pub fn arranged(text: String, undoable: bool, cx: &mut App) {
     }
 }
 
+/// Say a short thing that is not an add and has no undo ("Nothing new in this radio"): the pill
+/// alone. Not switched off by Confirm when adding.
+pub fn said(text: &str, cx: &mut App) {
+    arranged(text.to_owned(), false, cx);
+}
+
 /// Songs went into the queue (at the end, or right after the playing one).
 pub fn queued(videos: Vec<String>, cx: &mut App) {
     if videos.is_empty() {
