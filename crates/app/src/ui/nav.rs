@@ -361,7 +361,12 @@ impl RenderOnce for NavItem {
         if self.expanded {
             item.into_any_element()
         } else {
-            item.tooltip(move |_, cx| Tooltip::view(label.clone(), cx))
+            item.tooltip(move |_, cx| {
+                Tooltip::view(
+                    crate::shortcuts::tip_text(&label, crate::shortcuts::Scope::Shell, cx),
+                    cx,
+                )
+            })
                 .into_any_element()
         }
     }

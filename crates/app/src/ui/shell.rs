@@ -16,9 +16,8 @@ use crate::crate_list::{CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
-    CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward, SkimCancel, SkimCrate, SkimKeep,
-    ToggleFullscreen, ToggleLyrics,
-    ToggleMute, UndoQueue, VolumeDown,
+    CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward, ShowShortcuts, SkimCancel,
+    SkimCrate, SkimKeep, ToggleFullscreen, ToggleLyrics, ToggleMute, UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
 };
 use crate::library::{LibraryEdits, LibraryWrites, Notice, Target};
@@ -47,6 +46,7 @@ use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus};
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::blocked_dialog::{self, BlockedDialog, BlockedDialogHandle};
+use crate::ui::cheat_sheet::{self, CheatSheet, CheatSheetHandle};
 use crate::ui::playlist_dialog::{self, DialogHandle, PlaylistDialog};
 use crate::ui::playlist_picker::{self, PlaylistPicker};
 use crate::ui::queue_panel::QueuePanel;
@@ -73,6 +73,9 @@ actions!(
         Quit
     ]
 );
+
+/// How long Ctrl is held before the key badges show.
+pub const BADGE_AFTER: std::time::Duration = std::time::Duration::from_millis(600);
 
 /// Key context of the root view; global shortcuts bind here.
 pub const KEY_CONTEXT: &str = "Shell";
@@ -106,6 +109,7 @@ pub fn bind_keys(cx: &mut App) {
     track_menu::bind_keys(cx);
     playlist_dialog::bind_keys(cx);
     blocked_dialog::bind_keys(cx);
+    cheat_sheet::bind_keys(cx);
     choice_menu::bind_keys(cx);
     crate::ui::vslider::bind_keys(cx);
     crate::ui::mini_player::bind_keys(cx);
@@ -147,6 +151,12 @@ pub struct Shell {
     dialog: Entity<PlaylistDialog>,
     /// The list of blocked artists, with Unblock.
     blocked_dialog: Entity<BlockedDialog>,
+    /// The `?` overlay listing every shortcut.
+    cheat_sheet: Entity<CheatSheet>,
+    /// Ctrl is held (and nothing else); the key badges show once it has been for a moment.
+    ctrl_held: bool,
+    /// Bumped whenever the hold starts or ends, so a stale timer does nothing.
+    badge_gen: u64,
     /// The menu a right-click or a row's More button opens.
     menu: Entity<TrackMenu>,
     /// The pick-one popover of the Output device row and the speed button.
@@ -285,6 +295,27 @@ impl Shell {
             cx.new(|cx| BlockedDialog::new(player.clone(), block_model.clone(), cx));
         cx.observe(&blocked_dialog, |_, _, cx| cx.notify()).detach();
         cx.set_global(BlockedDialogHandle(blocked_dialog.clone()));
+        // A shortcut used while Ctrl is down (Ctrl+Z, say) puts the key badges away. Observed, not
+        // listened for: a keystroke an action took never reaches a key listener.
+        cx.observe_keystrokes(|this, _, _, cx| this.key_pressed(cx))
+            .detach();
+        let cheat_sheet = cx.new(CheatSheet::new);
+        cx.observe(&cheat_sheet, |_, _, cx| cx.notify()).detach();
+        cx.set_global(CheatSheetHandle(cheat_sheet.clone()));
+        {
+            // Tips ("Tip: press C") ride the pill; deferred, because they come from inside a click.
+            let shell = cx.weak_entity();
+            crate::shortcuts::install(
+                settings.clone(),
+                move |text, cx| {
+                    let shell = shell.clone();
+                    cx.defer(move |cx| {
+                        let _ = shell.update(cx, |s, cx| s.show_tip(text, cx));
+                    });
+                },
+                cx,
+            );
+        }
         let crate_page = cx.new(|cx| {
             CratePage::new(
                 crate_model.clone(),
@@ -567,6 +598,9 @@ impl Shell {
             picker,
             dialog,
             blocked_dialog,
+            cheat_sheet,
+            ctrl_held: false,
+            badge_gen: 0,
             menu,
             choices,
             sleep_menu,
@@ -1087,14 +1121,14 @@ impl Shell {
     /// Ctrl+Z: take back the last queue change.
     pub fn undo_queue(&mut self, cx: &mut Context<Self>) {
         if self.player.update(cx, |p, cx| p.undo_queue(cx)) {
-            self.show_pill("Queue restored", cx);
+            self.show_pill("Queue restored", toast::PILL_FOR, cx);
         }
     }
 
     /// Ctrl+Shift+Z: do again what Ctrl+Z took back.
     pub fn redo_queue(&mut self, cx: &mut Context<Self>) {
         if self.player.update(cx, |p, cx| p.redo_queue(cx)) {
-            self.show_pill("Queue redone", cx);
+            self.show_pill("Queue redone", toast::PILL_FOR, cx);
         }
     }
 
@@ -1105,7 +1139,12 @@ impl Shell {
 
     /// Show `text` in the pill for [`toast::PILL_FOR`], fading out over the last bit (not at
     /// all under reduced motion).
-    fn show_pill(&mut self, text: &'static str, cx: &mut Context<Self>) {
+    fn show_pill(
+        &mut self,
+        text: impl Into<gpui::SharedString>,
+        lasts: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
         self.pill_seq += 1;
         let id = self.pill_seq;
         self.pill = Some(PillShown {
@@ -1117,7 +1156,7 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             if animate {
                 cx.background_executor()
-                    .timer(toast::PILL_FOR.saturating_sub(toast::FADE))
+                    .timer(lasts.saturating_sub(toast::FADE))
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     if let Some(p) = this.pill.as_mut().filter(|p| p.id == id) {
@@ -1127,7 +1166,7 @@ impl Shell {
                 });
                 cx.background_executor().timer(toast::FADE).await;
             } else {
-                cx.background_executor().timer(toast::PILL_FOR).await;
+                cx.background_executor().timer(lasts).await;
             }
             let _ = this.update(cx, |this, cx| {
                 if this.pill.as_ref().is_some_and(|p| p.id == id) {
@@ -1138,6 +1177,57 @@ impl Shell {
         })
         .detach();
         cx.notify();
+    }
+
+    /// A one-line shortcut tip ("Tip: press C"), for [`toast::TIP_FOR`].
+    pub fn show_tip(&mut self, text: gpui::SharedString, cx: &mut Context<Self>) {
+        self.show_pill(text, toast::TIP_FOR, cx);
+    }
+
+    /// Ctrl went down or up. Held alone for [`BADGE_AFTER`], the key badges show on the buttons
+    /// that have a single-key shortcut; letting go (or any other key) hides them.
+    fn modifiers_changed(&mut self, m: gpui::Modifiers, cx: &mut Context<Self>) {
+        let ctrl_alone = m.control && !m.alt && !m.shift && !m.platform;
+        if ctrl_alone == self.ctrl_held {
+            return;
+        }
+        self.ctrl_held = ctrl_alone;
+        self.badge_gen += 1;
+        if !ctrl_alone {
+            self.hide_badges(cx);
+            return;
+        }
+        if !crate::shortcuts::badges_enabled(cx) {
+            return;
+        }
+        let generation = self.badge_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BADGE_AFTER).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.ctrl_held && this.badge_gen == generation && crate::shortcuts::set_badges(true, cx) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Any key pressed while Ctrl is down (Ctrl+Z, say) is a shortcut being used, not looked up.
+    fn key_pressed(&mut self, cx: &mut Context<Self>) {
+        if self.ctrl_held {
+            self.badge_gen += 1;
+            self.hide_badges(cx);
+        }
+    }
+
+    fn hide_badges(&mut self, cx: &mut Context<Self>) {
+        if crate::shortcuts::set_badges(false, cx) {
+            cx.notify();
+        }
+    }
+
+    pub fn cheat_sheet(&self) -> &Entity<CheatSheet> {
+        &self.cheat_sheet
     }
 
     pub fn toggle_queue(&mut self, cx: &mut Context<Self>) {
@@ -1196,9 +1286,13 @@ impl Shell {
     }
 
     pub fn install_window_hooks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self._activation = Some(cx.observe_window_activation(window, |_, window, cx| {
+        self._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
             if !window.is_window_active() {
                 crate::ui::tooltip::dismiss_all(cx);
+                // Ctrl released in another window is never heard here.
+                this.ctrl_held = false;
+                this.badge_gen += 1;
+                this.hide_badges(cx);
             }
         }));
     }
@@ -1532,6 +1626,11 @@ impl Render for Shell {
             .read(cx)
             .is_open()
             .then(|| self.blocked_dialog.clone());
+        let cheat_sheet = self
+            .cheat_sheet
+            .read(cx)
+            .is_open()
+            .then(|| self.cheat_sheet.clone());
         let choices = self.choices.read(cx).is_open().then(|| self.choices.clone());
         let sleep_menu = self
             .sleep_menu
@@ -1591,6 +1690,10 @@ impl Render for Shell {
                     m.os_command(OsCommand::SeekBy(SEEK_STEP_MS), cx)
                 });
             }))
+            .on_action(cx.listener(|_, _: &ShowShortcuts, window, cx| cheat_sheet::toggle(window, cx)))
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                this.modifiers_changed(event.modifiers, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_lyrics(cx)))
             .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| this.like_current(cx)))
             .on_action(cx.listener(|this, _: &CrateCurrent, _, cx| this.crate_current(cx)))
@@ -1637,6 +1740,7 @@ impl Render for Shell {
             .children(menu)
             .children(dialog)
             .children(blocked_dialog)
+            .children(cheat_sheet)
             .children(choices)
             .children(sleep_menu)
     }

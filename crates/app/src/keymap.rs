@@ -29,6 +29,7 @@ actions!(
         UndoQueue,
         RedoQueue,
         ToggleFullscreen,
+        ShowShortcuts,
         SkimCrate,
         SkimKeep,
         SkimCancel
@@ -42,14 +43,14 @@ pub const VOLUME_STEP: i8 = 5;
 
 /// Where the plain (unmodified) shortcuts apply: anywhere in the shell unless a text field or a
 /// popup owns the keys.
-const PLAIN: &str = "Shell && !TextField && !TrackMenu && !PlaylistPicker";
+const PLAIN: &str = "Shell && !TextField && !TrackMenu && !PlaylistPicker && !CheatSheet";
 
 /// The extra key context the shell carries while Skim runs: K, Enter and Esc mean something
 /// else only then.
 pub const SKIMMING: &str = "Skimming";
 
 /// Where the Skim keys apply: the plain keys' places, while skimming.
-const SKIM_PLAIN: &str = "Shell && Skimming && !TextField && !TrackMenu && !PlaylistPicker";
+const SKIM_PLAIN: &str = "Shell && Skimming && !TextField && !TrackMenu && !PlaylistPicker && !CheatSheet";
 
 /// The in-app shortcuts. Space, Ctrl+K/F and Esc are bound with the shell's own list.
 pub fn bind_keys(cx: &mut App) {
@@ -69,6 +70,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-z", RedoQueue, plain),
         KeyBinding::new("ctrl-y", RedoQueue, plain),
         KeyBinding::new("f11", ToggleFullscreen, plain),
+        // "?" is Shift+/ on most layouts; a layout that types it on its own key sends "?".
+        KeyBinding::new("shift-/", ShowShortcuts, plain),
+        KeyBinding::new("?", ShowShortcuts, plain),
     ]);
     // Bound after the shell's own Esc (Close Now Playing), so while skimming Esc ends the skim.
     let skim = Some(SKIM_PLAIN);
