@@ -39,7 +39,7 @@ use crate::style::{self, color};
 use crate::ui::anchor;
 use crate::ui::button::{focus_ring, keyboard_focused, IconButton};
 use crate::ui::card::{self, grid, tile, Card};
-use crate::ui::playlist_picker::PlaylistPicker;
+use crate::ui::playlist_picker::{PickerSong, PlaylistPicker};
 use crate::ui::row_actions::{heart_action, more_slot, playlist_action, ACTION_SIZE};
 use crate::ui::search_chips::ChipRow;
 use crate::ui::search_library::LibraryRow;
@@ -64,6 +64,7 @@ actions!(
         LikeSelected,
         CrateSelected,
         PlaylistSelected,
+        TargetSelected,
         BackToField,
         PreviousSuggestion,
         ExtendNext,
@@ -88,6 +89,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("l", LikeSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("c", CrateSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("p", PlaylistSelected, Some(RESULTS_CONTEXT)),
+        KeyBinding::new("a", TargetSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("escape", BackToField, Some(RESULTS_CONTEXT)),
         KeyBinding::new("shift-down", ExtendNext, Some(RESULTS_CONTEXT)),
         KeyBinding::new("shift-up", ExtendPrevious, Some(RESULTS_CONTEXT)),
@@ -720,6 +722,27 @@ impl SearchPage {
         }
     }
 
+    /// The A key: every picked song, or the cursor row's, to the target playlist.
+    fn target_selected(&mut self, _: &TargetSelected, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::target_playlist::key_enabled(cx) {
+            return;
+        }
+        let songs: Vec<PickerSong> = if self.selection.is_bulk() {
+            self.picked_songs(cx)
+                .iter()
+                .map(|s| PickerSong::new(s.track.video_id.as_str(), s.track.title.clone()))
+                .collect()
+        } else {
+            self.selected
+                .and_then(|i| self.songs(cx).get(i).cloned())
+                .map(|s| PickerSong::new(s.track.video_id.as_str(), s.track.title.clone()))
+                .into_iter()
+                .collect()
+        };
+        let at = playlist_anchor(self.selected.unwrap_or_default());
+        crate::target_playlist::add_songs(songs, Some(&at), window, cx);
+    }
+
     fn playlist_selected(
         &mut self,
         _: &PlaylistSelected,
@@ -1074,6 +1097,7 @@ impl Render for SearchPage {
                     .on_action(cx.listener(Self::like_selected))
                     .on_action(cx.listener(Self::crate_selected))
                     .on_action(cx.listener(Self::playlist_selected))
+                    .on_action(cx.listener(Self::target_selected))
                     .on_action(cx.listener(Self::back_to_field))
                     .on_action(cx.listener(Self::extend_next))
                     .on_action(cx.listener(Self::extend_previous))

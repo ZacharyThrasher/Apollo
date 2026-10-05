@@ -17,6 +17,12 @@
 //! * Marks are add-only: a playlist that already holds the song shows its check and cannot be
 //!   marked or unmarked. Taking a song out is done on the playlist's own page.
 //!
+//! The same panel also chooses the target playlist (see `target_playlist`): opened that way its
+//! caption says so, a click or Enter on a playlist makes it the target (and adds the songs it was
+//! opened with, if any) instead of just adding, and a Clear button takes the target away. In both
+//! modes the current target's row carries a star in the accent colour. Typing a new name makes a playlist and targets it.
+//! There is nothing to mark there, so Space does nothing.
+//!
 //! The add is optimistic and rolls back with an error if the service refuses (see
 //! `library::writes`). Settings > Playback can keep the picker open after an add, and switch the
 //! P key off. The playlists added to are remembered as a settings value (`RECENT_PLAYLISTS`).
@@ -41,10 +47,12 @@ use gpui::{
 use crate::assets::Icon;
 use crate::library::edits::{Edit, EditEvent, LibraryEdits};
 use crate::library::model::Load;
+use crate::library::source::PROBE_VIDEO;
 use crate::library::writes::LibraryWrites;
 use crate::player::PlayerModel;
 use crate::settings::{SettingsModel, PICKER_KEY, PICKER_STAY_OPEN, RECENT_PLAYLISTS};
 use crate::style::{self, color};
+use crate::target_playlist::{Target, TargetHandle};
 use crate::ui::button::keyboard_focused;
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
@@ -292,7 +300,11 @@ pub fn push_recent(recents: &mut Vec<String>, id: &str) {
 // ---- the picker ---------------------------------------------------------------------------------
 
 struct Open {
+    /// The songs being added; in target mode, the ones to add once the target is chosen (maybe
+    /// none).
     songs: Vec<PickerSong>,
+    /// Choosing the target playlist rather than adding: see the module docs.
+    target_mode: bool,
     playlists: Load<Vec<PlaylistTarget>>,
     /// The row the keyboard is on, counted from the top of the list (Create row included).
     cursor: usize,
@@ -315,6 +327,8 @@ pub struct PlaylistPicker {
     settings: Entity<SettingsModel>,
     focus: FocusHandle,
     retry_focus: FocusHandle,
+    /// The Clear button of the target mode's caption.
+    clear_focus: FocusHandle,
     field: Entity<TextField>,
     /// Listens to the filter box (Enter, typing); made on the first open, which has a window.
     field_events: Option<Subscription>,
@@ -323,6 +337,8 @@ pub struct PlaylistPicker {
     next_request: u64,
     /// The name of a playlist this picker asked to be made, until it exists.
     awaiting_create: Option<String>,
+    /// The playlist awaited is to become the target when it exists.
+    awaiting_target: bool,
 }
 
 /// The shell's picker, reachable from any screen.
@@ -344,6 +360,21 @@ pub fn open_songs(
     };
     let bounds = anchor.and_then(|key| crate::ui::anchor::bounds_of(key, cx));
     handle.update(cx, |p, cx| p.open_songs(songs, bounds, window, cx));
+}
+
+/// Open the shell's picker to choose the target playlist (what A adds to). `songs` are added to
+/// the playlist as it is chosen; none just changes the target. `anchor` as for [`open_songs`].
+pub fn open_target(
+    songs: Vec<PickerSong>,
+    anchor: Option<&str>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(handle) = cx.try_global::<PickerHandle>().map(|h| h.0.clone()) else {
+        return;
+    };
+    let bounds = anchor.and_then(|key| crate::ui::anchor::bounds_of(key, cx));
+    handle.update(cx, |p, cx| p.open_target(songs, bounds, window, cx));
 }
 
 /// The P key is on (Settings > Playback), for the shell's picker.
@@ -377,12 +408,14 @@ impl PlaylistPicker {
             settings,
             focus: cx.focus_handle(),
             retry_focus: cx.focus_handle().tab_stop(true),
+            clear_focus: cx.focus_handle().tab_stop(true),
             field,
             field_events: None,
             scroll: ScrollHandle::new(),
             open: None,
             next_request: 1,
             awaiting_create: None,
+            awaiting_target: false,
         }
     }
 
@@ -538,6 +571,29 @@ impl PlaylistPicker {
         if songs.is_empty() {
             return;
         }
+        self.open_panel(songs, false, anchor, window, cx);
+    }
+
+    /// Open the panel to choose the target playlist; `songs` (maybe none) go into it as it is
+    /// chosen.
+    pub fn open_target(
+        &mut self,
+        songs: Vec<PickerSong>,
+        anchor: Option<Bounds<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_panel(songs, true, anchor, window, cx);
+    }
+
+    fn open_panel(
+        &mut self,
+        songs: Vec<PickerSong>,
+        target_mode: bool,
+        anchor: Option<Bounds<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let return_focus = self
             .open
             .as_ref()
@@ -558,6 +614,7 @@ impl PlaylistPicker {
         }
         self.open = Some(Open {
             songs,
+            target_mode,
             playlists: Load::Loading,
             cursor: 0,
             marked: Vec::new(),
@@ -604,8 +661,17 @@ impl PlaylistPicker {
         };
         open.request = request;
         open.playlists = Load::Loading;
-        // The service says which playlists hold one song: the first.
-        let video = open.songs[0].video_id.clone();
+        // The service says which playlists hold one song: the first. Choosing a target with no
+        // song at hand asks about the playing one, or a fixed public video (only the list of
+        // playlists matters there).
+        let video = match open.songs.first() {
+            Some(song) => song.video_id.clone(),
+            None => self
+                .player
+                .read(cx)
+                .current_video()
+                .unwrap_or_else(|| PROBE_VIDEO.to_owned()),
+        };
         let source = self.player.read(cx).library_source();
         cx.spawn(async move |this, cx| {
             let result = match source {
@@ -672,6 +738,10 @@ impl PlaylistPicker {
         let Some(open) = self.open.as_ref() else {
             return false;
         };
+        // Choosing a target: nothing is "held", any playlist can be chosen.
+        if open.target_mode {
+            return false;
+        }
         let Load::Ready(list) = &open.playlists else {
             return false;
         };
@@ -700,6 +770,9 @@ impl PlaylistPicker {
         let Some(cursor) = self.open.as_ref().map(|o| o.cursor) else {
             return;
         };
+        if self.open.as_ref().is_some_and(|o| o.target_mode) {
+            return;
+        }
         let Some(Row::Playlist(ix)) = layout.row(cursor) else {
             return;
         };
@@ -787,6 +860,10 @@ impl PlaylistPicker {
         if plan.is_empty() {
             return;
         }
+        if self.open.as_ref().is_some_and(|o| o.target_mode) {
+            self.run_target(plan, window, cx);
+            return;
+        }
         let (Some(list), Some(open)) = (self.list(), self.open.as_ref()) else {
             return;
         };
@@ -821,6 +898,67 @@ impl PlaylistPicker {
         }
     }
 
+    /// Choosing the target: the playlist picked (or made) becomes the target, the songs the panel
+    /// was opened with go into it, and the panel closes.
+    fn run_target(&mut self, plan: Plan, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.open.as_ref() else {
+            return;
+        };
+        let songs = open.songs.clone();
+        if let Some(name) = plan.create {
+            // The playlist becomes the target once it exists (see `edited`).
+            self.awaiting_create = Some(name.clone());
+            self.awaiting_target = true;
+            if songs.is_empty() {
+                self.edits.update(cx, |e, cx| e.create(name, None, cx));
+            } else {
+                let videos = songs.iter().map(|s| s.video_id.clone()).collect();
+                self.edits
+                    .update(cx, |e, cx| e.create_songs(Edit::Create, name, videos, cx));
+            }
+            self.close(window, cx);
+            return;
+        }
+        let Some(chosen) = plan
+            .add
+            .first()
+            .and_then(|&ix| self.list().and_then(|list| list.get(ix)))
+            .cloned()
+        else {
+            return;
+        };
+        self.remember(std::slice::from_ref(&chosen.id), cx);
+        if let Some(handle) = cx.try_global::<TargetHandle>().map(|h| h.0.clone()) {
+            handle.update(cx, |m, cx| {
+                m.set(&chosen.id, &chosen.title, cx);
+                m.add(&songs, cx);
+            });
+        }
+        self.close(window, cx);
+    }
+
+    /// Clear: there is no target any more.
+    pub fn clear_target(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.open.as_ref().is_some_and(|o| o.target_mode) {
+            return;
+        }
+        if let Some(handle) = cx.try_global::<TargetHandle>().map(|h| h.0.clone()) {
+            handle.update(cx, |m, cx| m.clear(cx));
+        }
+        self.close(window, cx);
+    }
+
+    /// The playlist chosen as the target now: what the list marks with a check.
+    pub fn current_target(&self, cx: &App) -> Option<Target> {
+        cx.try_global::<TargetHandle>()
+            .and_then(|h| h.0.read(cx).target(cx))
+    }
+
+    /// Whether the panel is open to choose the target.
+    pub fn is_choosing_target(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.target_mode)
+    }
+
     /// A playlist this picker asked for now exists: it is on top of the recents, and in the list
     /// if the panel is still open.
     fn edited(&mut self, event: &EditEvent, cx: &mut Context<Self>) {
@@ -831,6 +969,11 @@ impl PlaylistPicker {
                 self.awaiting_create = None;
                 let id = bare_playlist_id(collection.id.as_str()).to_owned();
                 self.remember(std::slice::from_ref(&id), cx);
+                if std::mem::take(&mut self.awaiting_target) {
+                    if let Some(handle) = cx.try_global::<TargetHandle>().map(|h| h.0.clone()) {
+                        handle.update(cx, |m, cx| m.set(&id, &collection.title, cx));
+                    }
+                }
                 if let Some(open) = self.open.as_mut() {
                     if let Load::Ready(list) = &mut open.playlists {
                         list.insert(
@@ -847,7 +990,10 @@ impl PlaylistPicker {
                 }
                 cx.notify();
             }
-            EditEvent::Failed(Edit::Create) => self.awaiting_create = None,
+            EditEvent::Failed(Edit::Create) => {
+                self.awaiting_create = None;
+                self.awaiting_target = false;
+            }
             _ => {}
         }
     }
@@ -871,8 +1017,7 @@ pub fn create_label(name: &str) -> String {
     format!("Create \u{201C}{name}\u{201D}")
 }
 
-/// What one playlist row shows. A later "target playlist" star is one more field here and one
-/// more element in [`playlist_row`].
+/// What one playlist row shows.
 struct RowView {
     ix: usize,
     title: SharedString,
@@ -880,6 +1025,8 @@ struct RowView {
     held: bool,
     /// Marked for Enter: a check in the accent colour.
     marked: bool,
+    /// The target playlist (what A adds to): a star in the accent colour.
+    target: bool,
     cursor: bool,
 }
 
@@ -890,6 +1037,9 @@ impl Render for PlaylistPicker {
         };
         let (accent, _) = self.player.read(cx).accent_now();
         let ring = keyboard_focused(&self.field.read(cx).focus_handle(cx), window);
+        let target_mode = open.target_mode;
+        // The playlist that is the target now carries a star.
+        let current_target = self.current_target(cx);
 
         let body: AnyElement = match &open.playlists {
             Load::Idle | Load::Loading => skeleton_rows(!cx.reduce_motion()),
@@ -937,6 +1087,9 @@ impl Render for PlaylistPicker {
                                         title: target.title.clone().into(),
                                         held: self.holds_all(ix, cx),
                                         marked: open.marked.contains(&target.id),
+                                        target: current_target
+                                            .as_ref()
+                                            .is_some_and(|t| t.id == target.id),
                                         cursor,
                                     },
                                     accent,
@@ -966,15 +1119,43 @@ impl Render for PlaylistPicker {
             }
         };
 
-        let caption = (open.songs.len() > 1).then(|| {
-            style::text_style(div(), typography::CAPTION, cx)
-                .debug_selector(|| "picker-caption".into())
-                .flex_none()
-                .px(px(spacing::S3))
-                .pb(px(spacing::S1))
-                .text_color(color::text_secondary())
-                .child(format!("{} songs", open.songs.len()))
-        });
+        let caption = if target_mode {
+            let clear = current_target.is_some().then(|| {
+                let entity = cx.entity();
+                div().debug_selector(|| "picker-clear-target".into()).child(
+                    TextButton::new("picker-clear-target", &self.clear_focus, "Clear", accent)
+                        .on_click(move |window, cx| {
+                            entity.update(cx, |m, cx| m.clear_target(window, cx))
+                        }),
+                )
+            });
+            Some(
+                style::text_style(div(), typography::CAPTION, cx)
+                    .id("picker-caption")
+                    .debug_selector(|| "picker-caption".into())
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .items_center()
+                    .justify_between()
+                    .px(px(spacing::S3))
+                    .pb(px(spacing::S1))
+                    .text_color(color::text_secondary())
+                    .child("Target playlist")
+                    .children(clear),
+            )
+        } else {
+            (open.songs.len() > 1).then(|| {
+                style::text_style(div(), typography::CAPTION, cx)
+                    .id("picker-caption")
+                    .debug_selector(|| "picker-caption".into())
+                    .flex_none()
+                    .px(px(spacing::S3))
+                    .pb(px(spacing::S1))
+                    .text_color(color::text_secondary())
+                    .child(format!("{} songs", open.songs.len()))
+            })
+        };
 
         let panel = div()
             .id("playlist-picker")
@@ -982,7 +1163,11 @@ impl Render for PlaylistPicker {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .role(gpui::Role::Dialog)
-            .aria_label("Add to playlist")
+            .aria_label(if target_mode {
+                "Choose target playlist"
+            } else {
+                "Add to playlist"
+            })
             .flex()
             .flex_col()
             .w(px(PANEL_WIDTH))
@@ -1112,6 +1297,7 @@ fn playlist_row(
         title,
         held,
         marked,
+        target,
         cursor,
     } = view;
     let title_color = if held {
@@ -1153,6 +1339,15 @@ fn playlist_row(
                 .text_color(title_color)
                 .child(title),
         )
+        .when(target, |d| {
+            d.child(
+                gpui::svg()
+                    .path(Icon::StarFilled.path())
+                    .size(px(layout::ICON_SIZE))
+                    .flex_none()
+                    .text_color(color::accent(accent)),
+            )
+        })
         .when(held || marked, |d| {
             d.child(
                 gpui::svg()

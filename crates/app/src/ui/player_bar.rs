@@ -24,6 +24,11 @@ const VOLUME_WIDTH: f32 = 96.0;
 /// The Skim pill: 20px high, with a 6px accent dot.
 const SKIM_PILL_HEIGHT: f32 = 20.0;
 const SKIM_DOT: f32 = 6.0;
+/// The target pill: the Skim pill's height, with a 12px playlist glyph before the name.
+const TARGET_PILL_HEIGHT: f32 = 20.0;
+const TARGET_GLYPH: f32 = 12.0;
+/// Where the target pill records its bounds, so the picker it opens hangs from it.
+pub const TARGET_ANCHOR: &str = "bar-target-anchor";
 /// The slider narrows to this when the right block is at its minimum width and holds four
 /// buttons beside it (mini player, lyrics, queue, heart and mute at 32px, with their gaps).
 const VOLUME_MIN_WIDTH: f32 = 40.0;
@@ -54,6 +59,8 @@ pub struct BarFocus {
     pub retry: FocusHandle,
     /// The art and title block, which opens Now Playing.
     pub now_playing: FocusHandle,
+    /// The target playlist pill under the artist, when shown.
+    pub target: FocusHandle,
 }
 
 impl BarFocus {
@@ -88,6 +95,10 @@ pub struct PlayerBar {
     /// The playing track is liked (what the heart shows).
     pub liked: bool,
     pub on_like: Rc<Handler>,
+    /// The target playlist's name, when the pill is on and a target is set.
+    pub target: Option<SharedString>,
+    /// Opens the picker to change the target.
+    pub on_target: Rc<Handler>,
 }
 
 fn volume_icon(volume: u8, muted: bool) -> Icon {
@@ -144,6 +155,57 @@ impl RenderOnce for PlayerBar {
                 )
                 .child(skim.label())
         });
+        // The target playlist, under the artist: a pill that reopens the picker. Its own press is
+        // its own, not the block's (which opens Now Playing).
+        let target_pill = self.target.clone().map(|name| {
+            let focus = self.focus.target.clone();
+            let ring = keyboard_focused(&focus, window);
+            let open = self.on_target.clone();
+            let label: SharedString = format!("Target playlist: {name}").into();
+            style::text_style(div(), typography::CAPTION, cx)
+                .id("target-pill")
+                .debug_selector(|| "target-pill".into())
+                .relative()
+                .flex()
+                .flex_row()
+                .items_center()
+                .self_start()
+                .max_w_full()
+                .min_w_0()
+                .gap(px(spacing::S1))
+                .px(px(spacing::S2))
+                .h(px(TARGET_PILL_HEIGHT))
+                .rounded(px(TARGET_PILL_HEIGHT / 2.0))
+                .bg(color::bg_overlay())
+                .text_color(color::text_secondary())
+                .cursor_pointer()
+                .hover(|s| s.text_color(color::text_primary()))
+                .track_focus(&focus)
+                .role(gpui::Role::Button)
+                .aria_label(label.clone())
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |event, window, cx| {
+                    // Space is the global play/pause key.
+                    if let gpui::ClickEvent::Keyboard(k) = event {
+                        if k.button == gpui::KeyboardButton::Space {
+                            return;
+                        }
+                    }
+                    cx.stop_propagation();
+                    open(window, cx);
+                })
+                .tooltip(move |_, cx| Tooltip::view(label.clone(), cx))
+                .child(
+                    gpui::svg()
+                        .path(Icon::PlaylistAdd.path())
+                        .size(px(TARGET_GLYPH))
+                        .flex_none()
+                        .text_color(color::text_secondary()),
+                )
+                .child(div().min_w_0().truncate().child(name))
+                .child(crate::ui::anchor::probe(TARGET_ANCHOR))
+                .when(ring, |d| d.child(focus_ring(accent_hsla, TARGET_PILL_HEIGHT / 2.0)))
+        });
         // The block opens (and closes) Now Playing. Inert while nothing is queued.
         let ring = controls && keyboard_focused(&self.focus.now_playing, window);
         let left = div()
@@ -196,7 +258,8 @@ impl RenderOnce for PlayerBar {
                         color::text_primary(),
                         cx,
                     ))
-                    .child(artist_line),
+                    .child(artist_line)
+                    .children(target_pill),
             );
 
         // ---- centre: transport + progress -------------------------------------------

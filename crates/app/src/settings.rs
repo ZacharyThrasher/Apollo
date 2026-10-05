@@ -70,6 +70,16 @@ pub const PICKER_KEY: BoolSetting = BoolSetting::new("picker_key", true);
 /// by commas. Shown on top of the picker. Kept per app, not per account (an id of another
 /// account's playlist is simply never found in the list).
 pub const RECENT_PLAYLISTS: TextSetting = TextSetting::new("picker_recent_playlists", "");
+/// Playlists > A adds to the target playlist: the A key adds the playing song (or the song under
+/// the cursor, or every picked song) to the target playlist; with no target it opens the picker
+/// to choose one. Off leaves A unbound.
+pub const TARGET_KEY: BoolSetting = BoolSetting::new("target_key", true);
+/// Playlists > Show target playlist in player bar: the small pill with the target's name. Off
+/// hides it (the target and the A key stay).
+pub const TARGET_PILL: BoolSetting = BoolSetting::new("target_pill", true);
+/// The target playlist, as `account <TAB> playlist id <TAB> name` (see `target_playlist`). Empty
+/// is none. Not in the diagnostics report: it carries a playlist's name.
+pub const TARGET_PLAYLIST: TextSetting = TextSetting::new("target_playlist", "");
 /// Playlists > Show More like this: a playlist of your own ends with a short list of songs like
 /// its own, each with a + that adds it in place. Off hides the section and fetches nothing.
 pub const MORE_LIKE_THIS: BoolSetting = BoolSetting::new("more_like_this", true);
@@ -152,6 +162,8 @@ pub const REPORTED_KEYS: &[&str] = &[
     PERSONAL_SHELVES.key,
     PICKER_STAY_OPEN.key,
     PICKER_KEY.key,
+    TARGET_KEY.key,
+    TARGET_PILL.key,
     MORE_LIKE_THIS.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,

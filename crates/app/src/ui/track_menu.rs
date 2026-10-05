@@ -33,6 +33,7 @@ use crate::library::writes::LibraryWrites;
 use crate::player::PlayerModel;
 use crate::shortcuts::{self, Scope};
 use crate::style::{self, color};
+use crate::target_playlist::TargetHandle;
 use crate::ui::anchor;
 use crate::ui::duplicates_dialog;
 use crate::ui::playlist_dialog::{self, Mode};
@@ -224,6 +225,9 @@ pub enum Command {
     /// Opens the Edit playlist dialog (name, description, privacy).
     EditPlaylist,
     DeletePlaylist,
+    /// Make a playlist of the account's own the target that A adds to (or stop it being one).
+    SetTarget,
+    ClearTarget,
     RemoveFromPlaylist,
     /// Send the row (or every picked row) to the top of a playlist of your own.
     MoveToTop,
@@ -293,6 +297,8 @@ pub struct Facts {
     pub song_saved: Option<bool>,
     /// Whether the artist the block item acts on is blocked now (its item then lets them back).
     pub artist_blocked: bool,
+    /// The playlist is the target playlist now (its item then clears the target).
+    pub is_target: bool,
 }
 
 /// The menu's items in groups (a separator sits between groups). `liked` is the song's heart.
@@ -330,6 +336,11 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             }
             out.push(vec![item(Command::CopyLink, Icon::Link, "Copy link")]);
             if facts.own_playlist {
+                out.push(vec![if facts.is_target {
+                    item(Command::ClearTarget, Icon::Dismiss, "Clear target")
+                } else {
+                    item(Command::SetTarget, Icon::PlaylistAdd, "Set as target")
+                }]);
                 let mut own = vec![item(Command::EditPlaylist, Icon::Edit, "Edit playlist\u{2026}")];
                 if facts.page_open {
                     own.push(item(
@@ -809,6 +820,10 @@ impl TrackMenu {
                     false,
                     Facts {
                         own_playlist: edits.is_editable(c),
+                        is_target: cx
+                            .try_global::<TargetHandle>()
+                            .and_then(|h| h.0.read(cx).target(cx))
+                            .is_some_and(|t| t.id == c.library_key()),
                         page_open: cx
                             .try_global::<duplicates_dialog::DuplicatesDialogHandle>()
                             .is_some_and(|h| h.0.read(cx).can_open(c, cx)),
@@ -1190,6 +1205,16 @@ impl TrackMenu {
             }
             (Command::DeletePlaylist, Subject::Collection(c)) => {
                 playlist_dialog::open(Mode::Delete(c), window, cx);
+            }
+            (Command::SetTarget, Subject::Collection(c)) => {
+                if let Some(handle) = cx.try_global::<TargetHandle>().map(|h| h.0.clone()) {
+                    handle.update(cx, |m, cx| m.set(c.library_key(), &c.title, cx));
+                }
+            }
+            (Command::ClearTarget, Subject::Collection(_)) => {
+                if let Some(handle) = cx.try_global::<TargetHandle>().map(|h| h.0.clone()) {
+                    handle.update(cx, |m, cx| m.clear(cx));
+                }
             }
             _ => {}
         }
@@ -1623,7 +1648,7 @@ mod tests {
             ..Facts::default()
         };
         assert_eq!(
-            commands_with(&card(), own)[3],
+            commands_with(&card(), own)[4],
             vec![EditPlaylist, DeletePlaylist],
             "a card that is not the open page has no Remove duplicates"
         );
@@ -1634,8 +1659,29 @@ mod tests {
                 vec![Play, Shuffle],
                 vec![AddToQueue, StartRadio],
                 vec![CopyLink],
+                vec![SetTarget],
                 vec![EditPlaylist, RemoveDuplicates, DeletePlaylist],
             ]
+        );
+    }
+
+    #[test]
+    fn an_own_playlist_offers_to_be_the_target_and_to_stop_being_it() {
+        use Command::*;
+        let own = |is_target| Facts {
+            own_playlist: true,
+            is_target,
+            ..Facts::default()
+        };
+        let flat = |facts| commands_with(&card(), facts).concat();
+        assert!(flat(own(false)).contains(&SetTarget));
+        assert!(!flat(own(false)).contains(&ClearTarget));
+        assert!(flat(own(true)).contains(&ClearTarget));
+        assert!(!flat(own(true)).contains(&SetTarget));
+        let foreign = flat(Facts::default());
+        assert!(
+            !foreign.contains(&SetTarget) && !foreign.contains(&ClearTarget),
+            "only a playlist you can add to can be the target"
         );
     }
 

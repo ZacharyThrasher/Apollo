@@ -20,12 +20,8 @@ use apollo_provider::{
 use apollo_services_common::{unix_now, SecretString, SessionProvider};
 use innertube::{Locale, Session};
 
-use super::source::{ArtistContent, LibrarySource, TrackRow};
+use super::source::{ArtistContent, LibrarySource, TrackRow, PROBE_VIDEO};
 use crate::art::DecodedArt;
-
-/// The public video the editable-playlist list is asked about: the sheet is per video, and only
-/// its list of playlists is read. Read-only; it adds the video nowhere.
-const PROBE_VIDEO: &str = "dQw4w9WgXcQ";
 
 const ART_TIMEOUT: Duration = Duration::from_secs(10);
 const ART_MAX_BYTES: u64 = 8 * 1024 * 1024;

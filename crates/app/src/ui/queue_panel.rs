@@ -54,6 +54,7 @@ actions!(
         LikeCursor,
         CrateCursor,
         PlaylistCursor,
+        TargetCursor,
         MoveCursorUp,
         MoveCursorDown,
         ExtendUp,
@@ -98,6 +99,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("c", CrateCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("a", TargetCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", MoveCursorDown, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-up", ExtendUp, Some(KEY_CONTEXT)),
@@ -459,6 +461,31 @@ impl QueuePanel {
             )]
         };
         crate::ui::playlist_picker::open_songs(songs, None, window, cx);
+    }
+
+    /// The A key: every picked track, or the one under the cursor, to the target playlist.
+    fn target_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let songs: Vec<crate::ui::playlist_picker::PickerSong> = if self.selection.is_bulk() {
+            self.picked_songs()
+                .into_iter()
+                .map(|s| {
+                    crate::ui::playlist_picker::PickerSong::new(
+                        s.track.video_id.as_str(),
+                        s.track.title.clone(),
+                    )
+                })
+                .collect()
+        } else {
+            let view = self.fresh_view(cx);
+            let Some(row) = self.cursor.and_then(|id| view.row_by_id(id)) else {
+                return;
+            };
+            vec![crate::ui::playlist_picker::PickerSong::new(
+                row.track.video_id.as_str(),
+                row.track.title.clone(),
+            )]
+        };
+        crate::target_playlist::add_songs(songs, None, window, cx);
     }
 
     /// Set the track under the cursor (or every picked one) aside in the Crate.
@@ -1278,6 +1305,9 @@ impl Render for QueuePanel {
             .on_action(cx.listener(|this, _: &CrateCursor, window, cx| this.crate_cursor(window, cx)))
             .on_action(
                 cx.listener(|this, _: &PlaylistCursor, window, cx| this.playlist_cursor(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &TargetCursor, window, cx| this.target_cursor(window, cx)),
             )
             .on_action(cx.listener(|this, _: &MoveCursorUp, _, cx| this.move_cursor(-1, cx)))
             .on_action(cx.listener(|this, _: &MoveCursorDown, _, cx| this.move_cursor(1, cx)))

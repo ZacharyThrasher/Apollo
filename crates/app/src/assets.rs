@@ -69,6 +69,7 @@ icons! {
     HeartRegular => "heart-regular",
     PlaylistAdd => "playlist-add-regular",
     Checkmark => "checkmark-regular",
+    StarFilled => "star-filled",
     LyricsRegular => "lyrics-regular",
     LyricsFilled => "lyrics-filled",
     MoreHorizontal => "more-horizontal-regular",

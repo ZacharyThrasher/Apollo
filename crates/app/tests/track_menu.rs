@@ -608,7 +608,8 @@ fn a_playlist_card_gets_the_shorter_menu_and_plays(cx: &mut TestAppContext) {
     search(&page, vcx);
     let card = bounds(vcx, "search-playlist-0");
     right_click(vcx, card.center());
-    // "Road Trip" is one of the account's own playlists: Rename and Delete follow Copy link.
+    // "Road Trip" is one of the account's own playlists: Set as target, Edit and Delete follow
+    // Copy link.
     assert_eq!(
         commands(&page, vcx),
         [
@@ -617,6 +618,7 @@ fn a_playlist_card_gets_the_shorter_menu_and_plays(cx: &mut TestAppContext) {
             Command::AddToQueue,
             Command::StartRadio,
             Command::CopyLink,
+            Command::SetTarget,
             Command::EditPlaylist,
             Command::DeletePlaylist
         ]

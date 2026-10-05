@@ -307,6 +307,15 @@ Applied to `crate_list.rs`, `ui/crate_page.rs` and the `crate_items.pos` column 
 3. **Keyboard:** Alt+Up / Alt+Down move the row under the cursor one place, the cursor and scroll follow it (same keys as the queue). Nothing moves until the cursor is on a row; the ends stay put.
 4. **Undo:** Ctrl+Z still covers the queue only. A Crate reorder is not undoable; Alt+Up / Alt+Down undoes a keyboard move.
 
+## Target playlist decisions (coordinator brief, 2026-10-05; built choices flagged)
+`target_playlist.rs`, `ui/playlist_picker.rs` (target mode), `ui/player_bar.rs`; the key is **A**.
+1. **Pill:** the target's name in a small pill in the player bar, matching the Skim pill: 20px high, full radius, bg.overlay, 11px caption in text.secondary (text.primary on hover). Built choice: it sits under the artist line in the left block, not in the right block, which is already full at the minimum width; a 12px playlist glyph (text.secondary) starts it and the name truncates. It has no accent dot, so it never reads as the Skim pill. A click, or Enter on its focus ring, reopens the picker to change the target. No target, no pill.
+2. **Picker, target mode:** the same 280px popover. The caption row reads "Target playlist" (11px caption, text.secondary) with a **Clear** text button at its right while a target is set. Enter or a click on a playlist makes it the target (and adds the song A was pressed on); a typed new name offers the Create row, which makes the playlist and targets it. Space marks nothing there.
+3. **Star:** the target's row, in every picker (adding or choosing), ends with a filled star in the accent colour (`StarFilled`, 16px; drawn here, not Fluent). It sits before a held or marked check.
+4. **More menu:** a playlist of your own gets **Set as target** (Clear target when it is the target) in its own group above Edit and Delete.
+5. **No feedback beyond the pill and the star:** no toasts on success. A refused add rolls back and shows the existing "Couldn't add to playlist" toast.
+6. **Settings > Playlists:** "A adds to the target playlist" (on) and "Show target playlist in player bar" (on).
+
 ## Playlist arranging decisions (coordinator brief, 2026-10-05; built choices flagged)
 Applied to the playlist page of a playlist you own (`ui/library.rs`, `library/model/arrange.rs`, `ui/duplicates_dialog.rs`, the track menu). Pure planning is in `crates/domain/src/arrange.rs`.
 1. **Keys:** Alt+Up / Alt+Down move the cursor row, or every picked song, one place (same keys as the queue and the Crate); the cursor follows. A pick already at the end stops the whole selection. Not while the filter has text.
