@@ -37,6 +37,10 @@ pub struct UndoHistory {
     /// Bumped by every change to the stacks, so a caller can tell nothing else was recorded
     /// between two moments.
     generation: u64,
+    /// How many steps are undoable, counted past the ones the limit dropped: a record or redo
+    /// adds one, an undo takes one off. Other histories (playlist edits) note it when they
+    /// record, which is how they tell what happened before and after them.
+    depth: i64,
 }
 
 impl Default for UndoHistory {
@@ -56,6 +60,7 @@ impl UndoHistory {
             redo: Vec::new(),
             limit: limit.max(1),
             generation: 0,
+            depth: 0,
         }
     }
 
@@ -75,11 +80,17 @@ impl UndoHistory {
         self.generation
     }
 
+    /// How deep the history is now; see the field.
+    pub fn depth(&self) -> i64 {
+        self.depth
+    }
+
     /// Forget everything (sign-out, a different account).
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
         self.generation += 1;
+        self.depth = 0;
     }
 
     /// An action turned `before` (with the playing track at `position_ms`) into `after`.
@@ -105,6 +116,7 @@ impl UndoHistory {
         }
         self.redo.clear();
         self.generation += 1;
+        self.depth += 1;
         true
     }
 
@@ -118,6 +130,7 @@ impl UndoHistory {
             changed_current: step.changed_current,
         });
         self.generation += 1;
+        self.depth -= 1;
         Some(step)
     }
 
@@ -133,7 +146,31 @@ impl UndoHistory {
             self.undo.pop_front();
         }
         self.generation += 1;
+        self.depth += 1;
         Some(step)
+    }
+}
+
+/// Which history Ctrl+Z takes from. The queue's steps and the playlist edits' steps are kept
+/// apart (different things to put back), but they are one line in time: the newest of either
+/// goes first. A playlist edit notes the queue history's [`UndoHistory::depth`] when it is
+/// made; queue steps recorded since then leave the depth above that note.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Newest {
+    Queue,
+    Playlist,
+    Nothing,
+}
+
+/// The newest step of the two histories. `playlist_note` is the queue depth noted by the newest
+/// playlist step (`None`: there is none); `queue_depth` the queue history's depth now, and
+/// `queue_undoable` whether it has a step to take.
+pub fn newest(queue_depth: i64, queue_undoable: bool, playlist_note: Option<i64>) -> Newest {
+    match playlist_note {
+        Some(note) if queue_undoable && queue_depth > note => Newest::Queue,
+        Some(_) => Newest::Playlist,
+        None if queue_undoable => Newest::Queue,
+        None => Newest::Nothing,
     }
 }
 
@@ -370,6 +407,40 @@ mod tests {
         undo(&mut h, &mut q);
         let minted = q.add_to_queue(tracks(&["fresh"]))[0];
         assert!(minted.get() > added.get());
+    }
+
+    #[test]
+    fn the_depth_follows_records_undos_and_redos_past_the_limit() {
+        let mut h = UndoHistory::with_limit(2);
+        let mut q = Queue::new();
+        q.play_context(tracks(&["a"]), 0);
+        assert_eq!(h.depth(), 0);
+        for i in 0..4 {
+            act(&mut h, &mut q, |q| {
+                q.add_to_queue(vec![t(&format!("m{i}"))]);
+            });
+        }
+        assert_eq!((h.depth(), h.undo_len()), (4, 2), "the limit drops steps, not depth");
+        undo(&mut h, &mut q);
+        assert_eq!(h.depth(), 3);
+        redo(&mut h, &mut q);
+        assert_eq!(h.depth(), 4);
+        h.clear();
+        assert_eq!(h.depth(), 0);
+    }
+
+    #[test]
+    fn the_newest_step_is_found_across_both_histories() {
+        // Nothing noted by a playlist step: the queue's, if it has one.
+        assert_eq!(newest(0, false, None), Newest::Nothing);
+        assert_eq!(newest(2, true, None), Newest::Queue);
+        // A playlist edit made at queue depth 2: queue steps since then go first.
+        assert_eq!(newest(3, true, Some(2)), Newest::Queue);
+        assert_eq!(newest(2, true, Some(2)), Newest::Playlist);
+        // Queue steps undone back below the note: the playlist edit is still the newest left.
+        assert_eq!(newest(1, true, Some(2)), Newest::Playlist);
+        // A queue that cannot undo (empty, or a skim) leaves the playlist step.
+        assert_eq!(newest(3, false, Some(2)), Newest::Playlist);
     }
 
     #[test]

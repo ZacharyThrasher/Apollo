@@ -20,10 +20,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use apollo_domain::library::{PlaylistTarget, WriteFailure};
+use apollo_domain::library::{AddedRow, PlaylistTarget, WriteFailure};
 use gpui::{Context, Entity, EventEmitter, SharedString};
 
 use super::source::LibrarySource;
+use super::undo::{Action, Made, PlaylistLog, PlaylistRef, Step};
 use crate::page_cache::PageCache;
 use crate::player::PlayerModel;
 
@@ -90,6 +91,8 @@ pub struct LibraryWrites {
     bulk_running: bool,
     notice: Option<Notice>,
     next_notice: u64,
+    /// The playlist edits Ctrl+Z can take back (see [`super::undo`]).
+    log: PlaylistLog,
 }
 
 impl EventEmitter<WritesEvent> for LibraryWrites {}
@@ -110,6 +113,7 @@ impl LibraryWrites {
             bulk_running: false,
             notice: None,
             next_notice: 1,
+            log: PlaylistLog::default(),
         }
     }
 
@@ -166,6 +170,7 @@ impl LibraryWrites {
         self.disliking.clear();
         self.disliked.clear();
         self.added.clear();
+        self.log.clear();
         self.checked = None;
         self.notice = None;
         self.check_current(cx);
@@ -572,7 +577,7 @@ impl LibraryWrites {
     // ---- add to a playlist ---------------------------------------------------------------
 
     /// Add a track to a playlist: shown as held at once, taken back (with an error) if the
-    /// service does not take it.
+    /// service does not take it. The add is a step for Ctrl+Z from the moment it is asked for.
     pub fn add_to_playlist(
         &mut self,
         playlist: &PlaylistTarget,
@@ -593,15 +598,20 @@ impl LibraryWrites {
             self.add_failed(&key, WriteFailure::Unsupported, cx);
             return;
         };
+        let step = self.record_added(playlist, vec![video_id.to_owned()], cx);
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let (playlist_id, video) = key.clone();
             let result = {
                 let source = source.clone();
                 cx.background_executor()
-                    .spawn(async move { source.add_to_playlist(&playlist_id, &video) })
+                    .spawn(async move {
+                        source.add_to_playlist_rows(&playlist_id, std::slice::from_ref(&video))
+                    })
                     .await
             };
+            // `Some`: the rows the service named. `None`: the add is known to have landed (read
+            // back), but which rows it made is not.
             let result = match result {
                 Err(failure) if failure.outcome_unknown() => {
                     // Read it back: the list says which playlists hold the track.
@@ -615,11 +625,11 @@ impl LibraryWrites {
                         })
                         .await;
                     match held {
-                        Some(true) => Ok(()),
+                        Some(true) => Ok(None),
                         _ => Err(failure),
                     }
                 }
-                other => other,
+                other => other.map(Some),
             };
             let _ = this.update(cx, |m, cx| {
                 if m.generation != generation {
@@ -630,12 +640,18 @@ impl LibraryWrites {
                     cache.invalidate_collection(&key.0);
                 }
                 match result {
-                    Ok(()) => cx.emit(WritesEvent::PlaylistAddSettled {
-                        playlist_id: key.0.clone(),
-                        video_id: key.1.clone(),
-                        added: true,
-                    }),
-                    Err(failure) => m.add_failed(&key, failure, cx),
+                    Ok(rows) => {
+                        m.log.settle_added(step, rows);
+                        cx.emit(WritesEvent::PlaylistAddSettled {
+                            playlist_id: key.0.clone(),
+                            video_id: key.1.clone(),
+                            added: true,
+                        })
+                    }
+                    Err(failure) => {
+                        m.log.drop_step(step);
+                        m.add_failed(&key, failure, cx)
+                    }
                 }
             });
         })
@@ -644,7 +660,7 @@ impl LibraryWrites {
 
     /// Add several tracks to a playlist, in order, as one request (the Crate's "Add all to…"):
     /// shown as held at once, taken back (with one error) if the service does not take them.
-    /// Tracks the playlist already holds are skipped by the service.
+    /// Tracks the playlist already holds are skipped by the service. One step for Ctrl+Z.
     pub fn add_many_to_playlist(
         &mut self,
         playlist: &PlaylistTarget,
@@ -668,6 +684,10 @@ impl LibraryWrites {
             self.add_many_failed(&fresh, WriteFailure::Unsupported, cx);
             return;
         };
+        let step = (!fresh.is_empty()).then(|| {
+            let videos = fresh.iter().map(|(_, video)| video.clone()).collect();
+            self.record_added(playlist, videos, cx)
+        });
         let generation = self.generation;
         let playlist_id = playlist.id.clone();
         let videos = video_ids.to_vec();
@@ -676,7 +696,7 @@ impl LibraryWrites {
                 let (source, playlist_id, videos) =
                     (source.clone(), playlist_id.clone(), videos.clone());
                 cx.background_executor()
-                    .spawn(async move { source.add_many_to_playlist(&playlist_id, &videos) })
+                    .spawn(async move { source.add_to_playlist_rows(&playlist_id, &videos) })
                     .await
             };
             let result = match result {
@@ -693,11 +713,11 @@ impl LibraryWrites {
                         })
                         .await;
                     match held {
-                        Some(true) => Ok(()),
+                        Some(true) => Ok(None),
                         _ => Err(failure),
                     }
                 }
-                other => other,
+                other => other.map(Some),
             };
             let _ = this.update(cx, |m, cx| {
                 if m.generation != generation {
@@ -706,8 +726,18 @@ impl LibraryWrites {
                 if let Some(cache) = PageCache::try_global(cx) {
                     cache.invalidate_collection(&playlist_id);
                 }
-                if let Err(failure) = result {
-                    m.add_many_failed(&fresh, failure, cx);
+                match result {
+                    Ok(rows) => {
+                        if let Some(step) = step {
+                            m.log.settle_added(step, rows);
+                        }
+                    }
+                    Err(failure) => {
+                        if let Some(step) = step {
+                            m.log.drop_step(step);
+                        }
+                        m.add_many_failed(&fresh, failure, cx)
+                    }
                 }
             });
         })
@@ -741,6 +771,73 @@ impl LibraryWrites {
         });
         self.raise(add_failure_text(failure), cx);
         cx.notify();
+    }
+
+    // ---- undo ----------------------------------------------------------------------------
+
+    fn record_added(
+        &mut self,
+        playlist: &PlaylistTarget,
+        videos: Vec<String>,
+        cx: &gpui::App,
+    ) -> u64 {
+        self.record_playlist_step(
+            PlaylistRef { id: playlist.id.clone(), title: playlist.title.clone() },
+            Action::Added { videos, made: Made::Pending },
+            cx,
+        )
+    }
+
+    /// Note a playlist edit for Ctrl+Z; returns the step's id. The queue history's depth is noted
+    /// with it, which is how Ctrl+Z knows what came first.
+    pub fn record_playlist_step(
+        &mut self,
+        playlist: PlaylistRef,
+        action: Action,
+        cx: &gpui::App,
+    ) -> u64 {
+        let note = self.player.read(cx).queue_undo_depth();
+        self.log.record(playlist, action, note)
+    }
+
+    /// The queue history depth noted by the newest playlist edit that can be undone.
+    pub fn playlist_undo_note(&self) -> Option<i64> {
+        self.log.newest_note()
+    }
+
+    /// The newest playlist edit is an add the service has not answered yet.
+    pub fn newest_edit_pending(&self) -> bool {
+        self.log.last().is_some_and(Step::is_pending)
+    }
+
+    /// Take the newest playlist edit to undo it.
+    pub fn take_playlist_step(&mut self) -> Option<Step> {
+        self.log.take_last()
+    }
+
+    /// The edit did not happen after all: it is nothing to undo.
+    pub fn drop_playlist_step(&mut self, id: u64) {
+        self.log.drop_step(id);
+    }
+
+    /// Some rows of a removal did not go (a refused write ended it): they are not the step's.
+    pub fn keep_removed_except(&mut self, id: u64, not_removed: &[String]) {
+        self.log.keep_removed_except(id, not_removed);
+    }
+
+    /// Songs taken back out of a playlist are no longer ones this session added to it.
+    pub fn forget_added(&mut self, playlist_id: &str, videos: &[String]) {
+        for video in videos {
+            self.added.remove(&(playlist_id.to_owned(), video.clone()));
+        }
+    }
+
+    /// The rows the service named for the newest add, for tests.
+    pub fn newest_added_rows(&self) -> Option<Vec<AddedRow>> {
+        match &self.log.last()?.action {
+            Action::Added { made: Made::Rows(rows), .. } => Some(rows.clone()),
+            _ => None,
+        }
     }
 
     // ---- notices ------------------------------------------------------------------------

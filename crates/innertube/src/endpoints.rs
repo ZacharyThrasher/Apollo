@@ -767,17 +767,17 @@ impl InnerTube {
     /// added a second time. That also makes the request safe to repeat: the transport retries a
     /// connect error or timeout, and a request that did land the first time must not add the
     /// track twice. The service answers `STATUS_SUCCEEDED` or says no; anything else is
-    /// [`Error::Refused`].
+    /// [`Error::Refused`]. The rows the answer says it made come back (empty when it names none).
     pub async fn add_to_playlist(
         &self,
         client: &YouTubeClient,
         playlist_id: &str,
         video_id: &str,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<browse::AddedVideo>, Error> {
         let body = add_to_playlist_body(self.context_for(client), playlist_id, video_id);
         let value = self.post("browse/edit_playlist", client, &body, true).await?;
         if browse::edit_succeeded(&value) {
-            Ok(())
+            Ok(browse::added_videos(&value))
         } else {
             Err(Error::Refused("playlist edit was not accepted".into()))
         }
@@ -785,20 +785,44 @@ impl InnerTube {
 
     /// Add several videos to a playlist the account owns in one request, in the order given: one
     /// `ACTION_ADD_VIDEO` per video, each with `DEDUPE_OPTION_SKIP` like [`Self::add_to_playlist`]
-    /// (so the request is as safe to repeat). An empty list sends nothing.
+    /// (so the request is as safe to repeat). An empty list sends nothing. The rows the answer
+    /// says it made come back.
     pub async fn add_many_to_playlist(
         &self,
         client: &YouTubeClient,
         playlist_id: &str,
         video_ids: &[String],
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<browse::AddedVideo>, Error> {
         if video_ids.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let body = add_many_to_playlist_body(self.context_for(client), playlist_id, video_ids);
         let value = self.post("browse/edit_playlist", client, &body, true).await?;
         if browse::edit_succeeded(&value) {
-            Ok(())
+            Ok(browse::added_videos(&value))
+        } else {
+            Err(Error::Refused("playlist edit was not accepted".into()))
+        }
+    }
+
+    /// Add videos to a playlist the account owns even when it already holds them (an undone
+    /// removal puts back a copy the playlist had twice): no dedupe option is sent. Without
+    /// `DEDUPE_OPTION_SKIP` a repeat would add the songs twice, so this goes out once
+    /// (`post_once`) and the caller settles an unknown outcome by reading the playlist back. The
+    /// rows the answer says it made come back.
+    pub async fn add_again_to_playlist(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<Vec<browse::AddedVideo>, Error> {
+        if video_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let body = add_body(self.context_for(client), playlist_id, video_ids, false);
+        let value = self.post_once("browse/edit_playlist", client, &body, true).await?;
+        if browse::edit_succeeded(&value) {
+            Ok(browse::added_videos(&value))
         } else {
             Err(Error::Refused("playlist edit was not accepted".into()))
         }
@@ -1252,6 +1276,17 @@ fn add_many_to_playlist_body(
     playlist_id: &str,
     video_ids: &[String],
 ) -> serde_json::Value {
+    add_body(context, playlist_id, video_ids, true)
+}
+
+/// One `ACTION_ADD_VIDEO` per video; `skip_duplicates` asks the service to leave out a song the
+/// playlist already holds.
+fn add_body(
+    context: Context,
+    playlist_id: &str,
+    video_ids: &[String],
+    skip_duplicates: bool,
+) -> serde_json::Value {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Body {
@@ -1264,7 +1299,8 @@ fn add_many_to_playlist_body(
     struct Action {
         action: &'static str,
         added_video_id: String,
-        dedupe_option: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dedupe_option: Option<&'static str>,
     }
     serde_json::to_value(Body {
         context,
@@ -1274,7 +1310,7 @@ fn add_many_to_playlist_body(
             .map(|video_id| Action {
                 action: "ACTION_ADD_VIDEO",
                 added_video_id: video_id.clone(),
-                dedupe_option: "DEDUPE_OPTION_SKIP",
+                dedupe_option: skip_duplicates.then_some("DEDUPE_OPTION_SKIP"),
             })
             .collect(),
     })
@@ -1377,6 +1413,17 @@ mod tests {
         assert_eq!(sent, ["a1", "b2", "c3"]);
         assert!(actions.iter().all(|a| a["action"] == "ACTION_ADD_VIDEO"
             && a["dedupeOption"] == "DEDUPE_OPTION_SKIP"));
+    }
+
+    #[test]
+    fn adding_a_song_again_sends_no_dedupe_option() {
+        let (tube, client) = tube();
+        let ids = ["a1".to_owned()];
+        let body = add_body(tube.context_for(&client), "PLabc", &ids, false);
+        assert_eq!(
+            body["actions"],
+            json!([{ "action": "ACTION_ADD_VIDEO", "addedVideoId": "a1" }])
+        );
     }
 
     #[test]

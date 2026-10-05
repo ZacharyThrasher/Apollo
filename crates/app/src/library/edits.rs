@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use apollo_domain::library::{
-    is_user_playlist_id, Collection, CollectionKind, PlaylistEdit, PlaylistTarget, Privacy,
+    is_user_playlist_id, AddedRow, Collection, CollectionKind, PlaylistEdit, PlaylistTarget, Privacy,
     WriteFailure,
 };
 use apollo_domain::listing::LoadFailure;
@@ -37,6 +37,7 @@ use apollo_domain::model::BrowseId;
 use gpui::{Context, Entity, EventEmitter};
 
 use super::model::Collections;
+use super::undo::{Action, PlaylistRef};
 use super::source::{LibrarySource, TrackRow};
 use super::writes::LibraryWrites;
 use crate::player::PlayerModel;
@@ -85,6 +86,8 @@ pub enum Edit {
     MoveSong,
     Save,
     Unsave,
+    /// Taking back a playlist edit (Ctrl+Z).
+    Undo,
 }
 
 /// What a failed edit says: what happened in six words or fewer.
@@ -102,6 +105,7 @@ pub fn failure_text(edit: Edit, failure: WriteFailure) -> &'static str {
             Edit::MoveSong => "Couldn't move song",
             Edit::Save => "Couldn't save to library",
             Edit::Unsave => "Couldn't remove from library",
+            Edit::Undo => "Couldn't undo that",
         },
     }
 }
@@ -328,6 +332,187 @@ pub fn move_row(
         },
         Err(failure) => Err(failure),
     }
+}
+
+/// Where a song put back by [`restore`] landed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Restored {
+    /// Back at the place it was taken from.
+    pub in_place: usize,
+    /// At the end of the playlist: the row it sat in front of is gone, or the service would not
+    /// move it.
+    pub at_end: usize,
+}
+
+/// A failed read before anything was sent is a definite no, not an unknown outcome.
+fn unread(failure: LoadFailure) -> WriteFailure {
+    match failure {
+        LoadFailure::Session => WriteFailure::Session,
+        LoadFailure::Throttled => WriteFailure::Throttled,
+        _ => WriteFailure::Rejected,
+    }
+}
+
+/// The tokens of the rows an add made, for `videos` in order, when `made` names a row for each.
+fn tokens_named(made: &[AddedRow], videos: &[String]) -> Option<Vec<String>> {
+    let mut left: Vec<&AddedRow> = made.iter().collect();
+    videos
+        .iter()
+        .map(|video| {
+            let at = left.iter().position(|r| r.video_id == *video)?;
+            Some(left.remove(at).set_video_id.clone())
+        })
+        .collect()
+}
+
+/// The tokens of the rows that appeared in `after` since `known`, matched to `videos` in order.
+/// `None` unless they are exactly those songs: an unproven restore is a failed one.
+fn tokens_appeared(
+    after: &[TrackRow],
+    known: &HashSet<String>,
+    videos: &[String],
+) -> Option<Vec<String>> {
+    let mut fresh: Vec<(&str, &str)> = after
+        .iter()
+        .filter_map(|r| Some((r.track.video_id.as_str(), r.occurrence.as_deref()?)))
+        .filter(|(_, token)| !known.contains(*token))
+        .collect();
+    if fresh.len() != videos.len() {
+        return None;
+    }
+    videos
+        .iter()
+        .map(|video| {
+            let at = fresh.iter().position(|(v, _)| *v == video.as_str())?;
+            Some(fresh.remove(at).1.to_owned())
+        })
+        .collect()
+}
+
+/// Put songs back in a playlist the account owns, each in front of the row it sat before (its
+/// anchor, by token), or at the end when that row is gone or the service will not move it.
+/// `items` is each song and its anchor, in the order they were in.
+///
+/// The songs are added in one request that does not skip a song the playlist holds (a repeat that
+/// was taken out comes back), so it goes out once; a lost reply is settled by reading the
+/// playlist, and what that cannot prove is a failure. The moves go one at a time.
+pub fn restore(
+    source: &dyn LibrarySource,
+    expect: &Option<String>,
+    collection: &Collection,
+    items: &[(String, Option<String>)],
+) -> Result<Restored, WriteFailure> {
+    let playlist_id = collection.library_key();
+    editable(playlist_id)?;
+    guard(source, expect)?;
+    if items.is_empty() {
+        return Ok(Restored::default());
+    }
+    let before = all_rows(source, collection).map_err(unread)?;
+    let known: HashSet<String> = before.iter().filter_map(|r| r.occurrence.clone()).collect();
+    let videos: Vec<String> = items.iter().map(|(video, _)| video.clone()).collect();
+    let made = match source.add_again_to_playlist(playlist_id, &videos) {
+        Ok(rows) => rows,
+        Err(failure) if failure.outcome_unknown() => Vec::new(),
+        Err(failure) => return Err(failure),
+    };
+    let tokens = match tokens_named(&made, &videos) {
+        Some(tokens) => tokens,
+        // The reply did not name every row (or was lost): the playlist says what is new.
+        None => {
+            let after = all_rows(source, collection).map_err(|_| WriteFailure::Unknown)?;
+            tokens_appeared(&after, &known, &videos).ok_or(WriteFailure::Unknown)?
+        }
+    };
+    let mut placed = Restored::default();
+    for ((_, anchor), token) in items.iter().zip(&tokens) {
+        let Some(anchor) = anchor else {
+            // Nothing stayed after it: the end is where it was.
+            placed.in_place += 1;
+            continue;
+        };
+        if !known.contains(anchor) {
+            placed.at_end += 1;
+            continue;
+        }
+        let moved = match source.move_in_playlist(playlist_id, token, Some(anchor)) {
+            Ok(()) => true,
+            Err(failure) if failure.outcome_unknown() => all_rows(source, collection)
+                .map(|rows| {
+                    let at = |t: &str| rows.iter().position(|r| r.occurrence.as_deref() == Some(t));
+                    matches!((at(token), at(anchor)), (Some(row), Some(anchor)) if row < anchor)
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if moved {
+            placed.in_place += 1;
+        } else {
+            placed.at_end += 1;
+        }
+    }
+    Ok(placed)
+}
+
+/// Put the rows of a playlist the account owns back in an earlier order (`wanted`, by token): the
+/// rows still there in that order, any row added since after them. The moves are sent one at a
+/// time, each settled like [`move_row`]; a failure stops there, leaving the playlist as far along
+/// as it got.
+pub fn reorder(
+    source: &dyn LibrarySource,
+    expect: &Option<String>,
+    collection: &Collection,
+    wanted: &[String],
+) -> Result<(), WriteFailure> {
+    let playlist_id = collection.library_key();
+    editable(playlist_id)?;
+    guard(source, expect)?;
+    let rows = all_rows(source, collection).map_err(unread)?;
+    let current: Vec<String> = rows.iter().filter_map(|r| r.occurrence.clone()).collect();
+    // A row with no token cannot be named to the service.
+    if current.len() != rows.len() {
+        return Err(WriteFailure::Rejected);
+    }
+    let desired = apollo_domain::arrange::back_to(&current, wanted);
+    for step in apollo_domain::arrange::steps(&current, &desired) {
+        move_row(source, expect, collection, &step.token, step.before.as_deref(), &step.after)?;
+    }
+    Ok(())
+}
+
+/// Take back the making of a playlist that was made holding `videos`: the playlist is deleted
+/// when it still holds exactly those songs (`true`), else only those songs come out of it and the
+/// rest of what it holds stays (`false`). Each part is settled like [`delete`] and [`remove`].
+pub fn undo_created(
+    source: &dyn LibrarySource,
+    expect: &Option<String>,
+    collection: &Collection,
+    videos: &[String],
+) -> Result<bool, WriteFailure> {
+    let playlist_id = collection.library_key();
+    editable(playlist_id)?;
+    guard(source, expect)?;
+    let rows = all_rows(source, collection).map_err(unread)?;
+    let mut held: Vec<&str> = rows.iter().map(|r| r.track.video_id.as_str()).collect();
+    let mut wanted: Vec<&str> = videos.iter().map(String::as_str).collect();
+    held.sort_unstable();
+    wanted.sort_unstable();
+    if held == wanted {
+        delete(source, expect, playlist_id)?;
+        return Ok(true);
+    }
+    let mut left: Vec<&TrackRow> = rows.iter().collect();
+    for video in videos {
+        let Some(at) = left
+            .iter()
+            .position(|r| r.track.video_id.as_str() == video && r.occurrence.is_some())
+        else {
+            continue;
+        };
+        let row = left.remove(at);
+        remove(source, expect, collection, video, row.occurrence.as_deref().unwrap_or_default())?;
+    }
+    Ok(false)
 }
 
 /// Save a playlist or album to the library (`saved`) or take it out. `save_id` is what the save
@@ -788,6 +973,7 @@ impl LibraryEdits {
     ) {
         let known = self.membership.playlists.clone();
         let asked = title.clone();
+        let made_with = video_ids.clone();
         self.run(
             "create".into(),
             Stale::Library,
@@ -805,11 +991,52 @@ impl LibraryEdits {
                         thumbnail: None,
                     };
                     m.note_created(&id, &collection.title, cx);
+                    // Ctrl+Z takes the playlist back.
+                    let playlist = PlaylistRef { id, title: collection.title.clone() };
+                    m.writes.update(cx, |w, cx| {
+                        w.record_playlist_step(playlist, Action::Created { videos: made_with }, cx)
+                    });
                     cx.emit(EditEvent::Created(collection));
                 }
                 Err(failure) => m.fail(edit, failure, cx),
             },
         );
+    }
+
+    /// Take back the making of a playlist (Ctrl+Z): it is deleted when it still holds only the
+    /// songs it was made with, else just those songs come out of it (see [`undo_created`]).
+    pub fn undo_create(&mut self, playlist: PlaylistRef, videos: Vec<String>, cx: &mut Context<Self>) {
+        let collection = Collection {
+            kind: CollectionKind::Playlist,
+            id: BrowseId::new(format!("VL{}", playlist.id)),
+            title: playlist.title,
+            subtitle: Some("Playlist".into()),
+            thumbnail: None,
+        };
+        let key = collection.library_key().to_owned();
+        let asked = collection.clone();
+        let started = self.run(
+            format!("playlist:{key}"),
+            Stale::Collection(key.clone()),
+            cx,
+            move |source, expect| undo_created(source, expect, &asked, &videos),
+            move |m, result, cx| match result {
+                Ok(true) => {
+                    m.membership.playlists.remove(&key);
+                    m.membership.playlist_titles.remove(&collection.title);
+                    if let Some(set) = m.membership.editable.as_mut() {
+                        set.remove(&key);
+                    }
+                    cx.emit(EditEvent::Deleted(collection));
+                }
+                Ok(false) => cx.emit(EditEvent::Edited(collection)),
+                Err(failure) => m.fail(Edit::Undo, failure, cx),
+            },
+        );
+        if !started {
+            // A write for this playlist is out: not now.
+            self.writes.update(cx, |w, cx| w.raise(super::writes::BUSY_TEXT, cx));
+        }
     }
 
     /// Change a playlist the account owns: only what `change` carries (its title already cleaned)

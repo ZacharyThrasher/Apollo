@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apollo_domain::library::{
-    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy,
+    bare_playlist_id, AddedRow, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy,
     WriteFailure, LIKED_MUSIC_BROWSE_ID,
 };
 use apollo_domain::listing::{LoadFailure, Page};
@@ -151,6 +151,8 @@ struct SimState {
     disliked: Vec<String>,
     /// `(bare playlist id, video id)` added through `add_to_playlist`, oldest first.
     added: Vec<(String, String)>,
+    /// Counter for the tokens of rows put back by `add_again_to_playlist`.
+    next_row: usize,
     writes: WriteBehaviour,
     /// Makes `playlists_for` fail (the picker's error state).
     playlists: Option<LoadFailure>,
@@ -220,6 +222,7 @@ impl SimState {
             liked: FIXTURES.iter().take(6).map(|f| f.id.to_owned()).collect(),
             disliked: Vec::new(),
             added: Vec::new(),
+            next_row: 0,
             writes: WriteBehaviour::default(),
             playlists: None,
             log: Vec::new(),
@@ -1108,6 +1111,30 @@ impl SimLibrary {
         Some(rows)
     }
 
+    /// Add the videos the playlist does not hold from an add (the service skips the rest), and
+    /// return the rows that made.
+    fn add_skipping_held(&self, playlist_id: &str, video_ids: &[String]) -> Vec<AddedRow> {
+        let mut made = Vec::new();
+        let mut state = self.state();
+        for video_id in video_ids {
+            let key = (playlist_id.to_owned(), video_id.clone());
+            if state.added.contains(&key) {
+                continue;
+            }
+            state.added.push(key);
+            let token = format!("occ-added-{playlist_id}-{video_id}");
+            if let Some(rows) = state.edited_rows.get_mut(playlist_id) {
+                let n = rows.len();
+                let mut row = liked_row(video_id, n);
+                row.occurrence = Some(token.clone());
+                row.liked = None;
+                rows.push(row);
+            }
+            made.push(AddedRow { video_id: video_id.clone(), set_video_id: token });
+        }
+        made
+    }
+
     /// A write received: logged, and answered as the behaviour says. The first is whether the
     /// write lands (a lost reply lands it too), the second what the caller is told.
     fn begin_write(&self, what: String, subject: &str) -> (bool, Result<(), WriteFailure>) {
@@ -1518,18 +1545,7 @@ impl LibrarySource for SimLibrary {
         let lands = self.write_answer(format!("add:{playlist_id}"), video_id);
         let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
         if applies {
-            let mut state = self.state();
-            let key = (playlist_id.to_owned(), video_id.to_owned());
-            if !state.added.contains(&key) {
-                state.added.push(key);
-                if let Some(rows) = state.edited_rows.get_mut(playlist_id) {
-                    let n = rows.len();
-                    let mut row = liked_row(video_id, n);
-                    row.occurrence = Some(format!("occ-added-{playlist_id}-{video_id}"));
-                    row.liked = None;
-                    rows.push(row);
-                }
-            }
+            self.add_skipping_held(playlist_id, std::slice::from_ref(&video_id.to_owned()));
         }
         lands.map(|_| ())
     }
@@ -1543,23 +1559,56 @@ impl LibrarySource for SimLibrary {
         let lands = self.write_answer(format!("add-many:{playlist_id}"), &video_ids.join(","));
         let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
         if applies {
-            let mut state = self.state();
-            for video_id in video_ids {
-                let key = (playlist_id.to_owned(), video_id.clone());
-                if state.added.contains(&key) {
-                    continue;
-                }
-                state.added.push(key);
-                if let Some(rows) = state.edited_rows.get_mut(playlist_id) {
-                    let n = rows.len();
-                    let mut row = liked_row(video_id, n);
-                    row.occurrence = Some(format!("occ-added-{playlist_id}-{video_id}"));
-                    row.liked = None;
-                    rows.push(row);
-                }
-            }
+            self.add_skipping_held(playlist_id, video_ids);
         }
         lands.map(|_| ())
+    }
+
+    fn add_to_playlist_rows(
+        &self,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        let (what, subject) = match video_ids {
+            [video] => (format!("add:{playlist_id}"), video.clone()),
+            _ => (format!("add-many:{playlist_id}"), video_ids.join(",")),
+        };
+        let lands = self.write_answer(what, &subject);
+        let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        let rows = if applies {
+            self.add_skipping_held(playlist_id, video_ids)
+        } else {
+            Vec::new()
+        };
+        // A lost reply names no rows, whatever landed.
+        lands.map(|_| rows)
+    }
+
+    fn add_again_to_playlist(
+        &self,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        let lands = self.write_answer(format!("add-again:{playlist_id}"), &video_ids.join(","));
+        let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        let mut made = Vec::new();
+        if applies {
+            let mut rows = self.rows(&format!("VL{playlist_id}")).unwrap_or_default();
+            let mut state = self.state();
+            for video_id in video_ids {
+                state.next_row += 1;
+                let token = format!("occ-again-{playlist_id}-{}", state.next_row);
+                let mut row = liked_row(video_id, rows.len());
+                row.occurrence = Some(token.clone());
+                row.liked = None;
+                rows.push(row);
+                made.push(AddedRow { video_id: video_id.clone(), set_video_id: token });
+            }
+            state.edited_rows.insert(playlist_id.to_owned(), rows);
+        }
+        lands.map(|_| made)
     }
 
     fn account_token(&self) -> Option<String> {
@@ -1681,7 +1730,12 @@ impl LibrarySource for SimLibrary {
         if applies {
             let mut rows = self.rows(&format!("VL{playlist_id}")).unwrap_or_default();
             rows.retain(|r| r.occurrence.as_deref() != Some(occurrence));
-            self.state().edited_rows.insert(playlist_id.to_owned(), rows);
+            let mut state = self.state();
+            // A row an add made is no longer something the playlist was added to.
+            state.added.retain(|(p, v)| {
+                !(p == playlist_id && occurrence == format!("occ-added-{p}-{v}"))
+            });
+            state.edited_rows.insert(playlist_id.to_owned(), rows);
         }
         reply
     }

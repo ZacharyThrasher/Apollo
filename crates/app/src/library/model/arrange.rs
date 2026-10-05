@@ -9,6 +9,7 @@ use apollo_domain::library::Collection;
 use gpui::Context;
 
 use super::{Entry, LibraryModel, PageEdit};
+use crate::library::undo::{Action, PlaylistRef, RemovedRow};
 
 /// How a set of rows is arranged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +76,7 @@ impl LibraryModel {
             return false;
         }
         let collection = d.collection.clone();
+        self.note_reorder(&collection, tokens, cx);
         for step in steps {
             self.queue_edit(
                 collection.clone(),
@@ -124,31 +126,72 @@ impl LibraryModel {
     }
 
     /// Take the rows holding these tokens out of the playlist page on top (the repeats the
-    /// Remove duplicates dialog listed). Each goes at once; the writes follow one at a time, by
-    /// the row's own token, so the copy that was listed is the one that goes. Returns how many.
+    /// Remove duplicates dialog listed, or the rows a menu removes). Each goes at once; the writes
+    /// follow one at a time, by the row's own token, so the copy that was listed is the one that
+    /// goes. All together are one step for Ctrl+Z, which remembers where each sat. Returns how
+    /// many went.
     pub fn remove_rows(
         &mut self,
         playlist_key: &str,
         occurrences: &[String],
         cx: &mut Context<Self>,
     ) -> usize {
-        let held: Vec<&String> = match self.stack.last() {
-            Some(Entry::Collection(d)) => occurrences
-                .iter()
-                .filter(|o| {
-                    d.listing
-                        .items()
-                        .iter()
-                        .any(|r| r.occurrence.as_deref() == Some(o.as_str()))
-                })
-                .collect(),
-            _ => return 0,
+        let Some(Entry::Collection(d)) = self.stack.last_mut() else {
+            return 0;
         };
-        let tokens: Vec<String> = held.into_iter().cloned().collect();
-        for token in &tokens {
-            self.remove_row(playlist_key, token, cx);
+        if d.collection.library_key() != playlist_key || !d.can_edit() {
+            return 0;
         }
-        tokens.len()
+        let items = d.listing.items();
+        let mut removed = Vec::new();
+        for (index, row) in items.iter().enumerate() {
+            let Some(token) = row.occurrence.as_deref() else {
+                continue;
+            };
+            if !occurrences.iter().any(|o| o == token) {
+                continue;
+            }
+            // Back in front of the first row after it that stays.
+            let anchor = items[index + 1..]
+                .iter()
+                .filter_map(|r| r.occurrence.clone())
+                .find(|t| !occurrences.contains(t));
+            removed.push(RemovedRow { row: row.clone(), index, anchor });
+        }
+        if removed.is_empty() {
+            return 0;
+        }
+        let gone: Vec<&str> = removed
+            .iter()
+            .filter_map(|r| r.row.occurrence.as_deref())
+            .collect();
+        d.listing
+            .retain(|r| !r.occurrence.as_deref().is_some_and(|t| gone.contains(&t)));
+        let collection = d.collection.clone();
+        let playlist = PlaylistRef {
+            id: collection.library_key().to_owned(),
+            title: collection.title.clone(),
+        };
+        let count = removed.len();
+        let step = self.writes.update(cx, |w, cx| {
+            w.record_playlist_step(playlist, Action::Removed { rows: removed.clone() }, cx)
+        });
+        for row in removed {
+            let Some(occurrence) = row.row.occurrence else {
+                continue;
+            };
+            self.queue_edit(
+                collection.clone(),
+                PageEdit::Remove {
+                    video_id: row.row.track.video_id.as_str().to_owned(),
+                    occurrence,
+                    step: Some(step),
+                },
+                cx,
+            );
+        }
+        cx.notify();
+        count
     }
 
     /// The collection of the page on top, when it is a playlist the account can arrange.

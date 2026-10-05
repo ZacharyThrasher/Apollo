@@ -305,7 +305,7 @@ Applied to `crate_list.rs`, `ui/crate_page.rs` and the `crate_items.pos` column 
 1. **Order:** the Crate reads top to bottom like a playlist being built. A new song goes to the bottom; songs already there keep the order the page showed (newest on top) when the migration ran. Arranging is local only: no account writes until you save or add it to a playlist, which follow the order shown.
 2. **Mouse:** a row drags to a new place with a ghost of the row under the pointer (the same ghost as the queue and playlist pages). The row it would land before shows a 2px rounded line in text.secondary above it, the same line as the queue and playlist pages (the accent stays reserved; coordinator call, 2026-10-05). An empty row-high slot after the last song takes a drop at the bottom. Dropping a row on itself or just after itself changes nothing.
 3. **Keyboard:** Alt+Up / Alt+Down move the row under the cursor one place, the cursor and scroll follow it (same keys as the queue). Nothing moves until the cursor is on a row; the ends stay put.
-4. **Undo:** Ctrl+Z still covers the queue only. A Crate reorder is not undoable; Alt+Up / Alt+Down undoes a keyboard move.
+4. **Undo:** Ctrl+Z covers the queue and, in one shared line of time, playlist edits (adds, removals, moves; see `docs/keyboard.md`, "Undo covers playlist edits too"). A Crate reorder is not undoable; Alt+Up / Alt+Down undoes a keyboard move.
 
 ## Target playlist decisions (coordinator brief, 2026-10-05; built choices flagged)
 `target_playlist.rs`, `ui/playlist_picker.rs` (target mode), `ui/player_bar.rs`; the key is **A**.

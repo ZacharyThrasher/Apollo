@@ -25,8 +25,8 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | C | Set the playing song aside in the Crate (in the queue, Library and Search lists: the song under the cursor) |
 | P | Add to playlist: open the picker for the playing song (in the queue, Library, Search and Crate lists: the song under the cursor). Settings > Playback > "P opens the playlist picker" switches it off |
 | A | Add to the target playlist: the playing song (in the queue, Library, Search and Crate lists: the song under the cursor; with 2 or more picked, all of them). With no target set the picker opens to choose one. Settings > Playlists > "A adds to the target playlist" switches it off. See "The target playlist" |
-| Ctrl+Z | Undo the last queue change |
-| Ctrl+Shift+Z or Ctrl+Y | Redo it |
+| Ctrl+Z | Undo the last queue change or playlist edit, whichever came last (see "Undo") |
+| Ctrl+Shift+Z or Ctrl+Y | Redo a queue change (playlist edits have no redo) |
 | Esc | Close Now Playing |
 | F11 | Fullscreen while Now Playing is open (leaves fullscreen when Now Playing closes) |
 
@@ -107,6 +107,25 @@ Shuffle switch. Fifty steps are kept for the session. It never interrupts the so
 playing; only when the undone action had changed that song (a new list replaced the queue) does
 the old song come back, paused where it was. A small "Queue restored" pill shows for 2 seconds.
 
+### Undo covers playlist edits too
+
+Ctrl+Z is one line in time across the queue and your playlists: it takes back whichever of the
+two changed last, then the one before, and so on. Playlist edits it covers (twenty are kept for
+the session, in memory only; a restart or a different account starts empty):
+
+| Edit | Ctrl+Z does |
+|---|---|
+| Adding songs to a playlist (P picker, the Create row, A target add, Crate "Add all to…", More like this +, a multi-select add) | Takes out exactly the rows that add made, by the row tokens YouTube Music returned. Another copy of the same song is never touched. |
+| Making a playlist with songs (the picker's Create row, Save as playlist from the queue or the Crate) | Deletes the playlist if it still holds only those songs; if you have added others since, only the songs it was made with come out. |
+| Removing songs from a playlist (Remove from playlist, a multi-select remove, Remove duplicates) | Puts them back where they were (each in front of the row that followed it), even a repeat of a song the playlist still holds. If the row it sat in front of is gone, it goes at the end and a notice says "Put back at the end instead". |
+| Moving songs in a playlist (drag, Alt+Up / Alt+Down, Move to top / bottom) | Puts the rows back in the order they had; rows added since stay after them. |
+
+Several songs removed or moved at once are one step. After an undo the pill reads "Undid: added
+3 songs to Gym Mix" for 4 seconds; a failed undo shows the usual error ("Couldn't undo that"). An
+add whose reply from YouTube Music was lost cannot be undone exactly (which rows it made is not
+known), so Ctrl+Z says so and leaves it. An add that has not been answered yet answers "Try again
+in a moment". The Crate's own drag moves are not part of this history.
+
 Media keys are the OS's (SMTC) and are untouched.
 
 ## The playlist picker
@@ -184,7 +203,7 @@ row gets its key from `shortcut_of` in `ui/track_menu.rs`.
 
 One letter, one meaning, the same in every list: **L**ike, **C**rate, **P**laylist, **M**ute; the
 planned **K**eep (Skim) and **A**dd (target playlist) follow the same rule. Chords for what
-reaches further: Ctrl+K / Ctrl+F search, Ctrl+L lyrics, Ctrl+Z / Ctrl+Y queue undo and redo.
+reaches further: Ctrl+K / Ctrl+F search, Ctrl+L lyrics, Ctrl+Z undo (queue and playlists), Ctrl+Y redo of a queue change.
 Space, the arrows, Esc and F11 are the ones every player has.
 
 ## Global hotkeys

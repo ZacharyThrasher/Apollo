@@ -220,6 +220,14 @@ pub struct PlaylistTarget {
     pub holds_track: bool,
 }
 
+/// A row an add made in a playlist: the song and the row's own token (`setVideoId`), which is
+/// what a later remove or move names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddedRow {
+    pub video_id: String,
+    pub set_video_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

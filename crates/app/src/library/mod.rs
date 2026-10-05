@@ -8,6 +8,7 @@ pub mod filter;
 pub mod model;
 pub mod sim;
 pub mod source;
+pub mod undo;
 pub mod writes;
 
 #[cfg(feature = "provider")]
