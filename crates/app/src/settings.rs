@@ -70,6 +70,9 @@ pub const PICKER_KEY: BoolSetting = BoolSetting::new("picker_key", true);
 /// by commas. Shown on top of the picker. Kept per app, not per account (an id of another
 /// account's playlist is simply never found in the list).
 pub const RECENT_PLAYLISTS: TextSetting = TextSetting::new("picker_recent_playlists", "");
+/// Playlists > Show More like this: a playlist of your own ends with a short list of songs like
+/// its own, each with a + that adds it in place. Off hides the section and fetches nothing.
+pub const MORE_LIKE_THIS: BoolSetting = BoolSetting::new("more_like_this", true);
 /// Window > Close to tray: the close button hides the window and playback continues.
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
@@ -134,6 +137,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     PERSONAL_SHELVES.key,
     PICKER_STAY_OPEN.key,
     PICKER_KEY.key,
+    MORE_LIKE_THIS.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
     PAUSE_ON_OTHER_AUDIO.key,

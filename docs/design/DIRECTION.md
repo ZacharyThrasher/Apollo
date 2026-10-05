@@ -273,5 +273,14 @@ Applied to the mini player in HUD mode (`ui/mini_player.rs` `render_hud`, `mini.
 9. **Snap:** dropping the window within 48px of a screen edge or corner moves it to 16px from it (above the taskbar), once it has sat still for half a second.
 10. **Limit:** topmost windows show over windowed and borderless games, not exclusive fullscreen; that would need DLL injection, which risks anti-cheat bans, so it is not done.
 
+## More like this (coordinator brief, 2026-10-05; built choices flagged)
+The end of a playlist page you own (`ui/library/more_like.rs`, `more_like.rs`). Settings > Playlists (a one-row section after Data) > "Show More like this on playlists" (on).
+1. **Where:** after the page's last row and its drop-at-the-end footer, as more rows of the same virtualized list, so it scrolls with the page. Only on a playlist the account owns once every row has loaded, and not while the filter box is in use; never on Liked Music, albums or other people's playlists.
+2. **Title row:** a 56px row with "More like this" in the section style (the shelf-title style) and a **Refresh** text button at the right (Retry after a failure; its spinner shows while a new set is fetched). Built choice: the button lives in the title row.
+3. **Rows:** ten songs, built like the playlist's own rows (no number, art in line with theirs, title and artist, album when the window is wide, duration) except: title and artist are text.secondary until the row is hovered, a heart shows on hover, and a **+** (Fluent add, text.secondary, always visible) takes the place of the More button. A click plays the ten as a queue named "More like this" from that song; right-click opens the usual song menu.
+4. **+:** the song becomes the playlist's last row at once, the offer fills the gap with the next song, the write is the existing add-to-playlist write (silent on success, read back when the reply is lost) and a refusal puts the offer back and takes the row off the page with the usual toast "Couldn't add to playlist".
+5. **Where the songs come from:** the radio (the Start radio feed) of one of the playlist's songs: the first song at first, then other songs of the playlist for each fresh set. The playlist's own songs, blocked artists' songs and songs already offered are left out. States: three skeleton rows while loading, "Couldn't load suggestions" with Retry, nothing at all when there is nothing to offer.
+6. Built choice: the keyboard selection does not reach these rows; Refresh is a tab stop.
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.
