@@ -86,6 +86,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("a", TargetCursor, Some(KEY_CONTEXT)),
+        // On the page, not in the panel on the right: from there Left is just the previous control.
+        KeyBinding::new("left", crate::ui::shell::FocusSidebar, Some("CrateList && !Docked")),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", MoveCursorDown, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-up", ExtendUp, Some(KEY_CONTEXT)),
@@ -1396,7 +1398,7 @@ impl Render for CratePage {
         } else {
             div()
                 .id(if docked { "crate-dock-list" } else { "crate-list" })
-                .key_context(KEY_CONTEXT)
+                .key_context(if docked { "CrateList Docked" } else { KEY_CONTEXT })
                 .track_focus(&self.focus.list)
                 .role(gpui::Role::List)
                 .aria_label("Crate")

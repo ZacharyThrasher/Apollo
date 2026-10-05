@@ -157,17 +157,17 @@ fn space_toggles_play_and_pause(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn ctrl_right_and_ctrl_left_change_track(cx: &mut TestAppContext) {
+fn shift_right_and_shift_left_change_track(cx: &mut TestAppContext) {
     let (player, _shell, vcx) = setup(cx);
     let title = |p: &Entity<PlayerModel>, cx: &mut VisualTestContext| {
         p.read_with(cx, |m, _| m.view().title.to_string())
     };
     assert_eq!(title(&player, vcx), "Track 0");
-    vcx.simulate_keystrokes("ctrl-right");
+    vcx.simulate_keystrokes("shift-right");
     assert_eq!(title(&player, vcx), "Track 1");
-    vcx.simulate_keystrokes("ctrl-right");
+    vcx.simulate_keystrokes("shift-right");
     assert_eq!(title(&player, vcx), "Track 2");
-    vcx.simulate_keystrokes("ctrl-left");
+    vcx.simulate_keystrokes("shift-left");
     assert_eq!(title(&player, vcx), "Track 1");
 }
 

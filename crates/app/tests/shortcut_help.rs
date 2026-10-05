@@ -246,7 +246,9 @@ fn the_sheet_lists_each_group_with_its_keys_and_unnamed_letters(cx: &mut TestApp
     };
     assert_eq!(keys_of("Play / pause"), ["Space"]);
     assert_eq!(keys_of("Next song"), ["Shift+→"], "just the main key");
-    assert_eq!(keys_of("Seek 5 s"), ["←", "→"]);
+    assert_eq!(keys_of("Seek 5 s"), ["Ctrl+←", "Ctrl+→"]);
+    assert_eq!(keys_of("Volume 5%"), ["Ctrl+↑", "Ctrl+↓"]);
+    assert_eq!(keys_of("Move around (lists, cards, sidebar)"), ["↑", "↓", "←", "→"]);
     assert_eq!(keys_of("Search"), ["Ctrl+K", "Ctrl+F"]);
     assert_eq!(keys_of("Redo"), ["Ctrl+Shift+Z", "Ctrl+Y"]);
     assert_eq!(keys_of("Add to Crate"), ["C"]);

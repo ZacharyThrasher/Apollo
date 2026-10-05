@@ -225,10 +225,10 @@ fn the_transport_keys_work_in_the_mini_player_and_escape_goes_back(cx: &mut Test
     assert_eq!(current(&mut vcx).0, Intent::Playing, "Space plays");
     vcx.simulate_keystrokes("space");
     assert_eq!(current(&mut vcx).0, Intent::Paused, "and pauses");
-    vcx.simulate_keystrokes("ctrl-right");
-    assert_ne!(current(&mut vcx).1, first, "Ctrl+Right is next");
-    vcx.simulate_keystrokes("ctrl-left");
-    assert_eq!(current(&mut vcx).1, first, "Ctrl+Left is previous");
+    vcx.simulate_keystrokes("shift-right");
+    assert_ne!(current(&mut vcx).1, first, "Shift+Right is next");
+    vcx.simulate_keystrokes("shift-left");
+    assert_eq!(current(&mut vcx).1, first, "Shift+Left is previous");
     assert!(cx.update(|cx| mini::is_open(cx)));
     vcx.simulate_keystrokes("escape");
     cx.run_until_parked();

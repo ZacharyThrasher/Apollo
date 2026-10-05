@@ -14,10 +14,9 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 |---|---|
 | Space | Play / pause |
 | M | Mute / unmute (the slider keeps its level) |
-| Up / Down | Volume +5 / -5 (Up unmutes; Down while muted does nothing) |
-| Left / Right | Seek -5 s / +5 s |
+| Ctrl+Up / Ctrl+Down | Volume +5 / -5 (Up unmutes; Down while muted does nothing) |
+| Ctrl+Left / Ctrl+Right | Seek -5 s / +5 s |
 | Shift+Left / Shift+Right | Previous / next track |
-| Ctrl+Left / Ctrl+Right | Previous / next track (older binding, kept) |
 | Ctrl+F or Ctrl+K | Open Search with the caret in the field (these work in text fields too) |
 | ? (Shift+/) | Cheat sheet: every key, grouped by Play / Collect / Navigate / Window. Esc, ?, Enter or Space close it; the other keys stand down while it is open |
 | Ctrl+L | Show / hide lyrics (opens Now Playing) |
@@ -32,6 +31,26 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Backspace | Back, except while a text field (Search, a filter, a rename) has the keys, and in the queue and the Crate, where it removes the row |
 | Esc | Close Now Playing |
 | F11 | Fullscreen while Now Playing is open (leaves fullscreen when Now Playing closes) |
+
+## Moving around
+
+**The plain arrow keys only navigate. They never change song, seek or touch the volume**
+(playback is on Shift, seek and volume on Ctrl: see the table above). Tab and Shift+Tab walk
+every control in reading order: the nav rail, the page, the queue, the player bar.
+
+| Where focus is | Up / Down | Left / Right |
+|---|---|---|
+| Nothing (a click on empty space, the window just opened, Esc out of Search) | The first press puts the cursor on the page's main list: the Library / Crate / queue list, the first Search result, the first Home or Explore shelf item; with no list on the page, the open queue or docked Crate. Any arrow does it | same |
+| A list (Library, Search results, the Crate, the queue, Explore's Top songs) | Move the cursor (the keys below) | Left goes to the nav rail's button for the page (not in the docked Crate on the right, where it is the previous control). Right does nothing |
+| A Home shelf of cards | Up / Down: the shelf above / below (its remembered card) | Previous / next card. Left on the first card goes to the nav rail |
+| A Home grid of songs (columns of four) | Up / Down: the song above / below in its column; at the end of a column, the shelf above / below | Left / Right: the same song row in the previous / next column. Left on the first column goes to the nav rail |
+| An Explore shelf or chip group | Next / previous control (Explore's Top songs list moves its cursor) | Previous / next item |
+| The nav rail | Up / Down walk the destinations (Enter opens one) | Right goes into the page; Left stays |
+| A slider (progress, volume) | its own steps (the volume slider Up / Down, the progress slider Left / Right) | its own steps |
+| Any other control (a button, a switch, a chip) | Previous / next control, in Tab order (Up / Left back, Down / Right forward) | same |
+| A text field, the track menu, the playlist picker, a dialog | their own (caret, rows, fields) | their own |
+
+On a page with no list (Settings) the first press lands on its first control.
 
 ## The docked Crate
 
@@ -255,7 +274,9 @@ row gets its key from `shortcut_of` in `ui/track_menu.rs`.
 One letter, one meaning, the same in every list: **L**ike, **C**rate, **P**laylist, **M**ute; the
 **K** (Skim from here, Keep while skimming) and **A**dd (target playlist) follow the same rule. Chords for what
 reaches further: Ctrl+K / Ctrl+F search, Ctrl+L lyrics, Ctrl+Z undo (queue and playlists), Ctrl+Y redo of a queue change.
-Space, the arrows, Esc and F11 are the ones every player has.
+**Plain arrows are for moving around and nothing else**; every playback key on an arrow wears a
+modifier: Shift changes song, Ctrl seeks (Left / Right) and sets the volume (Up / Down), Alt
+moves a row. Space, Esc and F11 are the ones every player has.
 
 ## Global hotkeys
 

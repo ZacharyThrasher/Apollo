@@ -1,5 +1,5 @@
-//! App-wide keyboard shortcuts: M, Up/Down, Left/Right, Shift+Left/Right, Ctrl+L and L bound on
-//! the shell, left to text fields and popups, plus what the global hotkeys do. The real shell on
+//! App-wide keyboard shortcuts: M, Ctrl+Up/Down, Ctrl+Left/Right, Shift+Left/Right, Ctrl+L and L
+//! bound on the shell, left to text fields and popups, plus what the global hotkeys do. The real shell on
 //! GPUI's test platform with the deterministic mock adapters.
 
 use std::sync::Arc;
@@ -133,44 +133,110 @@ fn m_mutes_and_unmutes_without_losing_the_level(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn up_and_down_move_the_volume_by_five_and_stop_at_the_ends(cx: &mut TestAppContext) {
+fn ctrl_up_and_ctrl_down_move_the_volume_by_five_and_stop_at_the_ends(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
-    vcx.simulate_keystrokes("up");
+    vcx.simulate_keystrokes("ctrl-up");
     assert_eq!(volume(&page, vcx), (75, false));
-    vcx.simulate_keystrokes("down down");
+    vcx.simulate_keystrokes("ctrl-down ctrl-down");
     assert_eq!(volume(&page, vcx), (65, false));
-    vcx.simulate_keystrokes("up up up up up up up up");
+    vcx.simulate_keystrokes("ctrl-up ctrl-up ctrl-up ctrl-up ctrl-up ctrl-up ctrl-up ctrl-up");
     assert_eq!(volume(&page, vcx), (100, false));
     page.player.update(vcx, |m, cx| m.set_volume(3, cx));
-    vcx.simulate_keystrokes("down");
+    vcx.simulate_keystrokes("ctrl-down");
     assert_eq!(volume(&page, vcx), (0, false));
 }
 
 #[gpui::test]
 fn louder_unmutes_and_quieter_stays_muted(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
-    vcx.simulate_keystrokes("m down");
+    vcx.simulate_keystrokes("m ctrl-down");
     assert_eq!(
         volume(&page, vcx),
         (70, true),
         "quieter while muted is nothing"
     );
-    vcx.simulate_keystrokes("up");
+    vcx.simulate_keystrokes("ctrl-up");
     assert_eq!(volume(&page, vcx), (75, false));
 }
 
 #[gpui::test]
-fn left_and_right_seek_five_seconds(cx: &mut TestAppContext) {
+fn ctrl_left_and_ctrl_right_seek_five_seconds(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     vcx.simulate_keystrokes("space");
     open_current_load(&page, vcx);
     assert_eq!(position(&page, vcx), 0);
-    vcx.simulate_keystrokes("left");
+    vcx.simulate_keystrokes("ctrl-left");
     assert_eq!(position(&page, vcx), 0, "no further back than the start");
-    vcx.simulate_keystrokes("right right");
+    vcx.simulate_keystrokes("ctrl-right ctrl-right");
     assert_eq!(position(&page, vcx), 10_000);
-    vcx.simulate_keystrokes("left");
+    vcx.simulate_keystrokes("ctrl-left");
     assert_eq!(position(&page, vcx), 5_000);
+}
+
+#[gpui::test]
+fn the_plain_arrows_never_touch_playback_or_volume(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    vcx.simulate_keystrokes("space");
+    open_current_load(&page, vcx);
+    // Nothing focused, then wherever the arrows take the focus: none of it plays with the song.
+    vcx.simulate_keystrokes("up down left right up down left right left left");
+    assert_eq!(volume(&page, vcx), (70, false), "no volume step");
+    assert_eq!(position(&page, vcx), 0, "no seek");
+    assert_eq!(title(&page, vcx), "First", "no track change");
+}
+
+#[gpui::test]
+fn the_first_arrow_with_nothing_focused_lands_on_the_pages_list(cx: &mut TestAppContext) {
+    use apollo_app::ui::nav::Route;
+    let (page, vcx) = setup(cx);
+    page.shell.update_in(vcx, |s, window, cx| {
+        s.choose_route(Route::Library, window, cx);
+        s.focus_root(window, cx);
+    });
+    vcx.run_until_parked();
+    let list = page
+        .shell
+        .read_with(vcx, |s, cx| gpui::Focusable::focus_handle(s.library().read(cx), cx));
+    vcx.update(|window, _| assert!(!list.is_focused(window), "starts with nothing focused"));
+    vcx.simulate_keystrokes("down");
+    vcx.update(|window, _| assert!(list.is_focused(window), "the first arrow lands on the list"));
+    assert_eq!(volume(&page, vcx), (70, false), "and does not change the volume");
+}
+
+#[gpui::test]
+fn arrows_walk_the_nav_rail_and_right_goes_into_the_page(cx: &mut TestAppContext) {
+    use apollo_app::ui::nav::Route;
+    let (page, vcx) = setup(cx);
+    page.shell.update_in(vcx, |s, window, cx| {
+        s.choose_route(Route::Library, window, cx);
+    });
+    vcx.run_until_parked();
+    let stops = page.shell.read_with(vcx, |s, _| s.tab_stops());
+    let focused = |vcx: &mut VisualTestContext, name: &str| {
+        let handle = stops.iter().find(|(n, _)| *n == name).unwrap().1.clone();
+        vcx.update(|window, _| handle.is_focused(window))
+    };
+    page.shell.update_in(vcx, |s, window, cx| {
+        let home = s.tab_stops().into_iter().find(|(n, _)| *n == "nav-home").unwrap().1;
+        window.focus(&home, cx);
+    });
+    assert!(focused(vcx, "nav-home"));
+    vcx.simulate_keystrokes("down");
+    assert!(focused(vcx, "nav-explore"), "Down walks the rail");
+    vcx.simulate_keystrokes("down down");
+    assert!(focused(vcx, "nav-library"));
+    vcx.simulate_keystrokes("up");
+    assert!(focused(vcx, "nav-search"), "Up walks back");
+    vcx.simulate_keystrokes("left");
+    assert!(focused(vcx, "nav-search"), "Left on the rail stays");
+    vcx.simulate_keystrokes("right");
+    let list = page
+        .shell
+        .read_with(vcx, |s, cx| gpui::Focusable::focus_handle(s.library().read(cx), cx));
+    vcx.update(|window, _| assert!(list.is_focused(window), "Right goes into the page"));
+    vcx.simulate_keystrokes("left");
+    assert!(focused(vcx, "nav-library"), "Left from the list is the rail's button for the page");
+    assert_eq!(volume(&page, vcx), (70, false));
 }
 
 #[gpui::test]

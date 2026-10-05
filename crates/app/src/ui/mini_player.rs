@@ -40,10 +40,12 @@ use crate::assets::Icon;
 use crate::hud::{
     wheel_steps, HudFade, IdleFade, LineFade, Swap, SETTLE, SWAP_SLIDE, WHEEL_VOLUME_STEP,
 };
+use crate::keymap::{SeekBack, SeekForward, VolumeDown, VolumeUp, SEEK_STEP_MS, VOLUME_STEP};
 use crate::library::LibraryWrites;
 use crate::lyrics::{
     current_line, page_chunks, page_index, page_window_ms, LyricsModel, LyricsState,
 };
+use crate::os_media::OsCommand;
 use crate::player::{PlayerModel, Status};
 use crate::settings::{
     SettingsModel, HUD_AUTO_HIDE, MINI_DIM, MINI_FADE_CONTROLS, MINI_PLAYER_ON_TOP,
@@ -107,8 +109,13 @@ const HUD_TRACK_ALPHA: f32 = 0.10;
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("space", TogglePlay, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-right", NextTrack, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-left", PreviousTrack, Some(KEY_CONTEXT)),
+        // The same chords as the main window.
+        KeyBinding::new("shift-right", NextTrack, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-left", PreviousTrack, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-right", SeekForward, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-left", SeekBack, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-up", VolumeUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-down", VolumeDown, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", ExpandMiniPlayer, Some(KEY_CONTEXT)),
     ]);
 }
@@ -939,6 +946,22 @@ impl MiniPlayer {
             .on_action(cx.listener(|this, _: &PreviousTrack, _, cx| {
                 this.player.update(cx, |m, cx| m.previous(cx));
             }))
+            .on_action(cx.listener(|this, _: &SeekForward, _, cx| {
+                this.player.update(cx, |m, cx| {
+                    m.os_command(OsCommand::SeekBy(SEEK_STEP_MS), cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &SeekBack, _, cx| {
+                this.player.update(cx, |m, cx| {
+                    m.os_command(OsCommand::SeekBy(-SEEK_STEP_MS), cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &VolumeUp, _, cx| {
+                this.player.update(cx, |m, cx| m.nudge_volume(VOLUME_STEP, cx));
+            }))
+            .on_action(cx.listener(|this, _: &VolumeDown, _, cx| {
+                this.player.update(cx, |m, cx| m.nudge_volume(-VOLUME_STEP, cx));
+            }))
             .on_action(cx.listener(|this, _: &ExpandMiniPlayer, window, cx| {
                 let expand = this.on_expand.clone();
                 expand(window, cx);
@@ -1321,6 +1344,22 @@ impl MiniPlayer {
             }))
             .on_action(cx.listener(|this, _: &PreviousTrack, _, cx| {
                 this.player.update(cx, |m, cx| m.previous(cx));
+            }))
+            .on_action(cx.listener(|this, _: &SeekForward, _, cx| {
+                this.player.update(cx, |m, cx| {
+                    m.os_command(OsCommand::SeekBy(SEEK_STEP_MS), cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &SeekBack, _, cx| {
+                this.player.update(cx, |m, cx| {
+                    m.os_command(OsCommand::SeekBy(-SEEK_STEP_MS), cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &VolumeUp, _, cx| {
+                this.player.update(cx, |m, cx| m.nudge_volume(VOLUME_STEP, cx));
+            }))
+            .on_action(cx.listener(|this, _: &VolumeDown, _, cx| {
+                this.player.update(cx, |m, cx| m.nudge_volume(-VOLUME_STEP, cx));
             }))
             .on_action(cx.listener(|this, _: &ExpandMiniPlayer, window, cx| {
                 let expand = this.on_expand.clone();

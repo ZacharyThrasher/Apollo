@@ -173,6 +173,13 @@ pub const ENTRIES: &[Entry] = &[
     entry("skim-crate", "While skimming: keep in Crate", Group::Collect, &["SkimCrate"]),
     entry("skim-keep", "Skim: keep this song", Group::Play, &["SkimKeep"]),
     entry("skim-stop", "Skim: stop and go back", Group::Play, &["SkimCancel"]),
+    entry(
+        "navigate",
+        "Move around (lists, cards, sidebar)",
+        Group::Navigate,
+        &["NavigateUp", "NavigateDown", "NavigateLeft", "NavigateRight"],
+    )
+    .all_keys(),
     entry("search", "Search", Group::Navigate, &["FocusSearch"])
         .prefer("ctrl-k")
         .all_keys()

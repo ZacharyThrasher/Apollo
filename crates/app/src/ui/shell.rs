@@ -17,9 +17,10 @@ use crate::crate_list::{CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
-    AddCurrentToPlaylist, AddCurrentToTarget, CrateCurrent, GoBack, GoForward, LikeCurrent, RedoQueue,
-    SeekBack, SeekForward, ToggleCrateDock,
-    ShowShortcuts, SkimCancel, SkimCrate, SkimKeep, ToggleFullscreen, ToggleLyrics, ToggleMute,
+    AddCurrentToPlaylist, AddCurrentToTarget, CrateCurrent, GoBack, GoForward, LikeCurrent,
+    NavigateDown, NavigateLeft, NavigateRight, NavigateUp, RedoQueue, SeekBack, SeekForward,
+    ToggleCrateDock, ShowShortcuts, SkimCancel, SkimCrate, SkimKeep, ToggleFullscreen, ToggleLyrics,
+    ToggleMute,
     UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
 };
@@ -80,6 +81,8 @@ actions!(
         FocusNextControl,
         FocusPreviousControl,
         FocusSearch,
+        /// Left, from a list or grid that has nothing further left: onto the nav rail.
+        FocusSidebar,
         Quit
     ]
 );
@@ -100,8 +103,6 @@ pub fn bind_keys(cx: &mut App) {
     use gpui::KeyBinding;
     cx.bind_keys([
         KeyBinding::new("space", TogglePlay, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-right", NextTrack, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-left", PreviousTrack, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", CloseNowPlaying, Some(KEY_CONTEXT)),
         KeyBinding::new("tab", FocusNextControl, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-tab", FocusPreviousControl, Some(KEY_CONTEXT)),
@@ -1881,6 +1882,104 @@ impl Shell {
     pub fn focus_root(&self, window: &mut Window, cx: &mut App) {
         window.focus(&self.root_focus, cx);
     }
+
+    /// The nav rail's stops from top to bottom: the toggle, then one per destination.
+    fn rail_stops(&self) -> Vec<FocusHandle> {
+        std::iter::once(self.nav_toggle.clone())
+            .chain(self.nav_items.iter().cloned())
+            .collect()
+    }
+
+    /// The plain arrows, where no list, grid, slider or menu with focus binds them itself.
+    ///
+    /// * Nothing focused: the first press lands on the page's main list (see
+    ///   [`Self::focus_main`]).
+    /// * On the nav rail: Up / Down walk the destinations, Right goes into the page, Left stays.
+    /// * Anywhere else: Up / Left go to the previous Tab stop and Down / Right to the next, the
+    ///   same order Tab and Shift+Tab use.
+    fn navigate(&mut self, step: ArrowStep, window: &mut Window, cx: &mut Context<Self>) {
+        if self.root_focus.is_focused(window) {
+            self.focus_main(window, cx);
+            return;
+        }
+        let rail = self.rail_stops();
+        if let Some(at) = rail.iter().position(|h| h.is_focused(window)) {
+            match step {
+                ArrowStep::Up if at > 0 => window.focus(&rail[at - 1], cx),
+                ArrowStep::Down if at + 1 < rail.len() => window.focus(&rail[at + 1], cx),
+                ArrowStep::Right => self.focus_main(window, cx),
+                _ => {}
+            }
+            return;
+        }
+        match step {
+            ArrowStep::Up | ArrowStep::Left => window.focus_prev(cx),
+            ArrowStep::Down | ArrowStep::Right => window.focus_next(cx),
+        }
+    }
+
+    /// Left, from a list or grid: onto the rail's button for the page on screen.
+    fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let route = if self.now_playing_open { None } else { Some(self.route) };
+        let at = route.and_then(|r| Route::ALL.iter().position(|x| *x == r));
+        let stop = match at {
+            Some(at) => self.nav_items[at].clone(),
+            None => self.nav_toggle.clone(),
+        };
+        window.focus(&stop, cx);
+    }
+
+    /// Put the cursor on the main list of what is on screen: the page's list, grid or first
+    /// shelf, else the queue when it is open, else the first Tab stop past the rail.
+    pub fn focus_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (queue_open, queue_list) = (
+            self.queue.is_open() && !self.lyrics_showing(cx) && !self.related_showing(cx),
+            self.queue_panel.read(cx).focus_handle(cx),
+        );
+        let page = if self.now_playing_open {
+            None
+        } else {
+            match self.route {
+                Route::Library => Some(self.library.read(cx).focus_handle(cx)),
+                Route::Crate => Some(self.crate_page.read(cx).focus_handle(cx)),
+                Route::Home => self.home_page.read(cx).main_focus(),
+                Route::Explore => self.explore_page.read(cx).main_focus(cx),
+                Route::Search => {
+                    self.search.update(cx, |p, cx| p.focus_main(window, cx));
+                    return;
+                }
+                Route::Settings => None,
+            }
+        };
+        // The docked Crate steps aside for Now Playing and for the Crate page (the same list).
+        let dock_open =
+            self.crate_dock.is_open() && !self.now_playing_open && self.route != Route::Crate;
+        let dock_list = self.crate_dock_panel.read(cx).focus_handle(cx);
+        let side = queue_open
+            .then_some(queue_list)
+            .or(dock_open.then_some(dock_list));
+        if let Some(handle) = page.or(side) {
+            window.focus(&handle, cx);
+            return;
+        }
+        // No list to land on: the first Tab stop that is not the rail's.
+        let rail = self.rail_stops();
+        for _ in 0..=rail.len() {
+            window.focus_next(cx);
+            if !rail.iter().any(|h| h.is_focused(window)) {
+                break;
+            }
+        }
+    }
+}
+
+/// An arrow key, for [`Shell::navigate`].
+#[derive(Clone, Copy)]
+enum ArrowStep {
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 /// Whether the account can serve library requests: a confirmed session with a chosen identity.
@@ -2403,6 +2502,21 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &UndoQueue, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &RedoQueue, _, cx| this.redo_queue(cx)))
+            .on_action(cx.listener(|this, _: &NavigateUp, window, cx| {
+                this.navigate(ArrowStep::Up, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NavigateDown, window, cx| {
+                this.navigate(ArrowStep::Down, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NavigateLeft, window, cx| {
+                this.navigate(ArrowStep::Left, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NavigateRight, window, cx| {
+                this.navigate(ArrowStep::Right, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {
+                this.focus_sidebar(window, cx)
+            }))
             .on_action(cx.listener(|_, _: &FocusNextControl, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &FocusPreviousControl, window, cx| window.focus_prev(cx)))
             .on_action(

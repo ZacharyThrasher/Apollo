@@ -110,6 +110,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-up", ExtendUp, Some(LIST_CONTEXT)),
         KeyBinding::new("shift-down", ExtendDown, Some(LIST_CONTEXT)),
         KeyBinding::new("ctrl-a", SelectAllRows, Some(LIST_CONTEXT)),
+        KeyBinding::new("left", crate::ui::shell::FocusSidebar, Some(LIST_CONTEXT)),
         KeyBinding::new("alt-up", MoveRowUp, Some(LIST_CONTEXT)),
         KeyBinding::new("alt-down", MoveRowDown, Some(LIST_CONTEXT)),
         KeyBinding::new("escape", Back, Some(KEY_CONTEXT)),

@@ -4,6 +4,9 @@
 //!   menu, the playlist picker) has focus, so typing "m" or "l" in Search types the letter.
 //!   A deeper context wins where it binds the same key: a focused slider steps with Left/Right,
 //!   the queue list and Search results take Up/Down and L for their own cursor.
+//! * **The plain arrows only navigate.** They move the cursor or the focus (see
+//!   `Shell::navigate`); playback and volume sit on chords: Shift+Left/Right change song,
+//!   Ctrl+Left/Right seek, Ctrl+Up/Down change the volume.
 //! * **Global hotkeys** work while Apollo is not focused (`hotkeys_win.rs` registers them with
 //!   Windows, only while Settings > Keyboard > Global hotkeys is on). What each one does is
 //!   [`GlobalCommand::apply`]; which keys they are is [`GLOBAL_BINDINGS`]. Media keys are the
@@ -37,13 +40,17 @@ actions!(
         GoForward,
         SkimCrate,
         SkimKeep,
-        SkimCancel
+        SkimCancel,
+        NavigateUp,
+        NavigateDown,
+        NavigateLeft,
+        NavigateRight
     ]
 );
 
-/// How far Left/Right seek, in milliseconds.
+/// How far Ctrl+Left/Right seek, in milliseconds.
 pub const SEEK_STEP_MS: i64 = 5_000;
-/// How far a volume key moves the level, in percent.
+/// How far Ctrl+Up/Down move the level, in percent.
 pub const VOLUME_STEP: i8 = 5;
 
 /// Where the plain (unmodified) shortcuts apply: anywhere in the shell unless a text field or a
@@ -62,10 +69,16 @@ pub fn bind_keys(cx: &mut App) {
     let plain = Some(PLAIN);
     cx.bind_keys([
         KeyBinding::new("m", ToggleMute, plain),
-        KeyBinding::new("up", VolumeUp, plain),
-        KeyBinding::new("down", VolumeDown, plain),
-        KeyBinding::new("left", SeekBack, plain),
-        KeyBinding::new("right", SeekForward, plain),
+        // Plain arrows navigate; a list, grid or slider that has focus binds them itself and
+        // wins. These four are what is left when it does not.
+        KeyBinding::new("up", NavigateUp, plain),
+        KeyBinding::new("down", NavigateDown, plain),
+        KeyBinding::new("left", NavigateLeft, plain),
+        KeyBinding::new("right", NavigateRight, plain),
+        KeyBinding::new("ctrl-up", VolumeUp, plain),
+        KeyBinding::new("ctrl-down", VolumeDown, plain),
+        KeyBinding::new("ctrl-left", SeekBack, plain),
+        KeyBinding::new("ctrl-right", SeekForward, plain),
         KeyBinding::new("shift-left", PreviousTrack, plain),
         KeyBinding::new("shift-right", NextTrack, plain),
         KeyBinding::new("ctrl-l", ToggleLyrics, plain),

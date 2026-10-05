@@ -57,6 +57,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Back, Some(KEY_CONTEXT)),
         KeyBinding::new("down", ListNext, Some(LIST_CONTEXT)),
         KeyBinding::new("up", ListPrevious, Some(LIST_CONTEXT)),
+        KeyBinding::new("left", crate::ui::shell::FocusSidebar, Some(LIST_CONTEXT)),
     ]);
 }
 
@@ -273,6 +274,14 @@ impl ExploreView {
             }
         }
         cx.notify();
+    }
+
+    /// Where the first arrow press lands: the first item on the page (the Back button on a mood).
+    pub fn main_focus(&self, cx: &App) -> Option<FocusHandle> {
+        if self.model.read(cx).mood().is_some() {
+            return Some(self.back_focus.clone());
+        }
+        self.stops.first().cloned()
     }
 
     /// Left / Right / Up / Down: move focus to the next or previous item of the group whose

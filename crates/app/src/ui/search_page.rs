@@ -91,6 +91,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("p", PlaylistSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("a", TargetSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("escape", BackToField, Some(RESULTS_CONTEXT)),
+        KeyBinding::new("left", crate::ui::shell::FocusSidebar, Some(RESULTS_CONTEXT)),
         KeyBinding::new("shift-down", ExtendNext, Some(RESULTS_CONTEXT)),
         KeyBinding::new("shift-up", ExtendPrevious, Some(RESULTS_CONTEXT)),
         KeyBinding::new("ctrl-a", SelectAllSongs, Some(RESULTS_CONTEXT)),
@@ -315,6 +316,19 @@ impl SearchPage {
             window.focus(&self.results_focus, cx);
         } else {
             text_field::focus(&self.field, window, cx);
+        }
+    }
+
+    /// The first arrow press with nothing focused: the first song, else the field.
+    pub fn focus_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.songs(cx).is_empty() {
+            text_field::focus(&self.field, window, cx);
+        } else {
+            self.selected = Some(0);
+            self.hint_selected(cx);
+            window.focus(&self.results_focus, cx);
+            self.scroll.scroll_to_item(0);
+            cx.notify();
         }
     }
 
