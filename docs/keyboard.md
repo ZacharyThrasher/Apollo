@@ -59,7 +59,7 @@ and clears the picks. Likes and removals go to the account one at a time.
 | Delete / Backspace | Remove the row (queue, Crate) |
 | Alt+Up / Alt+Down | Move the row one place up / down (up-next in the queue; the Crate). The row keeps the cursor. |
 
-The Crate also drags: pick a row up and let go where it should go (an accent line shows the place; below the last song sends it to the bottom). New songs land at the bottom.
+The Crate also drags: pick a row up and let go where it should go (a thin line shows the place; below the last song sends it to the bottom). New songs land at the bottom.
 
 ### While skimming
 

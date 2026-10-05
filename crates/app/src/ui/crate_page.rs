@@ -5,7 +5,7 @@
 //! there with the crate as the queue; More opens the usual song menu (add to the queue or a
 //! playlist, start a radio, remove from the crate).
 //!
-//! Arranging is local and free: a row drags to a new place (an accent line shows where it
+//! Arranging is local and free: a row drags to a new place (a thin line shows where it
 //! lands; a footer after the last row takes a drop at the end), or Alt+Up / Alt+Down moves the
 //! row under the cursor one place. Save as playlist and Add all follow the order shown.
 //!
@@ -152,8 +152,8 @@ impl Render for DragGhost {
     }
 }
 
-/// The accent line a dragged row shows above the row it would land before.
-fn drop_line(group: SharedString, accent: Accent) -> impl IntoElement {
+/// The line (text.secondary, like the queue's and the playlist page's) a dragged row shows above the row it would land before.
+fn drop_line(group: SharedString) -> impl IntoElement {
     div()
         .absolute()
         .top_0()
@@ -161,7 +161,7 @@ fn drop_line(group: SharedString, accent: Accent) -> impl IntoElement {
         .right(px(ROW_INSET))
         .h(px(DROP_LINE))
         .rounded_full()
-        .bg(color::accent(accent))
+        .bg(color::text_secondary())
         .opacity(0.0)
         .group_drag_over::<DraggedRow>(group, |s| s.opacity(1.0))
 }
@@ -513,7 +513,7 @@ impl CratePage {
             .w_full()
             .flex_none()
             .group(group.clone())
-            .child(drop_line(group, self.accent))
+            .child(drop_line(group))
             .on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
                 this.drop_row(dragged.from, ix, cx)
             }))
@@ -691,7 +691,7 @@ impl CratePage {
             .flex_none()
             .py(px(ROW_INSET))
             .group(drop_group.clone())
-            .child(drop_line(drop_group, self.accent))
+            .child(drop_line(drop_group))
             .child(surface)
             .on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
                 this.drop_row(dragged.from, ix, cx)
