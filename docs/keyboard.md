@@ -380,8 +380,8 @@ once: the songs leave when the picker closes), the Crate's "Add all to…" and a
 A failed or lost add takes nothing out. "Save as playlist…" keeps its own "Clear Crate" check.
 
 An add that Ctrl+Z can take back says so in its confirmation: "Added to Road trip · Ctrl+Z to
-undo" (queue adds and playlist adds, including a playlist made from the queue or the Crate), for
-2.5 seconds, while **Show shortcut hints** is on. Crate adds, likes and library saves have no undo
+undo" (queue adds, Crate adds and playlist adds, including a playlist made from the queue or the
+Crate), for 2.5 seconds, while **Show shortcut hints** is on. Likes and library saves have no undo
 and no hint. Settings > Playlists > **Confirm when adding** switches the confirmation off.
 
 Media keys are the OS's (SMTC) and are untouched.

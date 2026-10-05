@@ -582,6 +582,18 @@ impl CrateModel {
         slot: usize,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A drop is where the pointer already is: nothing scrolls to it.
+        self.insert_at_with(songs_in, slot, false, cx)
+    }
+
+    /// [`Self::insert_at`], saying whether an open list scrolls to the songs that were added.
+    pub fn insert_at_with(
+        &mut self,
+        songs_in: Vec<(Track, Option<String>)>,
+        slot: usize,
+        scroll: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let before = self.items.clone();
         let asked = songs_in.len();
         let mut added_ids: Vec<String> = Vec::new();
@@ -628,7 +640,7 @@ impl CrateModel {
         self.record(before, words, cx);
         cx.notify();
         // Songs that were not in the crate before are the ones added (the rest only moved).
-        crate::confirm::crated(added_ids.clone(), cx);
+        crate::confirm::crated(added_ids.clone(), scroll, cx);
         self.auto_swap(added_ids, cx);
         true
     }
