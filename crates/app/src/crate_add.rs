@@ -547,7 +547,7 @@ impl CrateAddModel {
             confirm::confirm(
                 confirm::added_text(added.len(), "Crate"),
                 true,
-                Some((confirm::Place::Crate, added.clone())),
+                Some((confirm::Place::Crate, added.clone(), true)),
                 cx,
             );
             cx.emit(CrateAddEvent::Added(added.clone()));
