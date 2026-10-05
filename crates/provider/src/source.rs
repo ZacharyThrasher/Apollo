@@ -622,6 +622,19 @@ impl InnerTubeSource {
             .map_err(|e| classify_write(&e))
     }
 
+    /// Add several tracks to a playlist the account owns in one request, in the order given.
+    /// Tracks already there are skipped. `playlist_id` may carry the `VL` browse prefix.
+    pub async fn add_many_to_playlist(
+        &self,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<(), WriteFailure> {
+        self.tube
+            .add_many_to_playlist(&self.client, bare_playlist_id(playlist_id), video_ids)
+            .await
+            .map_err(|e| classify_write(&e))
+    }
+
     /// The playlists the account can edit, as bare ids: the "Save to playlist" sheet asked about
     /// a fixed, public video (`probe_video`). Only the sheet's playlist list is read; what it
     /// holds of that video is ignored.
