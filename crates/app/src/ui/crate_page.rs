@@ -408,7 +408,7 @@ impl CratePage {
     /// Whether the keyboard is on the list or on one of the header's controls.
     pub fn has_focus(&self, window: &Window) -> bool {
         let f = &self.focus;
-        [&f.list, &f.save, &f.add_to, &f.clear, &f.confirm, &f.cancel]
+        [&f.list, &f.save, &f.add_to, &f.clear]
             .iter()
             .any(|h| h.is_focused(window))
     }
