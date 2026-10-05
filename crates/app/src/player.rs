@@ -854,6 +854,17 @@ impl PlayerModel {
         self.prefetch_upcoming();
     }
 
+    /// Put `tracks` right after the one playing, in their own order (one undo step).
+    pub fn play_next_tracks(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        if tracks.is_empty() {
+            return;
+        }
+        self.edit_queue(cx, |q| {
+            q.play_next(tracks);
+        });
+        self.prefetch_upcoming();
+    }
+
     /// Add `tracks` to the end of the up-next list, ahead of the rest of the context.
     pub fn add_tracks_to_queue(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
         self.edit_queue(cx, |q| {

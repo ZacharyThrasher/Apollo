@@ -155,6 +155,7 @@ impl LibraryView {
                     real: ix,
                     level: self.hover.level(ix, &mut moving),
                     selected: list_focused && ix == self.selected,
+                    picked: false,
                     accent,
                     animations,
                 };

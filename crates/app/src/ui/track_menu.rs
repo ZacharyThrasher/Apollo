@@ -58,6 +58,10 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// Whether the playlist picker can take a list of songs. Until it does, a selection's menu has
+/// no Add to playlist\u{2026}.
+pub const PICKER_TAKES_MANY: bool = false;
+
 pub const MENU_WIDTH: f32 = 220.0;
 pub const ITEM_HEIGHT: f32 = layout::MIN_HIT_TARGET;
 const ICON: f32 = 16.0;
@@ -99,6 +103,9 @@ pub enum Subject {
     Queue,
     /// An artist, from the artist page's More button.
     Artist(ArtistSubject),
+    /// Two songs or more picked in a list (see `ui::selection`): the verbs act on all of them,
+    /// in the list's order.
+    Tracks(Vec<TrackSubject>),
 }
 
 /// An artist the menu is about.
@@ -114,6 +121,25 @@ impl ArtistSubject {
         BlockedArtist {
             id: Some(self.id.as_str().to_owned()),
             name: self.name.clone(),
+        }
+    }
+}
+
+impl TrackSubject {
+    /// A song of a playlist the account can edit, or a plain song where `playlist` is `None`.
+    pub fn of_row(
+        track: Track,
+        thumbnail: Option<String>,
+        playlist: Option<(Collection, String)>,
+    ) -> Self {
+        Self {
+            track,
+            thumbnail,
+            entry: None,
+            playlist_row: playlist.map(|(collection, occurrence)| PlaylistRow {
+                collection,
+                occurrence,
+            }),
         }
     }
 }
@@ -154,6 +180,16 @@ impl Subject {
             entry: Some(entry),
             playlist_row: None,
         })
+    }
+
+    /// The menu of a selection. Fewer than two songs is not a selection: it falls back to the
+    /// song's own menu (or none).
+    pub fn tracks(mut songs: Vec<TrackSubject>) -> Option<Self> {
+        match songs.len() {
+            0 => None,
+            1 => songs.pop().map(Subject::Track),
+            _ => Some(Subject::Tracks(songs)),
+        }
     }
 
     /// The menu of a card: only albums and playlists have one.
@@ -364,6 +400,36 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             }
             out
         }
+        Subject::Tracks(songs) => {
+            let mut out = vec![vec![
+                item(Command::PlayNext, Icon::PlayNext, "Play next"),
+                item(Command::AddToQueue, Icon::QueueAdd, "Add to queue"),
+            ]];
+            let mut keep = Vec::new();
+            if PICKER_TAKES_MANY {
+                keep.push(item(
+                    Command::AddToPlaylist,
+                    Icon::PlaylistAdd,
+                    "Add to playlist\u{2026}",
+                ));
+            }
+            keep.push(item(Command::AddToCrate, Icon::BoxRegular, "Add to Crate"));
+            out.push(keep);
+            // `liked` is true when every song is liked: the item then takes them all out.
+            out.push(vec![if liked {
+                item(Command::ToggleLike, Icon::HeartFilled, "Remove from Liked")
+            } else {
+                item(Command::ToggleLike, Icon::HeartRegular, "Like")
+            }]);
+            if songs.iter().all(|s| s.playlist_row.is_some()) {
+                out.push(vec![item(
+                    Command::RemoveFromPlaylist,
+                    Icon::Delete,
+                    "Remove from playlist",
+                )]);
+            }
+            out
+        }
         Subject::Queue => vec![vec![item(
             Command::SaveQueue,
             Icon::PlaylistAdd,
@@ -414,7 +480,7 @@ pub fn link_of(subject: &Subject) -> String {
     match subject {
         Subject::Track(t) => links::track_url(&t.track.video_id),
         Subject::Collection(c) => links::collection_url(c),
-        Subject::Queue => String::new(),
+        Subject::Queue | Subject::Tracks(_) => String::new(),
         Subject::Artist(a) => format!("https://music.youtube.com/channel/{}", a.id.as_str()),
     }
 }
@@ -698,6 +764,12 @@ impl TrackMenu {
                     },
                 )
             }
+            Subject::Tracks(songs) => (
+                songs
+                    .iter()
+                    .all(|t| self.writes.read(cx).is_liked(t.track.video_id.as_str())),
+                Facts::default(),
+            ),
             Subject::Queue => (false, Facts::default()),
         };
         groups_with(&open.subject, liked, facts)
@@ -845,6 +917,38 @@ impl TrackMenu {
                         .update(cx, |p, cx| p.play_tracks_from(tracks, None, Some(true), source, cx));
                 }, cx);
             }
+            (Command::PlayNext, Subject::Tracks(songs)) => {
+                let tracks = self.hinted_songs(songs, cx);
+                self.player.update(cx, |p, cx| p.play_next_tracks(tracks, cx));
+            }
+            (Command::AddToQueue, Subject::Tracks(songs)) => {
+                let tracks = self.hinted_songs(songs, cx);
+                self.player.update(cx, |p, cx| p.add_tracks_to_queue(tracks, cx));
+            }
+            (Command::AddToCrate, Subject::Tracks(songs)) => {
+                for song in songs {
+                    crate::crate_list::add_track(&self.player, song.track, song.thumbnail, cx);
+                }
+            }
+            (Command::ToggleLike, Subject::Tracks(songs)) => {
+                // Like them all, or (when they all are liked already) take them all out. The
+                // writes go out one after another, not all at once.
+                let all_liked = songs
+                    .iter()
+                    .all(|t| self.writes.read(cx).is_liked(t.track.video_id.as_str()));
+                let ids = songs
+                    .iter()
+                    .map(|t| t.track.video_id.as_str().to_owned())
+                    .collect();
+                self.writes
+                    .update(cx, |w, cx| w.set_liked_many(ids, !all_liked, cx));
+            }
+            (Command::RemoveFromPlaylist, Subject::Tracks(songs)) => {
+                // The playlist page's own edit queue sends the removals one at a time.
+                for row in songs.into_iter().filter_map(|s| s.playlist_row) {
+                    (self.on_remove_row.clone())(&row.collection, &row.occurrence, cx);
+                }
+            }
             (Command::StartRadio, Subject::Track(t)) => {
                 let name = t.track.title.clone();
                 self.start_radio(t.track, t.thumbnail, name, cx);
@@ -920,7 +1024,7 @@ impl TrackMenu {
                 let artist = match &subject {
                     Subject::Track(t) => blocked_artist_of(&t.track),
                     Subject::Artist(a) => Some(a.blocked()),
-                    Subject::Collection(_) | Subject::Queue => None,
+                    Subject::Collection(_) | Subject::Queue | Subject::Tracks(_) => None,
                 };
                 if let (Some(artist), Some(model)) = (artist, crate::blocked_artists::handle(cx)) {
                     model.update(cx, |m, cx| {
@@ -981,6 +1085,16 @@ impl TrackMenu {
             }
             _ => {}
         }
+    }
+
+    /// Hand a selection's covers to the player and keep the tracks, in the selection's order.
+    fn hinted_songs(&self, songs: Vec<TrackSubject>, cx: &mut Context<Self>) -> Vec<Track> {
+        self.player.update(cx, |p, _| {
+            for song in &songs {
+                p.hint_art(song.track.video_id.as_str(), song.thumbnail.as_deref());
+            }
+        });
+        songs.into_iter().map(|s| s.track).collect()
     }
 
     /// Hand the rows' covers to the player and keep the tracks.

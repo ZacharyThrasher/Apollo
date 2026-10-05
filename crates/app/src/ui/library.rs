@@ -44,7 +44,8 @@ use crate::ui::playing_row;
 use crate::ui::playlist_dialog::{self, Mode};
 use crate::ui::playlist_picker::PlaylistPicker;
 use crate::ui::row_actions::{heart_action, more_slot, playlist_action, ACTION_SIZE};
-use crate::ui::track_menu::{self, Subject};
+use crate::ui::selection::{self, Click, Selection};
+use crate::ui::track_menu::{self, Command, Subject, TrackSubject};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{TextField, TextFieldEvent};
@@ -71,6 +72,9 @@ actions!(
         LikeRow,
         CrateRow,
         AddRowToPlaylist,
+        ExtendUp,
+        ExtendDown,
+        SelectAllRows,
         Back
     ]
 );
@@ -92,6 +96,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("l", LikeRow, Some(LIST_CONTEXT)),
         KeyBinding::new("c", CrateRow, Some(LIST_CONTEXT)),
         KeyBinding::new("p", AddRowToPlaylist, Some(LIST_CONTEXT)),
+        KeyBinding::new("shift-up", ExtendUp, Some(LIST_CONTEXT)),
+        KeyBinding::new("shift-down", ExtendDown, Some(LIST_CONTEXT)),
+        KeyBinding::new("ctrl-a", SelectAllRows, Some(LIST_CONTEXT)),
         KeyBinding::new("alt-left", Back, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Back, Some(KEY_CONTEXT)),
     ]);
@@ -239,6 +246,13 @@ pub struct LibraryView {
     selected: usize,
     /// The selection in each list beneath the page on screen (the overview's first).
     selected_below: Vec<usize>,
+    /// Songs picked on a playlist page for bulk verbs (Shift/Ctrl+click, Shift+Arrows, Ctrl+A),
+    /// named by the row's own token. Empty everywhere else.
+    selection: Selection<String>,
+    /// The playlist the picks belong to: another page starts with none.
+    selection_page: Option<String>,
+    /// What a picked row's More button and right-click open: the menu of the whole selection.
+    bulk_menu: Option<Subject>,
     /// Tab stops of an artist page's cards, grown to the most cards a page had.
     card_focus: Vec<FocusHandle>,
     hover: RowHover,
@@ -367,6 +381,9 @@ impl LibraryView {
             pages: Vec::new(),
             selected: 0,
             selected_below: Vec::new(),
+            selection: Selection::new(),
+            selection_page: None,
+            bulk_menu: None,
             card_focus: Vec::new(),
             hover: RowHover::default(),
             on_search: Rc::new(Box::new(on_search)),
@@ -433,6 +450,11 @@ impl LibraryView {
 
     pub fn model(&self) -> &Entity<LibraryModel> {
         &self.model
+    }
+
+    /// How many songs are picked for bulk verbs (tests and diagnostics).
+    pub fn picked(&self) -> usize {
+        self.selection.len()
     }
 
     pub fn selected(&self) -> usize {
@@ -1064,11 +1086,17 @@ impl LibraryView {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         el.on_action(cx.listener(|this, _: &ListUp, _, cx| {
+            // The plain arrows only move the cursor: picked songs do not follow it.
+            this.selection.clear();
             this.move_selection(this.selected as isize - 1, cx)
         }))
         .on_action(cx.listener(|this, _: &ListDown, _, cx| {
+            this.selection.clear();
             this.move_selection(this.selected as isize + 1, cx)
         }))
+        .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.extend_selection(-1, cx)))
+        .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.extend_selection(1, cx)))
+        .on_action(cx.listener(|this, _: &SelectAllRows, _, cx| this.select_all_rows(cx)))
         .on_action(cx.listener(|this, _: &ListPageUp, _, cx| {
             let step = this.page_rows(cx);
             this.move_selection(this.selected as isize - step, cx)
@@ -1083,23 +1111,164 @@ impl LibraryView {
             let i = this.selected;
             this.activate(i, window, cx)
         }))
-        .on_action(cx.listener(|this, _: &LikeRow, _, cx| {
+        .on_action(cx.listener(|this, _: &LikeRow, window, cx| {
+            if this.run_bulk(Command::ToggleLike, window, cx) {
+                return;
+            }
             if let Some((video, _)) = this.selected_track(cx) {
                 this.writes.update(cx, |w, cx| w.toggle_like(&video, cx));
             }
         }))
-        .on_action(cx.listener(|this, _: &CrateRow, _, cx| {
+        .on_action(cx.listener(|this, _: &CrateRow, window, cx| {
+            if this.run_bulk(Command::AddToCrate, window, cx) {
+                return;
+            }
             if let Some((track, thumbnail)) = this.selected_full_track(cx) {
                 crate::crate_list::add_track(&this.player, track, thumbnail, cx);
             }
         }))
         .on_action(cx.listener(|this, _: &AddRowToPlaylist, window, cx| {
+            if this.selection.is_bulk() {
+                if track_menu::PICKER_TAKES_MANY {
+                    this.run_bulk(Command::AddToPlaylist, window, cx);
+                }
+                return;
+            }
             if let Some((video, title)) = this.selected_track(cx) {
                 let at = playlist_anchor(this.selected);
                 this.picker
                     .update(cx, |p, cx| p.open_at(&video, title, &at, window, cx));
             }
         }))
+    }
+
+    // ---- picking songs ---------------------------------------------------------------------
+
+    /// Songs can be picked on a playlist page (albums, the Songs tab and the rest come later).
+    fn selection_enabled(&self, cx: &App) -> bool {
+        let model = self.model.read(cx);
+        model
+            .detail()
+            .is_some_and(|d| d.collection.kind == CollectionKind::Playlist)
+    }
+
+    /// A row's name in the selection: its own token, else its video id.
+    fn row_key(row: &TrackRow) -> String {
+        row.occurrence
+            .clone()
+            .unwrap_or_else(|| format!("v:{}", row.track.video_id.as_str()))
+    }
+
+    /// The key of every row shown, top to bottom (a filter leaves out the rows it hides).
+    fn selection_keys(&self, cx: &App) -> Vec<String> {
+        let rows = self.model.read(cx).list_rows();
+        let visible = self.visible(cx);
+        (0..visible.len())
+            .filter_map(|n| visible.get(n).and_then(|real| rows.get(real)))
+            .map(Self::row_key)
+            .collect()
+    }
+
+    /// Per frame: forget picks that left the page, and work out which shown rows are picked and
+    /// what the selection's menu is. Does nothing while nothing is picked.
+    fn refresh_selection(&mut self, kind: ListKind, cx: &App) -> std::collections::HashSet<usize> {
+        let enabled = kind == ListKind::Tracks && self.selection_enabled(cx);
+        let page = enabled
+            .then(|| self.model.read(cx).detail().map(|d| d.collection.library_key().to_owned()))
+            .flatten();
+        if page != self.selection_page {
+            // Another playlist: nothing carries over.
+            self.selection.clear();
+            self.selection_page = page;
+        }
+        self.bulk_menu = None;
+        if !enabled || self.selection.is_empty() {
+            return Default::default();
+        }
+        let keys = self.selection_keys(cx);
+        self.selection.keep(&keys);
+        if self.selection.is_bulk() {
+            self.bulk_menu = Subject::tracks(self.picked_songs(cx));
+        }
+        keys.iter()
+            .enumerate()
+            .filter(|(_, k)| self.selection.contains(k))
+            .map(|(ix, _)| ix)
+            .collect()
+    }
+
+    /// The picked songs in list order, as the track menu takes them.
+    fn picked_songs(&self, cx: &App) -> Vec<TrackSubject> {
+        let model = self.model.read(cx);
+        let editable = model.detail().filter(|d| d.can_edit()).map(|d| d.collection.clone());
+        let rows = model.list_rows();
+        let visible = self.visible(cx);
+        (0..visible.len())
+            .filter_map(|n| visible.get(n).and_then(|real| rows.get(real)))
+            .filter(|row| self.selection.contains(&Self::row_key(row)))
+            .map(|row| {
+                let playlist = editable
+                    .clone()
+                    .zip(row.occurrence.clone());
+                TrackSubject::of_row(row.track.clone(), row.thumbnail.clone(), playlist)
+            })
+            .collect()
+    }
+
+    /// A click on shown row `ix`. Whether it was a Ctrl or Shift click (a pick), which the row's
+    /// own action then leaves alone. A plain click clears the picks.
+    fn pick_row(&mut self, ix: usize, how: Click, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.selection_enabled(cx) {
+            return false;
+        }
+        let keys = self.selection_keys(cx);
+        let Some(key) = keys.get(ix) else {
+            return false;
+        };
+        let cursor = keys.get(self.selected);
+        let picked = self.selection.click(how, key, cursor, &keys);
+        if picked {
+            // The keyboard carries on from the clicked row: Shift+Arrows, Ctrl+A and Esc work.
+            window.focus(&self.focus.list, cx);
+        }
+        cx.notify();
+        picked
+    }
+
+    /// Shift+Up / Shift+Down: the cursor moves and the picked rows stretch (or shrink) to it.
+    fn extend_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if !self.selection_enabled(cx) {
+            return;
+        }
+        let keys = self.selection_keys(cx);
+        if keys.is_empty() {
+            return;
+        }
+        let from = self.selected.min(keys.len() - 1);
+        let to = (from as isize + delta).clamp(0, keys.len() as isize - 1) as usize;
+        self.selection.extend(keys.get(from), &keys[to], &keys);
+        self.move_selection(to as isize, cx);
+    }
+
+    /// Ctrl+A: every row shown.
+    fn select_all_rows(&mut self, cx: &mut Context<Self>) {
+        if !self.selection_enabled(cx) {
+            return;
+        }
+        let keys = self.selection_keys(cx);
+        self.selection.select_all(&keys);
+        cx.notify();
+    }
+
+    /// Run a menu verb on the picked songs, when two or more are picked. Whether it did.
+    fn run_bulk(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.selection_enabled(cx) || !self.selection.is_bulk() {
+            return false;
+        }
+        if let Some(subject) = Subject::tracks(self.picked_songs(cx)) {
+            track_menu::run_now(command, subject, window, cx);
+        }
+        true
     }
 
     /// The track row the keyboard is on, whole (none in the lists of playlists and albums).
@@ -1168,6 +1337,7 @@ impl LibraryView {
             ListKind::Tracks => self.visible(cx),
             ListKind::Collections => Visible::All(usize::MAX),
         };
+        let picked = self.refresh_selection(kind, cx);
         let rows: Vec<AnyElement> = range
             .map(|ix| {
                 let level = self.hover.level(ix, &mut moving);
@@ -1177,6 +1347,7 @@ impl LibraryView {
                     real: visible.get(ix).unwrap_or(usize::MAX),
                     level,
                     selected,
+                    picked: picked.contains(&ix),
                     accent,
                     animations,
                 };
@@ -1221,7 +1392,9 @@ impl LibraryView {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let (ix, animations) = (frame.ix, frame.animations);
-        let tint = if frame.selected || playing {
+        let tint = if frame.picked {
+            selection::row_tint(frame.accent)
+        } else if frame.selected || playing {
             playing_row::tint()
         } else {
             color::state_hover().opacity(frame.level)
@@ -1249,8 +1422,13 @@ impl LibraryView {
                 }
                 cx.notify();
             }))
-            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 this.selected = ix;
+                // Ctrl and Shift pick songs on a playlist page; a plain click clears the picks
+                // and does what the row always did.
+                if this.pick_row(ix, Click::of_event(event), window, cx) {
+                    return;
+                }
                 on_click(this, window, cx);
             }))
             .when(frame.selected, |d| {
@@ -1530,6 +1708,13 @@ impl LibraryView {
                     .children(blurb)
                     .child(buttons),
             )
+            // "N selected" at the list header's right end while 2 or more songs are picked.
+            .when(collection.kind == CollectionKind::Playlist, |d| {
+                d.child(
+                    selection::count_slot(self.selection.len(), cx)
+                        .debug_selector(|| "library-selected-count".into()),
+                )
+            })
             // Right-aligned, once there are rows to filter.
             .children(filter.filter(|_| items > 0).map(|field| {
                 div()
@@ -1696,6 +1881,10 @@ impl LibraryView {
         let liked = self.writes.read(cx).is_liked(&video);
         // A row of a playlist of your own can be removed from it, and dragged to a new place.
         let subject = match (&editable, &row.occurrence) {
+            // A picked row speaks for every picked row.
+            _ if frame.picked && self.bulk_menu.is_some() => {
+                self.bulk_menu.clone().expect("checked")
+            }
             (Some(collection), Some(occurrence)) => Subject::playlist_track(
                 row.track.clone(),
                 row.thumbnail.clone(),
@@ -2001,7 +2190,7 @@ fn track_count_text(subtitle: Option<&str>, loaded: usize) -> Option<SharedStrin
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ListKind {
     Collections,
     Tracks,
@@ -2015,6 +2204,8 @@ struct RowFrame {
     /// Hover fade level, 0-1.
     level: f32,
     selected: bool,
+    /// The row is one of the songs picked for bulk verbs.
+    picked: bool,
     accent: Accent,
     animations: bool,
 }
@@ -2068,7 +2259,12 @@ impl Render for LibraryView {
             .id("library")
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, _: &Back, window, cx| {
-                // Esc empties a filter in use before it closes the page.
+                // Esc clears picked songs first, then empties a filter in use, then closes the page.
+                if !this.selection.is_empty() {
+                    this.selection.clear();
+                    cx.notify();
+                    return;
+                }
                 if !this.clear_filter(cx) {
                     this.back(window, cx)
                 }

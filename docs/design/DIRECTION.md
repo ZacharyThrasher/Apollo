@@ -265,3 +265,9 @@ Applied to the mini player in HUD mode (`ui/mini_player.rs` `render_hud`, `mini.
 
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.
+
+## Multi-select decisions (coordinator, 2026-10-05)
+Shared helper `ui/selection.rs`; first on Search results and playlist pages.
+1. **Picked rows:** background is the accent at 16% alpha (`selection::row_tint`). The keyboard cursor row keeps its existing look (focus ring on pages, marker bar on Search) on top of the tint. One picked row is drawn tinted too, but is not yet a selection: the verbs act from 2 up.
+2. **Count:** "N selected" in caption text.secondary at the right end of the list's header (the chip row on Search; beside the filter field on a playlist page, in a fixed 96px slot so the header does not shift), shown while 2 or more are picked. No floating action bar.
+3. **Menu:** the selection's menu is the track menu's usual popover with Play next, Add to queue, Add to playlist… (hidden until the picker accepts a list), Add to Crate, Like (or Remove from Liked when all are liked), and Remove from playlist on a playlist of your own. No success toasts.

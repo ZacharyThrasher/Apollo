@@ -30,6 +30,13 @@ use crate::player::PlayerModel;
 /// How long an error stays on screen.
 pub const NOTICE_FOR: Duration = Duration::from_secs(4);
 
+/// Pause between one bulk like settling and the next going out.
+pub const BULK_PACE: Duration = Duration::from_millis(250);
+/// How often a bulk run looks at whether the write it is waiting for has settled.
+const BULK_POLL: Duration = Duration::from_millis(50);
+/// The longest a bulk run waits for one write before it moves on.
+const BULK_WAIT: Duration = Duration::from_secs(30);
+
 /// What the screens learn from the writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WritesEvent {
@@ -71,6 +78,9 @@ pub struct LibraryWrites {
     checked: Option<String>,
     /// Bumped when the account changes; older answers are dropped.
     generation: u64,
+    /// Likes of a selection still to go out, one at a time (see [`Self::set_liked_many`]).
+    bulk: std::collections::VecDeque<(String, bool)>,
+    bulk_running: bool,
     notice: Option<Notice>,
     next_notice: u64,
 }
@@ -89,6 +99,8 @@ impl LibraryWrites {
             added: HashSet::new(),
             checked: None,
             generation: 0,
+            bulk: std::collections::VecDeque::new(),
+            bulk_running: false,
             notice: None,
             next_notice: 1,
         }
@@ -134,6 +146,8 @@ impl LibraryWrites {
     /// Forget everything: the account changed, and nothing known about the old one applies.
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
+        self.bulk.clear();
+        self.bulk_running = false;
         self.likes.clear();
         self.disliking.clear();
         self.disliked.clear();
@@ -254,6 +268,51 @@ impl LibraryWrites {
         if idle {
             self.send_like(video_id, liked, cx);
         }
+    }
+
+    /// Like (or unlike) a selection's songs. Each goes through [`Self::set_liked`] (shown at once,
+    /// rolled back with a notice if the service refuses), but one at a time: the next is asked
+    /// for only once the one before has settled, and a short pause later, so a long selection
+    /// never reaches the service as a burst. Songs already as asked are skipped.
+    pub fn set_liked_many(&mut self, video_ids: Vec<String>, liked: bool, cx: &mut Context<Self>) {
+        for id in video_ids {
+            if self.liked(&id) != Some(liked) && !self.bulk.iter().any(|(queued, _)| *queued == id) {
+                self.bulk.push_back((id, liked));
+            }
+        }
+        if self.bulk_running || self.bulk.is_empty() {
+            return;
+        }
+        self.bulk_running = true;
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            loop {
+                let next = this.update(cx, |m, cx| {
+                    if m.generation != generation {
+                        return None;
+                    }
+                    let next = m.bulk.pop_front();
+                    match &next {
+                        Some((id, liked)) => m.set_liked(id, *liked, cx),
+                        None => m.bulk_running = false,
+                    }
+                    next
+                });
+                let Ok(Some((id, _))) = next else { return };
+                // Wait for that write (or its read-back) to settle, then pause.
+                let mut waited = Duration::ZERO;
+                loop {
+                    cx.background_executor().timer(BULK_POLL).await;
+                    waited += BULK_POLL;
+                    let pending = this.update(cx, |m, _| m.generation == generation && m.is_pending(&id));
+                    if !matches!(pending, Ok(true)) || waited >= BULK_WAIT {
+                        break;
+                    }
+                }
+                cx.background_executor().timer(BULK_PACE).await;
+            }
+        })
+        .detach();
     }
 
     fn send_like(&mut self, video_id: &str, liked: bool, cx: &mut Context<Self>) {
