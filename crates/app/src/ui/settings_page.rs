@@ -287,7 +287,6 @@ impl Render for SettingsPage {
             .child(self.account_page.clone())
             .child(self.playback_page.clone())
             .child(home_section)
-            .child(playlists_section)
             .child(self.audio_page.clone())
             .child(search_section)
             .child(window_section)
@@ -295,5 +294,6 @@ impl Render for SettingsPage {
             .child(discord_section)
             .child(keyboard_section)
             .child(self.data_page.clone())
+            .child(playlists_section)
     }
 }
