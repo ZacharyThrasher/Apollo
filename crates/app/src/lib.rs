@@ -58,6 +58,7 @@ pub mod reporting;
 pub mod queue_source;
 pub mod search;
 pub mod settings;
+pub mod shelf_song;
 pub mod shortcuts;
 pub mod stats;
 pub mod sleep_timer;
