@@ -16,7 +16,7 @@ use apollo_domain::library::{
 use apollo_domain::listing::{Applied, Listing, LoadFailure, LoadState, Page, Revision};
 use apollo_domain::model::{BrowseId, Track};
 use apollo_domain::queue::QueueSource;
-use gpui::{Context, Entity, RenderImage};
+use gpui::{App, Context, Entity, RenderImage};
 use image::imageops;
 
 use apollo_provider::{HistoryDay, Hit};
@@ -121,22 +121,33 @@ pub struct PlayRequest {
     pub start: Option<usize>,
     /// `Some` sets shuffle on or off for the new queue; `None` keeps the player's setting.
     pub shuffle: Option<bool>,
+    /// Skim the list instead of playing it (audition each song for a few seconds).
+    pub skim: bool,
 }
 
 impl PlayRequest {
     pub const PLAY_ALL: PlayRequest = PlayRequest {
         start: None,
         shuffle: Some(false),
+        skim: false,
     };
     pub const SHUFFLE: PlayRequest = PlayRequest {
         start: None,
         shuffle: Some(true),
+        skim: false,
+    };
+    /// Skim from the first song: the list in order.
+    pub const SKIM: PlayRequest = PlayRequest {
+        start: None,
+        shuffle: Some(false),
+        skim: true,
     };
 
     pub fn row(index: usize) -> Self {
         Self {
             start: Some(index),
             shuffle: None,
+            skim: false,
         }
     }
 }
@@ -1961,6 +1972,11 @@ impl LibraryModel {
 
     // ---- playback ----------------------------------------------------------------------
 
+    /// Whether the Skim button shows (Settings > Playback > Skim).
+    pub fn skim_enabled(&self, cx: &App) -> bool {
+        self.player.read(cx).skim_enabled()
+    }
+
     /// Plays the open page now, or as soon as it has finished loading.
     pub fn request_play(&mut self, request: PlayRequest, cx: &mut Context<Self>) {
         match self.stack.last_mut() {
@@ -2062,7 +2078,11 @@ impl LibraryModel {
             for (track, thumb) in tracks.iter().zip(&thumbs) {
                 p.hint_art(track.video_id.as_str(), thumb.as_deref());
             }
-            p.play_tracks_from(tracks, request.start, request.shuffle, source, cx)
+            if request.skim {
+                p.start_skim(tracks, source, cx)
+            } else {
+                p.play_tracks_from(tracks, request.start, request.shuffle, source, cx)
+            }
         });
     }
 

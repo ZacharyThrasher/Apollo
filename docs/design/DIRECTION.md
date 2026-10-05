@@ -282,5 +282,13 @@ The end of a playlist page you own (`ui/library/more_like.rs`, `more_like.rs`). 
 5. **Where the songs come from:** the radio (the Start radio feed) of one of the playlist's songs: the first song at first, then other songs of the playlist for each fresh set. The playlist's own songs, blocked artists' songs and songs already offered are left out. States: three skeleton rows while loading, "Couldn't load suggestions" with Retry, nothing at all when there is nothing to offer.
 6. Built choice: the keyboard selection does not reach these rows; Refresh is a tab stop.
 
+## Skim (coordinator brief, 2026-10-05; built choices flagged)
+Audition a list (`player/skim.rs`). Settings > Playback > "Skim" (on) and "Seconds per song" (10 / 20 / 30, default 20).
+1. **Entry:** a **Skim** text button after Shuffle on playlist, album and Library Songs headers, and above Explore's Top songs chart. No toasts anywhere in a skim.
+2. **Player bar:** while skimming, a pill "Skimming 3 of 40" sits left of the art: 20px high, full radius, 11px caption in text.secondary with a 6px accent dot. Built choice: the fill is bg.overlay, not bg.raised, because the bar itself is bg.raised and the pill would vanish.
+3. **Progress:** the bar (player bar, Now Playing and the mini player's line) shows only the skim window, from 0 to the seconds per song; dragging it moves inside the window.
+4. **Keys** (only while skimming; text fields and popups keep theirs): K sets the song aside in the Crate, Enter keeps the song and plays it from its start with the rest of the list after it, Esc puts back what was playing before.
+5. **Never leaves a trace:** skimmed songs are not reported to YouTube Music history or the local stats, the queue is not saved while it lasts, and a skim never starts or resumes at launch.
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.

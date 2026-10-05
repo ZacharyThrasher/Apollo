@@ -16,8 +16,9 @@ use crate::crate_list::{CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
-    AddCurrentToPlaylist, CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward, ShowShortcuts, ToggleFullscreen,
-    ToggleLyrics, ToggleMute, UndoQueue, VolumeDown,
+    AddCurrentToPlaylist, CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward,
+    ShowShortcuts, SkimCancel, SkimCrate, SkimKeep, ToggleFullscreen, ToggleLyrics, ToggleMute,
+    UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
 };
 use crate::library::{LibraryEdits, LibraryWrites, Notice, Target};
@@ -79,6 +80,8 @@ pub const BADGE_AFTER: std::time::Duration = std::time::Duration::from_millis(60
 
 /// Key context of the root view; global shortcuts bind here.
 pub const KEY_CONTEXT: &str = "Shell";
+/// The root's context while Skim runs: the shell's, plus `Skimming`.
+const SKIMMING_CONTEXT: &str = "Shell Skimming";
 
 pub fn bind_keys(cx: &mut App) {
     use gpui::KeyBinding;
@@ -1665,9 +1668,14 @@ impl Render for Shell {
             .then(|| self.sleep_menu.clone());
 
         let fonts = cx.global::<style::Fonts>().text.clone();
+        let skimming = self.player.read(cx).skimming();
         div()
             .id("shell")
-            .key_context(KEY_CONTEXT)
+            .key_context(if skimming {
+                SKIMMING_CONTEXT
+            } else {
+                KEY_CONTEXT
+            })
             .track_focus(&self.root_focus)
             .on_action(cx.listener(|this, _: &TogglePlay, _, cx| {
                 this.player.update(cx, |m, cx| m.toggle_play(cx));
@@ -1720,6 +1728,15 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &CrateCurrent, _, cx| this.crate_current(cx)))
             .on_action(cx.listener(|this, _: &AddCurrentToPlaylist, window, cx| {
                 this.add_current_to_playlist(window, cx)
+            }))
+            // Skim: K sets the song aside and the skim goes on, Enter keeps the song, Esc goes
+            // back to what was playing. The keys only exist while the shell is "Skimming".
+            .on_action(cx.listener(|this, _: &SkimCrate, _, cx| this.crate_current(cx)))
+            .on_action(cx.listener(|this, _: &SkimKeep, _, cx| {
+                this.player.update(cx, |m, cx| m.skim_keep(cx));
+            }))
+            .on_action(cx.listener(|this, _: &SkimCancel, _, cx| {
+                this.player.update(cx, |m, cx| m.skim_cancel(cx));
             }))
             .on_action(cx.listener(|this, _: &UndoQueue, _, cx| this.undo_queue(cx)))
             .on_action(cx.listener(|this, _: &RedoQueue, _, cx| this.redo_queue(cx)))

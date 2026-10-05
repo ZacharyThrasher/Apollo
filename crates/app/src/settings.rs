@@ -81,6 +81,12 @@ pub const START_MINIMIZED_TO_TRAY: BoolSetting = BoolSetting::new("start_minimiz
 /// seconds (a movie, a call) pauses the music. Off until the owner asks for it.
 pub const PAUSE_ON_OTHER_AUDIO: BoolSetting = BoolSetting::new("pause_on_other_audio", false);
 
+/// Playback > Skim: the Skim button on playlist, album and Explore lists, which plays each song
+/// for a few seconds from a third of the way in. Off hides the button (and ends a skim).
+pub const SKIM: BoolSetting = BoolSetting::new("skim", true);
+/// Playback > Seconds per song: how long Skim stays on each song (10, 20 or 30).
+pub const SKIM_SECONDS: TextSetting = TextSetting::new("skim_seconds", "20");
+
 /// Mini player > Keep on top: the mini player floats above other windows.
 pub const MINI_PLAYER_ON_TOP: BoolSetting = BoolSetting::new("mini_player_on_top", true);
 
@@ -150,6 +156,8 @@ pub const REPORTED_KEYS: &[&str] = &[
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
     PAUSE_ON_OTHER_AUDIO.key,
+    SKIM.key,
+    SKIM_SECONDS.key,
     MINI_PLAYER_ON_TOP.key,
     DISCORD_PRESENCE.key,
     GLOBAL_HOTKEYS.key,
@@ -293,6 +301,17 @@ impl SettingsModel {
             gains_db: Equalizer::gains_from_text(&self.get_text(&EQUALIZER_GAINS))
                 .unwrap_or_default(),
         }
+    }
+
+    /// Seconds per song for Skim: one of the lengths offered, the default when the stored value
+    /// is anything else.
+    pub fn skim_seconds(&self) -> u32 {
+        self.get_text(&SKIM_SECONDS)
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|s| crate::player::SKIM_SECONDS_CHOICES.contains(s))
+            .unwrap_or(crate::player::SKIM_DEFAULT_SECONDS)
     }
 
     /// The output device chosen, `None` for the system default.
@@ -743,5 +762,20 @@ mod tests {
         backend.set(EQUALIZER_GAINS.key, "6,5,oops");
         let model = SettingsModel::new(Some(backend));
         assert_eq!(model.equalizer().gains_db, [0.0; 10]);
+    }
+
+    #[test]
+    fn skim_seconds_is_one_of_the_offered_lengths_and_twenty_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(SqliteSettings::at(dir.path().join("apollo.db")));
+        let model = SettingsModel::new(Some(backend.clone()));
+        assert_eq!(model.skim_seconds(), 20);
+        assert!(model.get(&SKIM));
+        backend.set(SKIM_SECONDS.key, "30");
+        assert_eq!(SettingsModel::new(Some(backend.clone())).skim_seconds(), 30);
+        backend.set(SKIM_SECONDS.key, "7");
+        assert_eq!(SettingsModel::new(Some(backend.clone())).skim_seconds(), 20);
+        backend.set(SKIM_SECONDS.key, "soon");
+        assert_eq!(SettingsModel::new(Some(backend)).skim_seconds(), 20);
     }
 }
