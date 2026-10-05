@@ -15,6 +15,7 @@
 #   {"op":"cookies","id":N,"netscape":"<jar text>"}    -> {"id":N,"ok":true,"n":<cookies>}
 #   {"op":"resolve","id":N,"video_id":"<11 chars>"}     -> {"id":N,"ok":true,"info":{...},
 #                                                           "phases":[[label,ms],..],"ms":T,
+#                                                           "throttled":bool,
 #                                                           "jar":"<text, only if it changed>"}
 #                                                        or {"id":N,"ok":false,"error":"<text>"}
 #   {"op":"quit"}                                       -> exits
@@ -71,6 +72,7 @@ class _Log:
         self.t0 = time.monotonic()
         self.phases = []
         self.last_error = ''
+        self.throttled = False
 
     def _ms(self):
         return int((time.monotonic() - self.t0) * 1000)
@@ -86,7 +88,11 @@ class _Log:
             self.phases.append([label, self._ms()])
 
     def warning(self, msg):
-        pass
+        # yt-dlp survives a 429 on one player client by trying the next, so a throttled account
+        # can still "succeed" through a fallback client. Flag it so the app backs off anyway.
+        low = msg.lower()
+        if 'http error 429' in low or 'too many requests' in low:
+            self.throttled = True
 
     def error(self, msg):
         self.last_error = msg
@@ -196,13 +202,14 @@ def serve():
                 except Exception as exc:  # yt-dlp raises DownloadError with its message
                     _reply(out, {'id': rid, 'ok': False, 'error': str(exc)[:2000],
                                  'ms': int((time.monotonic() - t0) * 1000),
-                                 'phases': log.phases})
+                                 'phases': log.phases, 'throttled': log.throttled})
                     continue
                 reply = {
                     'id': rid, 'ok': True,
                     'client': _client_of(info.get('url')),
                     'info': {k: info[k] for k in _INFO_KEYS if k in info},
                     'phases': log.phases,
+                    'throttled': log.throttled,
                     'ms': int((time.monotonic() - t0) * 1000),
                 }
                 jar = _jar_text(ydl)
