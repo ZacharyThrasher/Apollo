@@ -1,5 +1,6 @@
 //! Embedded Fluent System Icons (regular and filled, 20px; MIT, see
-//! `assets/FLUENT-ICONS-LICENSE.txt`) plus the spinner. Served to GPUI's `svg()` by path.
+//! `assets/FLUENT-ICONS-LICENSE.txt`) plus the spinner and the two move-to-end arrows, which
+//! are drawn in the same weight. Served to GPUI's `svg()` by path.
 
 use std::borrow::Cow;
 
@@ -87,6 +88,8 @@ icons! {
     Open => "open-regular",
     ThumbDislike => "thumb-dislike-regular",
     PersonProhibited => "person-prohibited-regular",
+    MoveTop => "arrow-up-to-top-regular",
+    MoveBottom => "arrow-down-to-bottom-regular",
 }
 
 pub struct Assets;

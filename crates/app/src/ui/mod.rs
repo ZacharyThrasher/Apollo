@@ -8,6 +8,7 @@ pub mod cheat_sheet;
 pub mod card;
 pub mod crate_page;
 pub mod data_page;
+pub mod duplicates_dialog;
 pub mod choice_menu;
 pub mod equalizer_panel;
 pub mod explore_page;

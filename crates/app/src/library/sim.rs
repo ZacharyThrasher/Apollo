@@ -440,6 +440,21 @@ impl SimLibrary {
         self.state().songs = ids.iter().map(|id| (*id).to_owned()).collect();
     }
 
+    /// Make a playlist of the account hold exactly these videos, in this order (a video may
+    /// repeat: each row has its own token, as the service gives them).
+    pub fn preset_playlist(&self, bare_id: &str, video_ids: &[&str]) {
+        let rows = video_ids
+            .iter()
+            .enumerate()
+            .map(|(n, id)| {
+                let mut row = song_row(id, n);
+                row.occurrence = Some(format!("occ-preset-{bare_id}-{n}"));
+                row
+            })
+            .collect();
+        self.state().edited_rows.insert(bare_id.to_owned(), rows);
+    }
+
     /// Fill Library > Songs with [`LONG_SONGS`] generated songs (paged).
     pub fn preset_long_library_songs(&self) {
         self.state().songs = (0..LONG_SONGS)

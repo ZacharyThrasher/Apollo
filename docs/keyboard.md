@@ -47,7 +47,7 @@ cursor row keeps its own ring; the picked rows are tinted with the accent.
 
 With 2 or more picked, right-click on any picked row (or its More button) opens a menu for all
 of them: Play next, Add to queue, Add to playlist…, Add to Crate (Remove from Crate when they are
-all in it, as on the Crate page), Like, and on a playlist of your own Remove from playlist; in the
+all in it, as on the Crate page), Like, and on a playlist of your own Move to top, Move to bottom and Remove from playlist; in the
 queue Remove from queue. A row that is not picked keeps its own menu. A plain click plays the song
 as before and clears the picks. Likes and playlist removals go to the account one at a time;
 Remove from queue is one step for Ctrl+Z, whatever the count. The Crate still drags one row at a
@@ -63,9 +63,24 @@ or search starts with none.
 | L | Like / unlike the row |
 | C | Set the row aside in the Crate (queue, Library, Search) |
 | Delete / Backspace | Remove the row (queue, Crate) |
-| Alt+Up / Alt+Down | Move the row one place up / down (up-next in the queue; the Crate). The row keeps the cursor. |
+| Alt+Up / Alt+Down | Move the row one place up / down (up-next in the queue; the Crate; a playlist of your own). The row keeps the cursor. With songs picked on a playlist, all of them move one place together. |
 
-The Crate also drags: pick a row up and let go where it should go (a thin line shows the place; below the last song sends it to the bottom). New songs land at the bottom.
+The Crate and a playlist of your own also drag: pick a row up and let go where it should go (a thin line shows the place; below the last song sends it to the bottom). New songs land at the bottom.
+
+### Arranging a playlist of your own
+
+On a playlist you own, once every song has loaded (and not while the filter box has text in it,
+because a filtered row's place on screen is not its place in the playlist):
+
+| Do | Does |
+|---|---|
+| Alt+Up / Alt+Down | The cursor row, or every picked song, moves one place; the cursor follows. At the top (or bottom) nothing moves, and with several picked, one pick already there holds them all. |
+| Right-click a song (or the picked songs) > **Move to top** / **Move to bottom** | Sends it (or all of them, keeping their order among themselves) to that end. |
+| Playlist header More > **Remove duplicates…** | Opens a preview of every song listed again (matched by video id; the first copy of each stays) with the place each repeat has. **Remove N** takes exactly those rows out, **Cancel** (focused, Esc) keeps everything. |
+
+There is no whole-playlist sort. Each move shows at once and goes to YouTube Music as its own
+"move before" edit, one at a time through the page's edit queue; a refused one puts the playlist
+back as YouTube Music holds it and leaves the usual notice.
 
 ### While skimming
 

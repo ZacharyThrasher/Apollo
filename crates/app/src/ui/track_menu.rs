@@ -13,6 +13,7 @@
 
 use std::rc::Rc;
 
+use apollo_domain::arrange::Edge;
 use apollo_domain::blocklist::BlockedArtist;
 use apollo_domain::library::{Collection, CollectionKind};
 use apollo_domain::links;
@@ -33,6 +34,7 @@ use crate::player::PlayerModel;
 use crate::shortcuts::{self, Scope};
 use crate::style::{self, color};
 use crate::ui::anchor;
+use crate::ui::duplicates_dialog;
 use crate::ui::playlist_dialog::{self, Mode};
 use crate::ui::playlist_picker::{PlaylistPicker, PANEL_WIDTH};
 
@@ -223,6 +225,13 @@ pub enum Command {
     EditPlaylist,
     DeletePlaylist,
     RemoveFromPlaylist,
+    /// Send the row (or every picked row) to the top of a playlist of your own.
+    MoveToTop,
+    /// ... and to the bottom.
+    MoveToBottom,
+    /// Opens the Remove duplicates dialog: a preview of the repeated songs of a playlist of your
+    /// own.
+    RemoveDuplicates,
     /// Save the queue as a new playlist.
     SaveQueue,
     /// The thumbs-down: tell YouTube Music this song is not wanted.
@@ -272,6 +281,9 @@ pub fn album_of(track: &Track) -> Option<&AlbumRef> {
 pub struct Facts {
     /// A playlist of the account's own: it can be renamed and deleted.
     pub own_playlist: bool,
+    /// The playlist's own page is open and its songs can be arranged: Remove duplicates reads
+    /// that page, so a card elsewhere does not offer it.
+    pub page_open: bool,
     /// Whether the library holds the album or playlist; `None` where saving does not apply.
     pub saved: Option<bool>,
     /// Whether the song is in the Crate (its item then takes it out).
@@ -318,10 +330,16 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             }
             out.push(vec![item(Command::CopyLink, Icon::Link, "Copy link")]);
             if facts.own_playlist {
-                out.push(vec![
-                    item(Command::EditPlaylist, Icon::Edit, "Edit playlist\u{2026}"),
-                    item(Command::DeletePlaylist, Icon::Delete, "Delete playlist\u{2026}"),
-                ]);
+                let mut own = vec![item(Command::EditPlaylist, Icon::Edit, "Edit playlist\u{2026}")];
+                if facts.page_open {
+                    own.push(item(
+                        Command::RemoveDuplicates,
+                        Icon::Dismiss,
+                        "Remove duplicates\u{2026}",
+                    ));
+                }
+                own.push(item(Command::DeletePlaylist, Icon::Delete, "Delete playlist\u{2026}"));
+                out.push(own);
             }
             out
         }
@@ -393,6 +411,7 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                 )]);
             }
             if t.playlist_row.is_some() {
+                out.push(move_items());
                 out.push(vec![item(
                     Command::RemoveFromPlaylist,
                     Icon::Delete,
@@ -428,6 +447,7 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                 item(Command::ToggleLike, Icon::HeartRegular, "Like")
             }]);
             if songs.iter().all(|s| s.playlist_row.is_some()) {
+                out.push(move_items());
                 out.push(vec![item(
                     Command::RemoveFromPlaylist,
                     Icon::Delete,
@@ -451,6 +471,14 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             "Save as playlist\u{2026}",
         )]],
     }
+}
+
+/// The two ends a row of your own playlist can be sent to.
+fn move_items() -> Vec<Item> {
+    vec![
+        item(Command::MoveToTop, Icon::MoveTop, "Move to top"),
+        item(Command::MoveToBottom, Icon::MoveBottom, "Move to bottom"),
+    ]
 }
 
 /// The block item: "Don't play this artist", or the way back once they are blocked.
@@ -669,6 +697,10 @@ pub type OpenTarget = Rc<dyn Fn(Target, &mut Window, &mut App)>;
 /// What Remove from playlist calls: the playlist's collection and the row's token.
 pub type RemoveRow = Rc<dyn Fn(&Collection, &str, &mut App)>;
 
+/// What Move to top / Move to bottom call: the playlist's collection, the tokens of the rows to
+/// move (in list order) and the end they go to.
+pub type ArrangeRows = Rc<dyn Fn(&Collection, &[String], Edge, &mut App)>;
+
 struct Open {
     subject: Subject,
     placed: Placed,
@@ -684,6 +716,7 @@ pub struct TrackMenu {
     edits: Entity<LibraryEdits>,
     on_open: OpenTarget,
     on_remove_row: RemoveRow,
+    on_arrange: ArrangeRows,
     focus: FocusHandle,
     open: Option<Open>,
 }
@@ -700,6 +733,7 @@ impl TrackMenu {
         edits: Entity<LibraryEdits>,
         on_open: impl Fn(Target, &mut Window, &mut App) + 'static,
         on_remove_row: impl Fn(&Collection, &str, &mut App) + 'static,
+        on_arrange: impl Fn(&Collection, &[String], Edge, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
@@ -711,6 +745,7 @@ impl TrackMenu {
             edits,
             on_open: Rc::new(on_open),
             on_remove_row: Rc::new(on_remove_row),
+            on_arrange: Rc::new(on_arrange),
             focus: cx.focus_handle(),
             open: None,
         }
@@ -774,6 +809,9 @@ impl TrackMenu {
                     false,
                     Facts {
                         own_playlist: edits.is_editable(c),
+                        page_open: cx
+                            .try_global::<duplicates_dialog::DuplicatesDialogHandle>()
+                            .is_some_and(|h| h.0.read(cx).can_open(c, cx)),
                         saved: edits.saved_state(c),
                         ..Facts::default()
                     },
@@ -1000,6 +1038,24 @@ impl TrackMenu {
                 for row in songs.into_iter().filter_map(|s| s.playlist_row) {
                     (self.on_remove_row.clone())(&row.collection, &row.occurrence, cx);
                 }
+            }
+            (Command::MoveToTop | Command::MoveToBottom, Subject::Tracks(songs)) => {
+                let edge = if command == Command::MoveToTop { Edge::Top } else { Edge::Bottom };
+                // One playlist page: the rows' own tokens, in list order.
+                let rows: Vec<PlaylistRow> = songs.into_iter().filter_map(|s| s.playlist_row).collect();
+                if let Some(first) = rows.first() {
+                    let tokens: Vec<String> = rows.iter().map(|r| r.occurrence.clone()).collect();
+                    (self.on_arrange.clone())(&first.collection, &tokens, edge, cx);
+                }
+            }
+            (Command::MoveToTop | Command::MoveToBottom, Subject::Track(t)) => {
+                let edge = if command == Command::MoveToTop { Edge::Top } else { Edge::Bottom };
+                if let Some(row) = t.playlist_row {
+                    (self.on_arrange.clone())(&row.collection, &[row.occurrence], edge, cx);
+                }
+            }
+            (Command::RemoveDuplicates, Subject::Collection(c)) => {
+                duplicates_dialog::open(c, window, cx);
             }
             (Command::StartRadio, Subject::Track(t)) => {
                 let name = t.track.title.clone();
@@ -1559,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn your_own_playlist_card_ends_with_rename_and_delete() {
+    fn your_own_playlist_card_ends_with_rename_duplicates_and_delete() {
         use Command::*;
         let own = Facts {
             own_playlist: true,
@@ -1567,12 +1623,18 @@ mod tests {
             ..Facts::default()
         };
         assert_eq!(
-            commands_with(&card(), own),
+            commands_with(&card(), own)[3],
+            vec![EditPlaylist, DeletePlaylist],
+            "a card that is not the open page has no Remove duplicates"
+        );
+        let on_its_page = Facts { page_open: true, ..own };
+        assert_eq!(
+            commands_with(&card(), on_its_page),
             vec![
                 vec![Play, Shuffle],
                 vec![AddToQueue, StartRadio],
                 vec![CopyLink],
-                vec![EditPlaylist, DeletePlaylist],
+                vec![EditPlaylist, RemoveDuplicates, DeletePlaylist],
             ]
         );
     }
@@ -1610,8 +1672,11 @@ mod tests {
             Subject::playlist_track(song(true, true), None, playlist, "setVideoId1".into());
         let groups = commands(&in_playlist, false);
         assert_eq!(groups.last().unwrap(), &vec![RemoveFromPlaylist]);
+        // ... and sent to either end of it, in a group of their own just above.
+        assert_eq!(groups[groups.len() - 2], vec![MoveToTop, MoveToBottom]);
         let plain = commands(&Subject::track(song(true, true), None), false);
         assert!(!plain.iter().flatten().any(|c| *c == RemoveFromPlaylist));
+        assert!(!plain.iter().flatten().any(|c| matches!(c, MoveToTop | MoveToBottom)));
         // A queue row is removed from the queue, not from a playlist.
         let queued = commands(&Subject::queued(song(true, true), QueueEntryId::from_raw(3)), false);
         assert!(!queued.iter().flatten().any(|c| *c == RemoveFromPlaylist));
