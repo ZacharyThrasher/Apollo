@@ -39,6 +39,7 @@ actions!(
         GoBack,
         GoForward,
         SkimCrate,
+        SkimDrop,
         SkimKeep,
         SkimCancel,
         NavigateUp,
@@ -106,6 +107,8 @@ pub fn bind_keys(cx: &mut App) {
     let skim = Some(SKIM_PLAIN);
     cx.bind_keys([
         KeyBinding::new("k", SkimCrate, skim),
+        // Only means something while the Crate is the list being skimmed.
+        KeyBinding::new("delete", SkimDrop, skim),
         KeyBinding::new("enter", SkimKeep, skim),
         KeyBinding::new("escape", SkimCancel, skim),
     ]);

@@ -163,7 +163,7 @@ impl LibraryWrites {
         self.notice.as_ref()
     }
 
-    fn source(&self, cx: &gpui::App) -> Option<Arc<dyn LibrarySource>> {
+    pub(crate) fn source(&self, cx: &gpui::App) -> Option<Arc<dyn LibrarySource>> {
         self.player.read(cx).library_source()
     }
 
