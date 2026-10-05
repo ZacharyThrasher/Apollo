@@ -205,6 +205,8 @@ fn click(vcx: &mut VisualTestContext, selector: &str) {
 }
 
 fn settings_page(page: &Page, vcx: &mut VisualTestContext) {
+    // Tall enough for every section: Playback has grown, and Audio sits below it.
+    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(1600.0)));
     page.shell
         .update(vcx, |s, cx| s.show_route(Route::Settings, cx));
     vcx.run_until_parked();

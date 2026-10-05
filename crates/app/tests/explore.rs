@@ -239,6 +239,30 @@ fn the_chart_shows_twenty_rows_and_show_all_opens_the_chart_page(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn the_charts_skim_button_auditions_the_whole_chart(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    let expected: Vec<String> = page.explore.read_with(vcx, |m, _| {
+        m.page()
+            .unwrap()
+            .top_songs
+            .iter()
+            .map(|s| s.track.video_id.as_str().to_owned())
+            .collect()
+    });
+    focus_stop(&page, vcx, apollo_app::backend::sim::FIXTURES.len());
+    click(vcx, "explore-skim");
+    assert_eq!(queue(&page, vcx), expected, "every chart song, in rank order");
+    page.player.read_with(vcx, |m, _| {
+        let skim = m.view().skim.expect("skimming");
+        assert_eq!((skim.index, skim.total), (1, expected.len()));
+    });
+    // Off in Settings, the button is gone.
+    page.player.update(vcx, |m, cx| m.set_skim_enabled(false, cx));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("explore-skim").is_none());
+}
+
+#[gpui::test]
 fn a_chart_song_plays_with_the_whole_chart_as_the_queue(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     let expected: Vec<String> = page.explore.read_with(vcx, |m, _| {

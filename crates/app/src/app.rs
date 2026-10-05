@@ -134,15 +134,28 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     // Plays are reported to YouTube Music only while "Add plays to history" is on.
     let reporter = mode.play_reporter(&ports.service);
     let history_on = settings.read(cx).get(&ADD_PLAYS_TO_HISTORY);
-    player.update(cx, |m, _| {
+    player.update(cx, |m, cx| {
         m.set_play_reporter(reporter);
         m.set_report_plays(history_on);
+        let (skim, seconds) = {
+            let s = settings.read(cx);
+            (s.get(&crate::settings::SKIM), s.skim_seconds())
+        };
+        m.set_skim_seconds(seconds);
+        m.set_skim_enabled(skim, cx);
     });
     {
         let player = player.clone();
         cx.observe(&settings, move |settings, cx| {
-            let on = settings.read(cx).get(&ADD_PLAYS_TO_HISTORY);
-            player.update(cx, |m, _| m.set_report_plays(on));
+            let (on, skim, seconds) = {
+                let s = settings.read(cx);
+                (s.get(&ADD_PLAYS_TO_HISTORY), s.get(&crate::settings::SKIM), s.skim_seconds())
+            };
+            player.update(cx, |m, cx| {
+                m.set_report_plays(on);
+                m.set_skim_seconds(seconds);
+                m.set_skim_enabled(skim, cx);
+            });
         })
         .detach();
     }
