@@ -199,7 +199,13 @@ pub const ENTRIES: &[Entry] = &[
     )
     .all_keys(),
     entry("help", "This list", Group::Navigate, &["ShowShortcuts"]).prefer("shift-/"),
-    entry("crate-panel", "Crate panel", Group::Window, &["ToggleCrateDock"]).tips(&["Crate panel"]),
+    entry(
+        "crate-panel",
+        "Jump into the Crate panel (again: close it)",
+        Group::Window,
+        &["ToggleCrateDock"],
+    )
+    .tips(&["Crate panel"]),
     entry("fullscreen", "Fullscreen", Group::Window, &["ToggleFullscreen"]),
 ];
 

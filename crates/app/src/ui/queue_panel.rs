@@ -504,7 +504,30 @@ impl QueuePanel {
                 row.track.title.clone(),
             )]
         };
+        // With the key acting on one song and a target set it goes straight in, so the cursor
+        // steps on; with none the picker opens and the cursor stays.
+        let direct = !songs.is_empty()
+            && !self.selection.is_bulk()
+            && crate::target_playlist::has_target(cx);
         crate::target_playlist::add_songs(songs, None, window, cx);
+        if direct {
+            self.advance(cx);
+        }
+    }
+
+    /// After C or A acted on the cursor row: the cursor steps to the next row (Settings >
+    /// Playlists), the last row staying put.
+    fn advance(&mut self, cx: &mut Context<Self>) {
+        let view = self.fresh_view(cx);
+        let ids = view.ordered_ids();
+        let Some(at) = self.cursor.and_then(|c| ids.iter().position(|id| *id == c)) else {
+            return;
+        };
+        if let Some(next) = crate::auto_advance::next_row(at, ids.len(), cx) {
+            self.cursor = Some(ids[next]);
+            self.scroll_to(&view, ids[next]);
+            cx.notify();
+        }
     }
 
     /// Set the track under the cursor (or every picked one) aside in the Crate.
@@ -518,6 +541,7 @@ impl QueuePanel {
         };
         let track = row.track.clone();
         crate::crate_list::add_track(&self.player, track, None, cx);
+        self.advance(cx);
     }
 
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {

@@ -44,6 +44,21 @@ const CENTER_MIN: f32 = 320.0;
 pub const MIN_BAR_WIDTH: f32 =
     2.0 * layout::PLAYER_BAR_SIDE_MIN + CENTER_MIN + 2.0 * spacing::S4 + 2.0 * spacing::S4;
 
+/// The Crate button's count: nothing while the Crate is empty, the number up to 99, then "99+".
+pub fn crate_count_label(count: usize) -> Option<SharedString> {
+    match count {
+        0 => None,
+        1..=99 => Some(count.to_string().into()),
+        _ => Some("99+".into()),
+    }
+}
+
+/// Room the count takes in the Crate button beyond a bare 32px button: its gap and its text at
+/// about 7px a character (the slider's minimum width shrinks by this).
+fn crate_count_extra(count: usize) -> f32 {
+    crate_count_label(count).map_or(0.0, |label| 3.0 + 7.0 * label.chars().count() as f32)
+}
+
 #[derive(Clone)]
 pub struct BarFocus {
     pub shuffle: FocusHandle,
@@ -92,6 +107,8 @@ pub struct PlayerBar {
     pub on_queue_toggle: Rc<Handler>,
     /// The docked Crate is open.
     pub crate_open: bool,
+    /// How many songs the Crate holds; shown beside its button's icon above zero.
+    pub crate_count: usize,
     pub on_crate_toggle: Rc<Handler>,
     /// Lyrics are on screen (Now Playing is open with lyrics chosen).
     pub lyrics_open: bool,
@@ -382,6 +399,8 @@ impl RenderOnce for PlayerBar {
         } else {
             f32::from(v.volume) / 100.0
         };
+        // The Crate's count widens its button; the slider gives that room back at minimum width.
+        let volume_min = VOLUME_MIN_WIDTH - crate_count_extra(self.crate_count);
         let right = div()
             .debug_selector(|| "player-bar-right".into())
             .flex()
@@ -427,7 +446,7 @@ impl RenderOnce for PlayerBar {
             )
             .child(
                 // Gives up to 32px to the buttons when the block is at its minimum width.
-                div().w(px(VOLUME_WIDTH)).min_w(px(VOLUME_MIN_WIDTH)).flex_shrink_1().child(
+                div().w(px(VOLUME_WIDTH)).min_w(px(volume_min)).flex_shrink_1().child(
                     Slider::new("volume", &self.volume, &self.focus.volume, "Volume", accent)
                         .value(volume_value)
                         .value_text(format!("{}%", (volume_value * 100.0).round() as u32))
@@ -517,6 +536,7 @@ impl RenderOnce for PlayerBar {
                     )
                     .icon_color(transport::on_off(self.crate_open))
                     .toggled(self.crate_open)
+                    .count(crate_count_label(self.crate_count))
                     .on_click({
                         let f = self.on_crate_toggle.clone();
                         move |w, cx| f(w, cx)
@@ -561,4 +581,19 @@ pub(crate) fn text_line(
             d.tooltip(move |_, cx| Tooltip::view(full.clone(), cx))
         })
         .child(text)
+}
+
+#[cfg(test)]
+mod count_tests {
+    use super::*;
+
+    #[test]
+    fn the_crate_count_hides_at_zero_and_caps_at_99() {
+        assert_eq!(crate_count_label(0), None);
+        assert_eq!(crate_count_label(1).as_deref(), Some("1"));
+        assert_eq!(crate_count_label(42).as_deref(), Some("42"));
+        assert_eq!(crate_count_label(99).as_deref(), Some("99"));
+        assert_eq!(crate_count_label(100).as_deref(), Some("99+"));
+        assert_eq!(crate_count_label(5000).as_deref(), Some("99+"));
+    }
 }

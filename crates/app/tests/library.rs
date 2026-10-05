@@ -242,7 +242,8 @@ fn k_while_skimming_still_keeps_the_song_in_the_crate(cx: &mut TestAppContext) {
         .read_with(vcx, |s, _| s.crate_model().clone())
         .read_with(vcx, |m, _| m.items().len());
     assert_eq!(crate_len, 1, "K went to the Crate, not to a new skim");
-    assert_eq!(skim_state(&page, vcx), Some((1, 6)), "and the skim carries on, not restarted");
+    // Auto-advance (on by default) takes the skim on to the next song; it is not restarted.
+    assert_eq!(skim_state(&page, vcx), Some((2, 6)), "and the skim carries on to the next song");
 }
 
 #[gpui::test]

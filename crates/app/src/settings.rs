@@ -90,6 +90,10 @@ pub const CONFIRM_ADDS: BoolSetting = BoolSetting::new("confirm_adds", true);
 /// dialog, make a private "Oct 5 · Untitled" at once and open it with its title ready to rename.
 /// Off until the owner asks for it.
 pub const INSTANT_PLAYLISTS: BoolSetting = BoolSetting::new("instant_playlists", false);
+/// Playlists > Move to the next song after C, A or K: after C, A or K acts on a list's cursor
+/// row (Search, Library, queue, playlist, album, Crate) the cursor steps to the next row; Skim's
+/// K goes on to the next song. Picked songs keep the cursor where it is. Off leaves it be.
+pub const AUTO_ADVANCE: BoolSetting = BoolSetting::new("auto_advance", true);
 /// Playlists > Take songs out of the Crate once filed: a song the service confirms is in a playlist
 /// (A, the P picker, "Add all to…") leaves the Crate. Ctrl+Z puts it back. Off: a song can belong
 /// in two playlists, so nothing leaves unasked.
@@ -178,6 +182,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     MORE_LIKE_THIS.key,
     CONFIRM_ADDS.key,
     INSTANT_PLAYLISTS.key,
+    AUTO_ADVANCE.key,
     CRATE_FILE_AND_FORGET.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
