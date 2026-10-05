@@ -175,6 +175,27 @@ impl<T: ListItem> Listing<T> {
         true
     }
 
+    /// Put the items in a new order: place `n` takes the item that was at `order[n]`. Returns
+    /// whether it did; `order` that is not a permutation of the list changes nothing. Paging state
+    /// is untouched.
+    pub fn reorder(&mut self, order: &[usize]) -> bool {
+        let len = self.items.len();
+        let mut seen = vec![false; len];
+        if order.len() != len
+            || order
+                .iter()
+                .any(|&i| i >= len || std::mem::replace(&mut seen[i], true))
+        {
+            return false;
+        }
+        let mut taken: Vec<Option<T>> = std::mem::take(&mut self.items)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.items = order.iter().filter_map(|&i| taken[i].take()).collect();
+        true
+    }
+
     /// A request for the next page is marked in flight.
     pub fn mark_loading_more(&mut self, rev: Revision) -> bool {
         if rev != self.revision || self.continuation.is_none() {
@@ -277,6 +298,20 @@ mod tests {
         assert!(l.move_item(0, 3), "to the end");
         assert_eq!(l.items(), [Occ("a"), Occ("b"), Occ("c")]);
         assert_eq!(l.state(), LoadState::HasMore);
+        assert_eq!(l.continuation(), Some((rev, "t1")));
+    }
+
+    #[test]
+    fn reorder_takes_a_permutation_and_nothing_else() {
+        let mut l = Listing::new();
+        let rev = l.begin();
+        l.apply(rev, page(vec![Occ("a"), Occ("b"), Occ("c")], Some("t1")));
+        assert!(l.reorder(&[2, 0, 1]));
+        assert_eq!(l.items(), [Occ("c"), Occ("a"), Occ("b")]);
+        assert!(!l.reorder(&[0, 0, 1]), "a row twice");
+        assert!(!l.reorder(&[0, 1]), "a row short");
+        assert!(!l.reorder(&[0, 1, 3]), "no such row");
+        assert_eq!(l.items(), [Occ("c"), Occ("a"), Occ("b")]);
         assert_eq!(l.continuation(), Some((rev, "t1")));
     }
 

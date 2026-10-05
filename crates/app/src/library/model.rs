@@ -31,8 +31,10 @@ use super::source::{ArtistContent, LibrarySource, TrackRow};
 use crate::search::local::LocalIndex;
 use super::writes::{LibraryWrites, WritesEvent};
 
+mod arrange;
 mod artist;
 mod stats;
+pub use arrange::{Arrange, Repeat};
 pub use artist::MixKind;
 use crate::art::{sized_thumbnail, DecodedArt};
 use crate::page_cache::{keys, PageCache, Ticket};

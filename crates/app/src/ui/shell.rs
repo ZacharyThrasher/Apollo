@@ -20,6 +20,7 @@ use crate::keymap::{
     SkimCrate, SkimKeep, ToggleFullscreen, ToggleLyrics, ToggleMute, UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
 };
+use crate::library::model::Arrange;
 use crate::library::{LibraryEdits, LibraryWrites, Notice, Target};
 use crate::lyrics::LyricsModel;
 use crate::motion::PanelSlide;
@@ -46,6 +47,7 @@ use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus};
 use crate::ui::playback_page::PlaybackPage;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::blocked_dialog::{self, BlockedDialog, BlockedDialogHandle};
+use crate::ui::duplicates_dialog::{self, DuplicatesDialog, DuplicatesDialogHandle};
 use crate::ui::cheat_sheet::{self, CheatSheet, CheatSheetHandle};
 use crate::ui::playlist_dialog::{self, DialogHandle, PlaylistDialog};
 use crate::ui::playlist_picker::{self, PlaylistPicker};
@@ -109,6 +111,7 @@ pub fn bind_keys(cx: &mut App) {
     track_menu::bind_keys(cx);
     playlist_dialog::bind_keys(cx);
     blocked_dialog::bind_keys(cx);
+    duplicates_dialog::bind_keys(cx);
     cheat_sheet::bind_keys(cx);
     choice_menu::bind_keys(cx);
     crate::ui::vslider::bind_keys(cx);
@@ -151,6 +154,8 @@ pub struct Shell {
     dialog: Entity<PlaylistDialog>,
     /// The list of blocked artists, with Unblock.
     blocked_dialog: Entity<BlockedDialog>,
+    /// The preview that Remove duplicates asks for.
+    duplicates_dialog: Entity<DuplicatesDialog>,
     /// The `?` overlay listing every shortcut.
     cheat_sheet: Entity<CheatSheet>,
     /// Ctrl is held (and nothing else); the key badges show once it has been for a moment.
@@ -354,6 +359,22 @@ impl Shell {
                         });
                     }
                 },
+                {
+                    let weak = weak.clone();
+                    move |collection, occurrences, edge, cx| {
+                        let _ = weak.update(cx, |s, cx| {
+                            let model = s.library.read(cx).model().clone();
+                            model.update(cx, |m, cx| {
+                                m.arrange_rows(
+                                    collection.library_key(),
+                                    occurrences,
+                                    Arrange::To(edge),
+                                    cx,
+                                )
+                            });
+                        });
+                    }
+                },
                 cx,
             )
         });
@@ -477,6 +498,12 @@ impl Shell {
                 cx,
             )
         });
+        let duplicates_dialog = {
+            let model = library.read(cx).model().clone();
+            cx.new(|cx| DuplicatesDialog::new(player.clone(), model, cx))
+        };
+        cx.observe(&duplicates_dialog, |_, _, cx| cx.notify()).detach();
+        cx.set_global(DuplicatesDialogHandle(duplicates_dialog.clone()));
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&account, |this, _, cx| this.account_changed(cx))
             .detach();
@@ -598,6 +625,7 @@ impl Shell {
             picker,
             dialog,
             blocked_dialog,
+            duplicates_dialog,
             cheat_sheet,
             ctrl_held: false,
             badge_gen: 0,
@@ -675,6 +703,7 @@ impl Shell {
             self.edits.update(cx, |e, cx| e.reset(cx));
             self.dialog.update(cx, |d, cx| d.reset(cx));
             self.blocked_dialog.update(cx, |d, cx| d.reset(cx));
+            self.duplicates_dialog.update(cx, |d, cx| d.reset(cx));
             self.sleep_menu.update(cx, |m, cx| m.reset(cx));
         }
         // The Crate belongs to the chosen account (a moment without one keeps what shows).
@@ -805,6 +834,10 @@ impl Shell {
 
     pub fn blocked_dialog(&self) -> &Entity<BlockedDialog> {
         &self.blocked_dialog
+    }
+
+    pub fn duplicates_dialog(&self) -> &Entity<DuplicatesDialog> {
+        &self.duplicates_dialog
     }
 
     pub fn dialog(&self) -> &Entity<PlaylistDialog> {
@@ -1626,6 +1659,11 @@ impl Render for Shell {
             .read(cx)
             .is_open()
             .then(|| self.blocked_dialog.clone());
+        let duplicates_dialog = self
+            .duplicates_dialog
+            .read(cx)
+            .is_open()
+            .then(|| self.duplicates_dialog.clone());
         let cheat_sheet = self
             .cheat_sheet
             .read(cx)
@@ -1740,6 +1778,7 @@ impl Render for Shell {
             .children(menu)
             .children(dialog)
             .children(blocked_dialog)
+            .children(duplicates_dialog)
             .children(cheat_sheet)
             .children(choices)
             .children(sleep_menu)
