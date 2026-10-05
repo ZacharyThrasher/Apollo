@@ -1002,6 +1002,12 @@ impl PlayerModel {
         if tracks.is_empty() || self.driver.is_none() {
             return;
         }
+        // A song picked from the list being skimmed keeps the skim going from that song.
+        if let Some(start) = start {
+            if self.skim_pick(&tracks, start, source.as_ref(), cx) {
+                return;
+            }
+        }
         self.skim_yield();
         let before = self.undo_capture();
         let seed = self.next_seed();
