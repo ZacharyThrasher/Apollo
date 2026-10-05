@@ -109,7 +109,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(26, cx);
+        let h = self.handles(27, cx);
 
         let home_section = SettingsSection::new("Home")
             .row(self.bool_row(
@@ -190,7 +190,7 @@ impl Render for SettingsPage {
                 "setting-crate-mark-filed",
                 "Mark songs already in the target playlist",
                 &CRATE_MARK_FILED,
-                &h[25],
+                &h[26],
                 accent,
                 cx,
             ));
