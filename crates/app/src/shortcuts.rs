@@ -167,6 +167,8 @@ pub const ENTRIES: &[Entry] = &[
         &["MoveCursorUp", "MoveCursorDown", "MoveRowUp", "MoveRowDown"],
     )
     .all_keys(),
+    entry("crate-top", "Crate: move to top", Group::Collect, &["CrateMoveTop"]),
+    entry("crate-bottom", "Crate: move to bottom", Group::Collect, &["CrateMoveBottom"]),
     entry("undo", "Undo", Group::Collect, &["UndoQueue"]),
     entry("redo", "Redo", Group::Collect, &["RedoQueue"]).all_keys(),
     entry("skim-from", "Skim from here", Group::Play, &["SkimRow"]),

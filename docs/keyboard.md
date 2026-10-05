@@ -52,6 +52,37 @@ every control in reading order: the nav rail, the page, the queue, the player ba
 
 On a page with no list (Settings) the first press lands on its first control.
 
+## Filtering and arranging the Crate
+
+All local: none of this asks YouTube anything.
+
+**Filter.** The Crate page's header (and the docked panel's, under its buttons) has the playlist
+page's filter box: a song stays when its title, artist or album holds every word typed, in any
+case ("3 of 42 songs" says how many). Esc in the box clears it; Enter moves to the list. While the
+box has text, Play, Shuffle, Add all to queue, Save as playlist… and Add all to… act on the songs
+shown, Clear takes out only those (Ctrl+Z puts them back), and anything that depends on a song's
+place is off, because a filtered row's place on screen is not its place in the Crate: drag, Alt+Up
+/ Alt+Down and the Arrange menu. A song dropped on the docked list goes to the bottom. Alt+Home
+/ Alt+End still work, since the top is the top. Typing nothing shows everything again.
+
+**Arrange** (a text button beside the filter, off while the filter has text or the Crate has fewer
+than two songs) opens a popover; the choice rewrites the Crate's order, not a hidden view of it,
+so Save as playlist keeps it:
+
+| Choice | Result |
+|---|---|
+| Sort by Title / Artist / Album | A to Z, ignoring case; the first listed artist is the artist. Songs with none go last |
+| Sort by Date added | Oldest first: the order the songs were set aside in (undoes a shuffle done long ago) |
+| Sort by Length | Shortest first; songs with no length go last |
+| Shuffle | A new random order every time |
+| Reverse | Flips the order (so "longest first" is Sort by Length, then Reverse) |
+| Spread artists | No two songs in a row by the same (first-listed) artist, wherever that can be done. It keeps the order as far as it can: a Crate that is spread already comes back unchanged, and an artist with more than half the songs is spread as thinly as the others allow |
+
+Every sort keeps the order of songs that tie. Each choice is one step for Ctrl+Z ("Undid: sorted
+the Crate by artist"), and the pill says what was done ("Sorted by artist", with "· Ctrl+Z to
+undo" while shortcut hints are on; Settings > Playlists > Confirm when adding does not switch
+it off, since an arrange is not an add). Up / Down / Enter / Esc work in the popover.
+
 ## The docked Crate
 
 The Crate button in the player bar (or **Ctrl+Shift+C**) opens the Crate as a 320px panel on the
@@ -125,6 +156,8 @@ or search starts with none.
 | C | Set the row aside in the Crate (queue, Library, Search) |
 | Delete / Backspace | Remove the row (queue, Crate) |
 | Alt+Up / Alt+Down | Move the row one place up / down (up-next in the queue; the Crate; a playlist of your own). The row keeps the cursor. With songs picked on a playlist, all of them move one place together. |
+
+| Alt+Home / Alt+End | Send the row to the top / bottom of the Crate (with songs picked, all of them, keeping their order). Also "Move to top" / "Move to bottom" in the row's menu |
 
 The Crate and a playlist of your own also drag: pick a row up and let go where it should go (a thin line shows the place; below the last song sends it to the bottom). New songs land at the bottom.
 
@@ -206,7 +239,8 @@ memory only; a restart or a different account starts empty):
 | A song set aside (C, Add to Crate, a drop on the dock) | Takes it out again |
 | Remove, or Delete with several picked | Puts the songs back where they were (several at once are one step) |
 | Clear | Puts every song back. Clear no longer asks first: Ctrl+Z is the safety net |
-| A move (drag, Alt+Up / Alt+Down, a drop in the dock) | Puts the order back |
+| A move (drag, Alt+Up / Alt+Down, Alt+Home / Alt+End, a drop in the dock) | Puts the order back |
+| A sort, Shuffle, Reverse or Spread artists from the Arrange menu | Puts the whole order back |
 | A song filed to a playlist, with "Take songs out of the Crate once filed" on | Puts it back in the Crate (the playlist add is its own step, taken back by the next Ctrl+Z) |
 
 The pill reads "Undid: removed 3 songs from the Crate" for 4 seconds. Ctrl+Z takes the newest of
