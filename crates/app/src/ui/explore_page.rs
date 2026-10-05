@@ -41,7 +41,8 @@ use crate::ui::home_page::{
 };
 use crate::ui::search_page::OpenTarget;
 use crate::ui::text_button::TextButton;
-use crate::ui::track_menu::Subject;
+use crate::ui::row_actions::more_slot;
+use crate::ui::track_menu::{Subject, TrackSubject};
 use crate::url_thumbs::{Thumb, ThumbStore};
 
 actions!(explore, [Back, ListNext, ListPrevious]);
@@ -917,22 +918,30 @@ impl ExploreView {
                     ),
                 )
         });
-        // Skim: audition the chart, a few seconds of each song.
+        // Skim: audition the chart, a few seconds of each song. More (at the right end) holds
+        // Add all to Crate.
         let skim = self.player.read(cx).skim_enabled().then(|| {
             let (player, songs) = (self.player.clone(), queue.clone());
-            div()
-                .flex()
-                .flex_row()
-                .mb(px(spacing::S2))
-                .child(
-                    div().debug_selector(|| "explore-skim".into()).child(
-                        TextButton::new("explore-skim", &self.skim_focus, "Skim", accent)
-                            .on_click(move |_, cx| skim_from(&player, &songs, "Top songs", cx)),
-                    ),
-                )
+            div().debug_selector(|| "explore-skim".into()).child(
+                TextButton::new("explore-skim", &self.skim_focus, "Skim", accent)
+                    .on_click(move |_, cx| skim_from(&player, &songs, "Top songs", cx)),
+            )
         });
+        let more = Subject::Loaded(Arc::new(
+            page.top_songs
+                .iter()
+                .map(|song| TrackSubject::of_row(song.track.clone(), song.thumbnail.clone(), None))
+                .collect(),
+        ));
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .mb(px(spacing::S2))
+            .child(div().flex_1().children(skim))
+            .child(more_slot("explore-more", true, more));
         div()
-            .children(skim)
+            .child(header)
             .child(
                 div()
                     .id("explore-chart")
