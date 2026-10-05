@@ -273,7 +273,8 @@ fn an_add_whose_reply_was_lost_cannot_be_taken_back_exactly_so_it_is_not(
     undo(&page, vcx);
     assert_eq!(notice(&page, vcx).as_deref(), Some("Couldn't undo that"));
     assert_eq!(held(&page, EMPTY_ID), [A], "nothing was guessed at");
-    assert_eq!(pill(&page, vcx), None);
+    // Only the add's own confirmation is up: no "Undid: ..." followed it.
+    assert!(!pill(&page, vcx).is_some_and(|p| p.starts_with("Undid")));
 }
 
 #[gpui::test]
@@ -534,7 +535,8 @@ fn a_different_account_starts_with_nothing_to_undo(cx: &mut TestAppContext) {
         .update(vcx, |w, cx| w.reset(cx));
     undo(&page, vcx);
     assert_eq!(held(&page, EMPTY_ID), [A], "the old account's edit is not touched");
-    assert_eq!(pill(&page, vcx), None);
+    // Only the add's own confirmation is up: no "Undid: ..." followed it.
+    assert!(!pill(&page, vcx).is_some_and(|p| p.starts_with("Undid")));
 }
 
 // ---- moves ----------------------------------------------------------------------------------

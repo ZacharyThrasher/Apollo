@@ -991,6 +991,7 @@ impl LibraryEdits {
                         thumbnail: None,
                     };
                     m.note_created(&id, &collection.title, cx);
+                    crate::confirm::added_to_playlist(&id, &collection.title, made_with.len(), cx);
                     // Ctrl+Z takes the playlist back.
                     let playlist = PlaylistRef { id, title: collection.title.clone() };
                     m.writes.update(cx, |w, cx| {
@@ -1096,7 +1097,12 @@ impl LibraryEdits {
             cx,
             move |source, expect| set_song_saved(source, expect, &asked, saved),
             move |m, result, cx| match result {
-                Ok(()) => cx.emit(EditEvent::SongSaved { video_id, saved }),
+                Ok(()) => {
+                    if saved {
+                        crate::confirm::saved_to_library(cx);
+                    }
+                    cx.emit(EditEvent::SongSaved { video_id, saved })
+                }
                 Err(failure) => m.fail(edit, failure, cx),
             },
         );
@@ -1155,6 +1161,7 @@ impl LibraryEdits {
                     };
                     if saved {
                         set.insert(key);
+                        crate::confirm::saved_to_library(cx);
                     } else {
                         set.remove(&key);
                     }
