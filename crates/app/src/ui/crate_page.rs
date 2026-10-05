@@ -93,6 +93,7 @@ actions!(
         LikeCursor,
         PlaylistCursor,
         TargetCursor,
+        DigCursor,
         MoveCursorUp,
         MoveCursorDown,
         CrateMoveTop,
@@ -132,6 +133,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("a", TargetCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("d", DigCursor, Some(KEY_CONTEXT)),
         // While a skim runs the shell's own K (keep and go on) takes it back (see `skim_cursor`).
         KeyBinding::new("k", SkimCursor, Some(KEY_CONTEXT)),
         // On the page, not in the panel on the right: from there Left is just the previous control.
@@ -1511,6 +1513,21 @@ impl CratePage {
         crate::ui::playlist_picker::open_songs(songs, None, window, cx);
     }
 
+    /// The D key: dig from the song under the cursor (K then keeps what fits right back here).
+    fn dig_cursor(&mut self, cx: &mut Context<Self>) {
+        if !crate::dig::key_enabled(cx) {
+            return;
+        }
+        let Some(ix) = self.cursor_index(cx) else {
+            return;
+        };
+        let Some(row) = self.shown(cx).get(ix).cloned() else {
+            return;
+        };
+        self.player
+            .update(cx, |p, cx| p.dig_from(row.track, row.thumbnail, cx));
+    }
+
     /// The A key: every picked song, or the one under the cursor, to the target playlist.
     fn target_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let songs: Vec<crate::ui::playlist_picker::PickerSong> = if self.selection.is_bulk() {
@@ -2475,6 +2492,7 @@ impl Render for CratePage {
                 .on_action(cx.listener(|this, _: &TargetCursor, window, cx| {
                     this.target_cursor(window, cx)
                 }))
+                .on_action(cx.listener(|this, _: &DigCursor, _, cx| this.dig_cursor(cx)))
                 .on_action(cx.listener(|this, _: &MoveCursorUp, _, cx| this.move_cursor(-1, cx)))
                 .on_action(cx.listener(|this, _: &MoveCursorDown, _, cx| this.move_cursor(1, cx)))
                 .on_action(cx.listener(|this, _: &CrateMoveTop, _, cx| this.move_to_edge(true, cx)))

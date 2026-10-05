@@ -54,6 +54,7 @@ actions!(
         RemoveCursor,
         LikeCursor,
         CrateCursor,
+        DigCursor,
         PlaylistCursor,
         TargetCursor,
         MoveCursorUp,
@@ -99,6 +100,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("c", CrateCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("d", DigCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("a", TargetCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
@@ -544,6 +546,19 @@ impl QueuePanel {
         self.advance(cx);
     }
 
+    /// D: dig from the song under the cursor.
+    fn dig_cursor(&mut self, cx: &mut Context<Self>) {
+        if !crate::dig::key_enabled(cx) {
+            return;
+        }
+        let view = self.fresh_view(cx);
+        let Some(row) = self.cursor.and_then(|id| view.row_by_id(id)) else {
+            return;
+        };
+        let track = row.track.clone();
+        self.player.update(cx, |p, cx| p.dig_from(track, None, cx));
+    }
+
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
         let view = self.fresh_view(cx);
         let Some(id) = self.cursor else {
@@ -636,7 +651,8 @@ impl QueuePanel {
 
     /// Esc: picked rows go first; with none picked Esc does what it did before.
     fn clear_picks(&mut self, cx: &mut Context<Self>) {
-        if self.selection.is_empty() {
+        // While skimming (a dig from a queue row), Esc is the skim's.
+        if self.selection.is_empty() || self.player.read(cx).skimming() {
             cx.propagate();
             return;
         }
@@ -1373,6 +1389,7 @@ impl Render for QueuePanel {
             .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
             .on_action(cx.listener(|this, _: &LikeCursor, window, cx| this.like_cursor(window, cx)))
             .on_action(cx.listener(|this, _: &CrateCursor, window, cx| this.crate_cursor(window, cx)))
+            .on_action(cx.listener(|this, _: &DigCursor, _, cx| this.dig_cursor(cx)))
             .on_action(
                 cx.listener(|this, _: &PlaylistCursor, window, cx| this.playlist_cursor(window, cx)),
             )
