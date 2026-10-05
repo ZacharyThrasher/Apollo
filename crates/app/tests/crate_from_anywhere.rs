@@ -46,6 +46,8 @@ struct Page {
     sim: SimLibrary,
 }
 
+const UNDO: &str = " \u{b7} Ctrl+Z to undo";
+
 fn setup(cx: &mut TestAppContext) -> (Page, &mut VisualTestContext) {
     cx.update(|cx| {
         Fonts::install(cx);
@@ -226,7 +228,7 @@ fn c_on_a_focused_home_song_sets_that_song_aside_not_the_playing_one(cx: &mut Te
     focus_home_stop(&page, vcx, 2);
     vcx.simulate_keystrokes("c");
     assert_eq!(crate_ids(&page, vcx), [wanted.clone()]);
-    assert_eq!(pill(&page, vcx).as_deref(), Some("Added to Crate"));
+    assert_eq!(pill(&page, vcx).as_deref(), Some("Added to Crate \u{b7} Ctrl+Z to undo"));
     // The same song again says so, and a different card takes its own song.
     settle(vcx);
     vcx.simulate_keystrokes("c");
@@ -348,7 +350,7 @@ fn a_playlist_pages_more_menu_adds_every_loaded_song_in_one_undoable_step(cx: &m
     assert_eq!(crate_ids(&page, vcx), ids, "in page order");
     assert_eq!(
         pill(&page, vcx).as_deref(),
-        Some(format!("Added {} songs to Crate", ids.len()).as_str())
+        Some(format!("Added {} songs to Crate{UNDO}", ids.len()).as_str())
     );
     assert_eq!(page.shell.read_with(vcx, |s, _| s.route()), Route::Library, "no page change");
 
@@ -370,7 +372,7 @@ fn songs_the_crate_holds_are_skipped_and_the_pill_says_how_many(cx: &mut TestApp
     choose(&page, vcx, Command::AddAllToCrate);
     assert_eq!(
         pill(&page, vcx).as_deref(),
-        Some(format!("Added {} \u{b7} 1 already in Crate", ids.len() - 1).as_str())
+        Some(format!("Added {} \u{b7} 1 already in Crate{UNDO}", ids.len() - 1).as_str())
     );
     assert_eq!(crate_ids(&page, vcx).len(), ids.len());
     assert_eq!(crate_ids(&page, vcx)[0], ids[1], "what was held stays where it was");
@@ -423,7 +425,7 @@ fn a_playlist_still_paging_in_adds_what_is_loaded_and_says_so(cx: &mut TestAppCo
     assert_eq!(crate_ids(&page, vcx).len(), loaded);
     assert_eq!(
         pill(&page, vcx).as_deref(),
-        Some(format!("Added {loaded} songs to Crate \u{b7} still loading").as_str())
+        Some(format!("Added {loaded} songs to Crate \u{b7} still loading{UNDO}").as_str())
     );
 
     // Adding again later, once every page is in, takes the rest and skips what is held.
@@ -434,7 +436,7 @@ fn a_playlist_still_paging_in_adds_what_is_loaded_and_says_so(cx: &mut TestAppCo
     assert_eq!(crate_ids(&page, vcx).len(), sim::LONG_LEN);
     assert_eq!(
         pill(&page, vcx).as_deref(),
-        Some(format!("Added {} \u{b7} {loaded} already in Crate", sim::LONG_LEN - loaded).as_str())
+        Some(format!("Added {} \u{b7} {loaded} already in Crate{UNDO}", sim::LONG_LEN - loaded).as_str())
     );
 }
 
@@ -545,7 +547,7 @@ fn explores_top_songs_has_a_more_menu_with_add_all(cx: &mut TestAppContext) {
     assert_eq!(crate_ids(&page, vcx), chart);
     assert_eq!(
         pill(&page, vcx).as_deref(),
-        Some(format!("Added {} songs to Crate", chart.len()).as_str())
+        Some(format!("Added {} songs to Crate{UNDO}", chart.len()).as_str())
     );
 }
 
@@ -561,7 +563,7 @@ fn the_queues_more_menu_adds_the_whole_queue_as_add_queue_to_crate(cx: &mut Test
     let mut expected = vec![PLAYING.to_owned()];
     expected.extend(QUEUED.iter().map(|s| (*s).to_owned()));
     assert_eq!(crate_ids(&page, vcx), expected);
-    assert_eq!(pill(&page, vcx).as_deref(), Some("Added 3 songs to Crate"));
+    assert_eq!(pill(&page, vcx).as_deref(), Some("Added 3 songs to Crate \u{b7} Ctrl+Z to undo"));
     undo(&page, vcx);
     assert!(crate_ids(&page, vcx).is_empty(), "one Ctrl+Z for the whole queue");
 }

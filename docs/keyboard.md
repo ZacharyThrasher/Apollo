@@ -25,6 +25,8 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | P | Add to playlist: open the picker for the playing song (in the queue, Library, Search and Crate lists: the song under the cursor). Settings > Playback > "P opens the playlist picker" switches it off |
 | A | Add to the target playlist: the playing song (in the queue, Library, Search and Crate lists: the song under the cursor; with 2 or more picked, all of them). With no target set the picker opens to choose one. Settings > Playlists > "A adds to the target playlist" switches it off. See "The target playlist" |
 | Ctrl+Shift+C | Jump into the docked Crate: open it (if closed) and put the cursor on its list, on the row it was last on (else the first). Esc goes back to where you were; with the dock already focused the same key closes it and goes back too. The Crate button in the player bar only shows / hides it. See "The docked Crate" |
+| / | In the Crate (its list or header buttons): put the keyboard in the "Add songs" box. See "Adding to the Crate by search and paste" |
+| Ctrl+V | In the Crate (its list or header buttons, or the Add songs box): add the links and "Artist - Title" lines on the clipboard, with a review for several lines |
 | Ctrl+Z | Undo the last queue change, playlist edit or Crate change, whichever came last (see "Undo") |
 | Ctrl+Shift+Z or Ctrl+Y | Redo a queue change (playlist edits have no redo) |
 | Alt+Left / Alt+Right | Back / Forward through the places you have been (see "Back and Forward"). Work in text fields too |
@@ -82,6 +84,48 @@ Every sort keeps the order of songs that tie. Each choice is one step for Ctrl+Z
 the Crate by artist"), and the pill says what was done ("Sorted by artist", with "· Ctrl+Z to
 undo" while shortcut hints are on; Settings > Playlists > Confirm when adding does not switch
 it off, since an arrange is not an add). Up / Down / Enter / Esc work in the popover.
+
+## Adding to the Crate by search and paste
+
+An **Add songs** box sits above the Crate's list, on the page (420px wide, under the header's
+buttons) and in the docked panel (full width, under its header). It is separate from the filter
+box, which stays, and it is there when the Crate is empty. **/** puts the keyboard in it from the
+Crate's list or its header buttons (in a text field a slash is just a slash).
+
+**Typing.** After a pause of 300 ms the box searches songs (audio tracks; a music video only when
+there is no audio track) and lists up to six under the field, in the look of Search's suggestions.
+The first is under the keyboard. Up / Down move, **Enter** (or a click) adds the one the keyboard
+is on at the bottom of the Crate, with the usual "Added to Crate" pill and the list scrolled to it;
+the field empties and keeps the keyboard for the next. A song the Crate has is marked "In Crate";
+adding it again says "Already in Crate". Enter before the answer has come adds the first song when
+it arrives. Down with nothing listed moves on to the Crate's list. **Esc** closes the popover (the
+text stays); a second Esc clears the text; a third hands the keyboard to the list. A word asked
+already is remembered, so backspacing over it costs no request.
+
+**Pasting** (Ctrl+V into the box, or onto the Crate's list or header buttons) reads the clipboard
+line by line, 50 lines at most (the review says "Only the first 50 lines were read"):
+
+| Line | What it does |
+|---|---|
+| A YouTube Music / YouTube song link (`si=` and the rest are ignored; list numbers, bullets and quotes in front are dropped) | Adds that song |
+| A playlist or album link | Adds its songs, page after page, up to 500 songs and 10 pages |
+| `Artist - Title`, `Artist – Title`, `Title by Artist`, or plain words | One search; the best song hit is the match (it must share at least half of the line's words, else "No match"). "(Official Video)", "[Lyrics]" and a trailing "- Topic" are dropped first |
+| A link to anywhere else | "No match", no request |
+
+One song link, or one plain line pasted onto the Crate, is added at once. One plain line pasted
+into the box is only typed, so you see the songs and pick. **More than one line** opens a review
+inside the popover: every line with its match (and the line as pasted under it), a checkbox
+(on), "Looking up… 6/14" while it runs and "11 of 14 found" after, then **Add 11** and **Cancel**.
+Up / Down move, **Space** (or a click) ticks and unticks a line, **Enter** adds the ticked songs,
+**Esc** cancels. Songs the Crate already has are not counted. The whole paste is one step for
+Ctrl+Z.
+
+**YouTube limits.** Lookups run two at a time with a 400 ms pause between pairs and never while
+the app's shared "too many requests" cooldown runs. The first "too many requests" stops everything
+for two minutes: typing shows "Paused: YouTube is busy", a paste stops where it is ("Paused:
+YouTube is busy. 11 of 14 found") and what was found can still be added. Nothing is prefetched for
+the songs listed. Searches typed or pasted here are searches as far as the account is concerned,
+so they show up in its YouTube Music search history like any other.
 
 ## The docked Crate
 
@@ -145,6 +189,32 @@ Crate", "Added 18 · 6 already in Crate" when some were held, or "Already in Cra
 what is held is skipped). A playlist or album **card** (Library lists, Search, Home) has neither
 item: its rows are not loaded, and nothing here asks YouTube for them. These items use only rows
 already on the page, so they make no YouTube calls and start no playback.
+
+### Skim the Crate, picks and filed markers
+
+- **Skim the Crate:** the **Skim** button beside Shuffle on the Crate page (and a second row in the
+  docked Crate's header), or **K** on the Crate list: from the cursor row, else the song playing,
+  else the top. The cursor follows the song being skimmed. While it runs: **Delete** takes the song
+  playing out of the Crate (wherever the cursor is; one step for Ctrl+Z) and goes on, **K** keeps
+  it and goes on, **Enter** plays it normally (ending the skim), **Esc** puts back what was playing
+  (Esc leaves the skim before it clears picks). Last song tossed or kept: the skim ends. Nothing
+  extra is fetched; it is Skim's own one-song-ahead prefetch.
+- **Picks narrow the buttons:** with 2 or more songs picked, **Save as playlist…** and **Add all
+  to…** read **Save 8 picked…** and **Add 8 picked to…** and act on the picked songs only, in the
+  Crate's order; the rest stay. The dialog's check then reads "Take these songs out of the Crate
+  after saving" and takes out only those. The docked Crate drops its "N selected" count, because
+  the buttons say it.
+- **Filed markers:** with a target playlist set and Settings > Playlists > **Mark songs already in
+  the target playlist** on (default), Crate rows the target holds show a small check
+  (text.secondary, no accent) after the duration (before the heart in the docked panel). **Hide
+  filed** / **Show filed** (a text button in the Crate header, and in the docked panel's second row)
+  leaves those rows out of the list; the header count says "· 4 filed hidden", and Play, Shuffle,
+  Skim, Add all to queue, Save and Add all follow the list shown. Arranging still works with rows
+  hidden (a move goes past the neighbour that is shown). Hide filed is a view only: it is not saved
+  and nothing leaves the Crate. A song filed while it is on (A, the picker) leaves the list at once.
+  The target's songs are read **once** per target and account (the page cache first, else one read
+  of the whole playlist, then kept); an add made here is known without reading again, and a failed
+  read is not retried until the target changes.
 
 ## Auto-advance
 
@@ -234,7 +304,7 @@ back as YouTube Music holds it and leaves the usual notice.
 |---|---|
 | K (in a playlist, album or Songs list, while not skimming) | Skim the list from the song under the pointer, or from the keyboard's row when the pointer is on none |
 
-Settings > Playback > Skim off turns it off. Once a skim runs, clicking any
+K also skims the Crate (below). Settings > Playback > Skim off turns it off. Once a skim runs, clicking any
 song of that same list moves the skim to that song and goes on skimming from there; Enter on a
 row (or on the song being skimmed, below) leaves skim and plays normally.
 
@@ -246,7 +316,8 @@ only then, and a text field or popup still keeps its own keys:
 
 | Key | Does |
 |---|---|
-| K | Set the song aside in the Crate and move on to the next song (Settings > Playlists > "Move to the next song after C, A or K"; off: the skim just carries on) |
+| K | Set the song aside in the Crate and move on to the next song (Settings > Playlists > "Move to the next song after C, A or K"; off: the skim just carries on). Skimming the Crate itself, K keeps the song and always goes on to the next |
+| Delete | Only while the Crate is the list being skimmed: take the song playing out of the Crate (Ctrl+Z puts it back) and go on to the next |
 | Enter | Stop skimming and play this song from its start; the rest of the list plays after it (Ctrl+Z goes back to what was queued before) |
 | Esc | Stop skimming and put back what was playing before (nothing, if nothing was) |
 | Shift+Right / Shift+Left | Next / previous song's window |
@@ -309,8 +380,8 @@ once: the songs leave when the picker closes), the Crate's "Add all to…" and a
 A failed or lost add takes nothing out. "Save as playlist…" keeps its own "Clear Crate" check.
 
 An add that Ctrl+Z can take back says so in its confirmation: "Added to Road trip · Ctrl+Z to
-undo" (queue adds and playlist adds, including a playlist made from the queue or the Crate), for
-2.5 seconds, while **Show shortcut hints** is on. Crate adds, likes and library saves have no undo
+undo" (queue adds, Crate adds and playlist adds, including a playlist made from the queue or the
+Crate), for 2.5 seconds, while **Show shortcut hints** is on. Likes and library saves have no undo
 and no hint. Settings > Playlists > **Confirm when adding** switches the confirmation off.
 
 Media keys are the OS's (SMTC) and are untouched.
