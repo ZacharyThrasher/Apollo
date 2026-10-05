@@ -397,6 +397,7 @@ fn crate_row(id: &str, added_ms: i64) -> crate::CrateRow {
     crate::CrateRow {
         track: rich_track(id),
         thumbnail: Some(format!("https://example.invalid/{id}.jpg")),
+        explicit: false,
         added_ms,
     }
 }
@@ -491,6 +492,61 @@ fn migration_9_keeps_the_order_the_crate_page_showed() {
         crate_ids(&store.crate_load("acct").unwrap()).last(),
         Some(&"fresh")
     );
+}
+
+#[test]
+fn a_swap_takes_the_place_of_the_song_it_replaces() {
+    let mut store = Store::open_in_memory().unwrap();
+    for (i, id) in ["a", "b", "c"].iter().enumerate() {
+        store.crate_add("acct", &crate_row(id, i as i64)).unwrap();
+    }
+    let mut explicit = crate_row("b2", 1);
+    explicit.explicit = true;
+    assert!(store.crate_swap("acct", "b", &explicit).unwrap());
+    let rows = store.crate_load("acct").unwrap();
+    assert_eq!(crate_ids(&rows), ["a", "b2", "c"], "same slot");
+    assert_eq!(rows[1], explicit, "whole, flag included");
+    // The old song's artists went with it, the new one's came in.
+    let n: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM crate_artists WHERE video_id = 'b'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0);
+    // Nothing to replace, or a song the crate already holds elsewhere: nothing happens.
+    assert!(!store.crate_swap("acct", "zzz", &crate_row("q", 1)).unwrap());
+    assert!(!store.crate_swap("acct", "a", &crate_row("c", 1)).unwrap());
+    assert_eq!(crate_ids(&store.crate_load("acct").unwrap()), ["a", "b2", "c"]);
+    // Another account's crate is not reached.
+    store.crate_add("other", &crate_row("a", 1)).unwrap();
+    assert!(!store.crate_swap("other", "b2", &crate_row("x", 1)).unwrap());
+    // A swap back restores the old song in the same slot.
+    assert!(store.crate_swap("acct", "b2", &crate_row("b", 1)).unwrap());
+    assert_eq!(crate_ids(&store.crate_load("acct").unwrap()), ["a", "b", "c"]);
+}
+
+#[test]
+fn songs_added_before_migration_10_are_not_known_to_be_explicit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("apollo.sqlite");
+    {
+        let store = Store::open_with(&path, &MIGRATIONS[..9]).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO crate_items (account_key, video_id, title, added_ms)
+                 VALUES ('acct', 'old', 'old', 1)",
+                [],
+            )
+            .unwrap();
+    }
+    let mut store = Store::open(&path).unwrap();
+    let rows = store.crate_load("acct").unwrap();
+    assert_eq!(crate_ids(&rows), ["old"]);
+    assert!(!rows[0].explicit);
+    let mut explicit = crate_row("e", 2);
+    explicit.explicit = true;
+    store.crate_add("acct", &explicit).unwrap();
+    assert!(store.crate_load("acct").unwrap()[1].explicit);
 }
 
 #[test]

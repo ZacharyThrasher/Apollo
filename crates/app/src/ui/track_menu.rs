@@ -90,6 +90,8 @@ pub struct TrackSubject {
     pub entry: Option<QueueEntryId>,
     /// Set for a row of a playlist the account can edit: where Remove from playlist takes it out.
     pub playlist_row: Option<PlaylistRow>,
+    /// Set for a row of the Crate: Move to top and Move to bottom send it to an end of the Crate.
+    pub crate_row: bool,
 }
 
 /// A row of an editable playlist: the playlist and the row's own token in it.
@@ -116,6 +118,9 @@ pub enum Subject {
     Songs,
     /// A list of songs shown on a page (Explore's Top songs), from the More button of its header.
     Loaded(Arc<Vec<TrackSubject>>),
+    /// The Crate, from the More button of its header. The video ids are the songs picked in it:
+    /// with some picked its verbs act on those, with none on the whole Crate.
+    Crate(Vec<String>),
 }
 
 /// An artist the menu is about.
@@ -150,6 +155,15 @@ impl TrackSubject {
                 collection,
                 occurrence,
             }),
+            crate_row: false,
+        }
+    }
+
+    /// A song of the Crate list.
+    pub fn of_crate_row(track: Track, thumbnail: Option<String>) -> Self {
+        Self {
+            crate_row: true,
+            ..Self::of_row(track, thumbnail, None)
         }
     }
 }
@@ -161,7 +175,13 @@ impl Subject {
             thumbnail,
             entry: None,
             playlist_row: None,
+            crate_row: false,
         })
+    }
+
+    /// A song in the Crate list.
+    pub fn crate_track(track: Track, thumbnail: Option<String>) -> Self {
+        Subject::Track(TrackSubject::of_crate_row(track, thumbnail))
     }
 
     /// A song in a playlist the account can edit.
@@ -179,6 +199,7 @@ impl Subject {
                 collection,
                 occurrence,
             }),
+            crate_row: false,
         })
     }
 
@@ -189,6 +210,7 @@ impl Subject {
             thumbnail: None,
             entry: Some(entry),
             playlist_row: None,
+            crate_row: false,
         })
     }
 
@@ -239,6 +261,10 @@ pub enum Command {
     MoveToTop,
     /// ... and to the bottom.
     MoveToBottom,
+    /// Send the row (or every picked row) of the Crate to the top of it.
+    CrateToTop,
+    /// ... and to the bottom of it.
+    CrateToBottom,
     /// Opens the Remove duplicates dialog: a preview of the repeated songs of a playlist of your
     /// own.
     RemoveDuplicates,
@@ -256,6 +282,10 @@ pub enum Command {
     AddAllToCrate,
     /// ... and then the Crate page opens (a playlist's songs, to rework there).
     OpenInCrate,
+    /// Crate: replace songs with their explicit versions, where the service has them.
+    SwapToExplicit,
+    /// Crate: replace songs with their clean versions.
+    SwapToClean,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -313,6 +343,9 @@ pub struct Facts {
     /// How many songs the page, tab or queue the menu is about has loaded: Add all to Crate is
     /// offered when there are some (see [`loaded_songs`]).
     pub loaded: usize,
+    /// The song is in the Crate and not known to be explicit: it can be swapped for the explicit
+    /// version. For a selection, true when any of its songs is.
+    pub swappable: bool,
 }
 
 /// The menu's items in groups (a separator sits between groups). `liked` is the song's heart.
@@ -389,7 +422,12 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                     } else {
                         item(Command::AddToCrate, Icon::BoxRegular, "Add to Crate")
                     },
-                ],
+                ]
+                .into_iter()
+                .chain(facts.swappable.then(|| {
+                    item(Command::SwapToExplicit, Icon::ArrowSwap, "Swap to explicit version")
+                }))
+                .collect(),
                 {
                     let mut group = vec![if liked {
                         item(Command::ToggleLike, Icon::HeartFilled, "Remove from Liked")
@@ -442,6 +480,9 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                     "Remove from queue",
                 )]);
             }
+            if t.crate_row {
+                out.push(crate_move_items());
+            }
             if t.playlist_row.is_some() {
                 out.push(move_items());
                 out.push(vec![item(
@@ -471,6 +512,13 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             } else {
                 item(Command::AddToCrate, Icon::BoxRegular, "Add to Crate")
             });
+            if facts.swappable {
+                keep.push(item(
+                    Command::SwapToExplicit,
+                    Icon::ArrowSwap,
+                    "Swap to explicit versions",
+                ));
+            }
             out.push(keep);
             // `liked` is true when every song is liked: the item then takes them all out.
             out.push(vec![if liked {
@@ -478,6 +526,9 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             } else {
                 item(Command::ToggleLike, Icon::HeartRegular, "Like")
             }]);
+            if songs.iter().all(|s| s.crate_row) {
+                out.push(crate_move_items());
+            }
             if songs.iter().all(|s| s.playlist_row.is_some()) {
                 out.push(move_items());
                 out.push(vec![item(
@@ -527,6 +578,10 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                 Vec::new()
             }
         }
+        Subject::Crate(_) => vec![vec![
+            item(Command::SwapToExplicit, Icon::ArrowSwap, "Swap to explicit versions"),
+            item(Command::SwapToClean, Icon::ArrowSwap, "Swap to clean versions"),
+        ]],
     }
 }
 
@@ -535,6 +590,14 @@ fn move_items() -> Vec<Item> {
     vec![
         item(Command::MoveToTop, Icon::MoveTop, "Move to top"),
         item(Command::MoveToBottom, Icon::MoveBottom, "Move to bottom"),
+    ]
+}
+
+/// The two ends a row of the Crate can be sent to.
+fn crate_move_items() -> Vec<Item> {
+    vec![
+        item(Command::CrateToTop, Icon::MoveTop, "Move to top"),
+        item(Command::CrateToBottom, Icon::MoveBottom, "Move to bottom"),
     ]
 }
 
@@ -580,7 +643,11 @@ pub fn link_of(subject: &Subject) -> String {
     match subject {
         Subject::Track(t) => links::track_url(&t.track.video_id),
         Subject::Collection(c) => links::collection_url(c),
-        Subject::Queue | Subject::Tracks(_) | Subject::Songs | Subject::Loaded(_) => String::new(),
+        Subject::Queue
+        | Subject::Tracks(_)
+        | Subject::Songs
+        | Subject::Loaded(_)
+        | Subject::Crate(_) => String::new(),
         Subject::Artist(a) => format!("https://music.youtube.com/channel/{}", a.id.as_str()),
     }
 }
@@ -650,7 +717,7 @@ pub fn loaded_songs(subject: &Subject, player: &Entity<PlayerModel>, cx: &App) -
                 .collect();
             Some(LoadedSongs { songs, loading: false })
         }
-        Subject::Track(_) | Subject::Tracks(_) | Subject::Artist(_) => None,
+        Subject::Track(_) | Subject::Tracks(_) | Subject::Artist(_) | Subject::Crate(_) => None,
     }
 }
 
@@ -893,6 +960,11 @@ impl TrackMenu {
                 Facts {
                     in_crate: crate::crate_list::handle(cx)
                         .is_some_and(|c| c.read(cx).contains(t.track.video_id.as_str())),
+                    swappable: crate::crate_list::handle(cx).is_some_and(|c| {
+                        let crate_ = c.read(cx);
+                        crate_.contains(t.track.video_id.as_str())
+                            && !crate_.is_explicit(t.track.video_id.as_str())
+                    }),
                     song_saved: self
                         .edits
                         .read(cx)
@@ -937,6 +1009,13 @@ impl TrackMenu {
                         let crate_ = c.read(cx);
                         songs.iter().all(|t| crate_.contains(t.track.video_id.as_str()))
                     }),
+                    swappable: crate::crate_list::handle(cx).is_some_and(|c| {
+                        let crate_ = c.read(cx);
+                        songs.iter().any(|t| {
+                            crate_.contains(t.track.video_id.as_str())
+                                && !crate_.is_explicit(t.track.video_id.as_str())
+                        })
+                    }),
                     ..Facts::default()
                 },
             ),
@@ -948,6 +1027,7 @@ impl TrackMenu {
                     ..Facts::default()
                 },
             ),
+            Subject::Crate(_) => (false, Facts::default()),
         };
         groups_with(&open.subject, liked, facts)
     }
@@ -1160,6 +1240,25 @@ impl TrackMenu {
                     (self.on_remove_row.clone())(&first.collection, &tokens, cx);
                 }
             }
+            (Command::CrateToTop | Command::CrateToBottom, Subject::Tracks(songs)) => {
+                let ids: Vec<String> = songs
+                    .iter()
+                    .map(|s| s.track.video_id.as_str().to_owned())
+                    .collect();
+                if let Some(model) = crate::crate_list::handle(cx) {
+                    model.update(cx, |m, cx| {
+                        m.move_to_edge(&ids, command == Command::CrateToTop, cx);
+                    });
+                }
+            }
+            (Command::CrateToTop | Command::CrateToBottom, Subject::Track(t)) => {
+                let ids = [t.track.video_id.as_str().to_owned()];
+                if let Some(model) = crate::crate_list::handle(cx) {
+                    model.update(cx, |m, cx| {
+                        m.move_to_edge(&ids, command == Command::CrateToTop, cx);
+                    });
+                }
+            }
             (Command::MoveToTop | Command::MoveToBottom, Subject::Tracks(songs)) => {
                 let edge = if command == Command::MoveToTop { Edge::Top } else { Edge::Bottom };
                 // One playlist page: the rows' own tokens, in list order.
@@ -1257,7 +1356,8 @@ impl TrackMenu {
                     | Subject::Queue
                     | Subject::Tracks(_)
                     | Subject::Songs
-                    | Subject::Loaded(_) => None,
+                    | Subject::Loaded(_)
+                    | Subject::Crate(_) => None,
                 };
                 if let (Some(artist), Some(model)) = (artist, crate::blocked_artists::handle(cx)) {
                     model.update(cx, |m, cx| {
@@ -1270,6 +1370,31 @@ impl TrackMenu {
             }
             (Command::AddToCrate, Subject::Track(t)) => {
                 crate::crate_list::add_track(&self.player, t.track, t.thumbnail, cx);
+            }
+            (Command::SwapToExplicit | Command::SwapToClean, subject) => {
+                let want = if command == Command::SwapToExplicit {
+                    crate::crate_swap::Want::Explicit
+                } else {
+                    crate::crate_swap::Want::Clean
+                };
+                // A song or a selection: just those. The Crate's own menu: the songs picked in
+                // it, or all of it when none is.
+                let only: Option<Vec<String>> = match subject {
+                    Subject::Track(t) => Some(vec![t.track.video_id.as_str().to_owned()]),
+                    Subject::Tracks(songs) => Some(
+                        songs
+                            .iter()
+                            .map(|s| s.track.video_id.as_str().to_owned())
+                            .collect(),
+                    ),
+                    Subject::Crate(picked) => (!picked.is_empty()).then_some(picked),
+                    Subject::Collection(_)
+                    | Subject::Queue
+                    | Subject::Artist(_)
+                    | Subject::Songs
+                    | Subject::Loaded(_) => return,
+                };
+                crate::crate_list::swap(want, only, cx);
             }
             (Command::RemoveFromCrate, Subject::Track(t)) => {
                 if let Some(model) = crate::crate_list::handle(cx) {
@@ -1535,6 +1660,8 @@ fn shortcut_of(command: Command) -> Option<&'static str> {
         Command::AddToCrate => Some("crate"),
         Command::AddToPlaylist => Some("playlist"),
         Command::RemoveFromQueue | Command::RemoveFromCrate => Some("remove"),
+        Command::CrateToTop => Some("crate-top"),
+        Command::CrateToBottom => Some("crate-bottom"),
         _ => None,
     }
 }
@@ -1876,6 +2003,26 @@ mod tests {
     }
 
     #[test]
+    fn a_row_of_the_crate_can_be_sent_to_either_end_of_it_and_no_other_row_can() {
+        use Command::*;
+        let in_crate = Subject::crate_track(song(true, true), None);
+        let groups = commands(&in_crate, true);
+        assert!(groups.contains(&vec![CrateToTop, CrateToBottom]));
+        // Not the playlist's own Move to top: that one needs a playlist row.
+        assert!(!groups.iter().flatten().any(|c| matches!(c, MoveToTop | MoveToBottom)));
+        let plain = commands(&Subject::track(song(true, true), None), false);
+        assert!(!plain.iter().flatten().any(|c| matches!(c, CrateToTop | CrateToBottom)));
+        // Picked rows of the Crate share the item; a mixed pick does not get it.
+        let rows = |crate_row| TrackSubject { crate_row, ..picked(false) };
+        let all = Subject::Tracks(vec![rows(true), rows(true)]);
+        let flat: Vec<Command> = commands_with(&all, Facts::default()).concat();
+        assert!(flat.contains(&CrateToTop) && flat.contains(&CrateToBottom));
+        let mixed = Subject::Tracks(vec![rows(true), rows(false)]);
+        let flat: Vec<Command> = commands_with(&mixed, Facts::default()).concat();
+        assert!(!flat.contains(&CrateToTop));
+    }
+
+    #[test]
     fn a_song_of_your_own_playlist_can_be_removed_from_it_and_others_cannot() {
         use Command::*;
         let Subject::Collection(playlist) = card() else {
@@ -1999,6 +2146,7 @@ mod tests {
             thumbnail: None,
             entry: entry.then(|| QueueEntryId::from_raw(1)),
             playlist_row: None,
+            crate_row: false,
         }
     }
 

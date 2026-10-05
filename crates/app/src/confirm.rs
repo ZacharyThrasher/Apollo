@@ -122,6 +122,17 @@ impl ConfirmModel {
     }
 }
 
+impl ConfirmModel {
+    /// Say something that is not an add (a sort of the Crate): the pill, without a pulse and
+    /// whatever Confirm when adding says, since that setting is about adds.
+    fn announce(&mut self, text: String, undoable: bool, cx: &mut Context<Self>) {
+        cx.emit(ConfirmEvent::Show(Confirmation {
+            text: text.into(),
+            undoable,
+        }));
+    }
+}
+
 /// The shell's confirmations, where there is a shell.
 pub fn handle(cx: &App) -> Option<Entity<ConfirmModel>> {
     cx.try_global::<ConfirmHandle>().map(|h| h.0.clone())
@@ -238,6 +249,15 @@ pub fn with_undo_hint(text: &str, undoable: bool, hints_on: bool) -> String {
 }
 
 // ---- the adds ---------------------------------------------------------------------------
+
+/// The Crate was rearranged ("Sorted by artist"), or there was nothing to rearrange (`undoable`
+/// false). Says so in the pill and, when Ctrl+Z takes it back and shortcut hints are on, says that
+/// too. Not an add, so Confirm when adding does not switch it off.
+pub fn arranged(text: String, undoable: bool, cx: &mut App) {
+    if let Some(model) = handle(cx) {
+        model.update(cx, |m, cx| m.announce(text, undoable, cx));
+    }
+}
 
 /// Songs went into the queue (at the end, or right after the playing one).
 pub fn queued(videos: Vec<String>, cx: &mut App) {
