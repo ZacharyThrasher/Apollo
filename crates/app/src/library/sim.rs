@@ -175,6 +175,8 @@ struct SimState {
     radio: Option<LoadFailure>,
     /// The seeds `radio` was asked about, in order.
     radio_seeds: Vec<String>,
+    /// Collections whose first page was read (`tracks`), oldest first, by browse id.
+    track_reads: Vec<String>,
     /// Playlists made through `create_playlist`, newest first: `(bare id, title)`.
     created: Vec<(String, String)>,
     /// Titles changed through `rename_playlist`, by bare id.
@@ -235,6 +237,7 @@ impl SimState {
             tabs: None,
             radio: None,
             radio_seeds: Vec::new(),
+            track_reads: Vec::new(),
             created: Vec::new(),
             titles: HashMap::new(),
             deleted: HashSet::new(),
@@ -352,6 +355,12 @@ impl SimLibrary {
     }
 
     /// The seeds the radio was asked for, in order.
+    /// The browse ids of the collections read from their first page, in order (tests count the
+    /// reads a screen makes).
+    pub fn track_reads(&self) -> Vec<String> {
+        self.state().track_reads.clone()
+    }
+
     pub fn radio_seeds(&self) -> Vec<String> {
         self.state().radio_seeds.clone()
     }
@@ -1171,6 +1180,7 @@ impl LibrarySource for SimLibrary {
     fn tracks(&self, collection: &Collection) -> Result<Page<TrackRow>, LoadFailure> {
         self.wait(LATENCY);
         let id = collection.id.as_str();
+        self.state().track_reads.push(id.to_owned());
         if id == BROKEN_ID {
             return Err(LoadFailure::Network);
         }

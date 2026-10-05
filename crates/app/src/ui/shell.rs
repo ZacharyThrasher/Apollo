@@ -19,7 +19,7 @@ use crate::home::{Access, HomeModel};
 use crate::keymap::{
     AddCurrentToPlaylist, AddCurrentToTarget, CrateCurrent, GoBack, GoForward, LikeCurrent,
     NavigateDown, NavigateLeft, NavigateRight, NavigateUp, RedoQueue, SeekBack, SeekForward,
-    ToggleCrateDock, ShowShortcuts, SkimCancel, SkimCrate, SkimKeep, ToggleFullscreen, ToggleLyrics,
+    ToggleCrateDock, ShowShortcuts, SkimCancel, SkimCrate, SkimDrop, SkimKeep, ToggleFullscreen, ToggleLyrics,
     ToggleMute,
     UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
@@ -2528,7 +2528,21 @@ impl Render for Shell {
             }))
             // Skim: K sets the song aside and the skim goes on, Enter keeps the song, Esc goes
             // back to what was playing. The keys only exist while the shell is "Skimming".
-            .on_action(cx.listener(|this, _: &SkimCrate, _, cx| this.crate_current(cx)))
+            .on_action(cx.listener(|this, _: &SkimCrate, _, cx| {
+                // Skimming the Crate itself, K keeps the song (it is in the Crate already) and the
+                // skim goes on to the next; anywhere else it sets the song aside.
+                if this.player.read(cx).skimming_from(crate::crate_list::SKIM_SOURCE) {
+                    this.player.update(cx, |m, cx| m.skim_pass(cx));
+                } else {
+                    this.crate_current(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SkimDrop, _, cx| {
+                // Delete tosses the song while the Crate is skimmed; otherwise it is not ours.
+                if !crate::crate_list::skim_toss(&this.player, cx) {
+                    cx.propagate();
+                }
+            }))
             .on_action(cx.listener(|this, _: &SkimKeep, _, cx| {
                 this.player.update(cx, |m, cx| m.skim_keep(cx));
             }))

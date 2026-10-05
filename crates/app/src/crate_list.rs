@@ -28,6 +28,10 @@ use crate::library::writes::{LibraryWrites, WritesEvent};
 use crate::player::PlayerModel;
 use crate::settings::{SettingsModel, SqliteSettings, CRATE_FILE_AND_FORGET};
 
+/// The name a Crate skim gives the queue as its source: while it is the queue's source, a skim is
+/// "of the Crate" and Delete tosses the song playing, K keeps it.
+pub const SKIM_SOURCE: &str = "Crate";
+
 /// How many changes to the Crate Ctrl+Z can take back.
 pub const UNDO_LIMIT: usize = 30;
 
@@ -145,6 +149,9 @@ pub struct CrateModel {
     held: HashSet<String>,
     /// Songs filed while held, to leave the Crate when the picker closes.
     waiting: Vec<String>,
+    /// "Hide filed": the lists leave out the songs the target playlist already holds. A view
+    /// only, shared by the page and the dock; it is not kept between runs.
+    hide_filed: bool,
 }
 
 impl Default for CrateModel {
@@ -167,6 +174,7 @@ impl CrateModel {
             settings: None,
             held: HashSet::new(),
             waiting: Vec::new(),
+            hide_filed: false,
         }
     }
 
@@ -291,6 +299,18 @@ impl CrateModel {
 
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    /// Whether the lists leave out songs the target playlist already holds.
+    pub fn hide_filed(&self) -> bool {
+        self.hide_filed
+    }
+
+    pub fn set_hide_filed(&mut self, hide: bool, cx: &mut Context<Self>) {
+        if self.hide_filed != hide {
+            self.hide_filed = hide;
+            cx.notify();
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -623,6 +643,26 @@ impl Global for CrateHandle {}
 /// The shell's crate, where there is a shell.
 pub fn handle(cx: &App) -> Option<Entity<CrateModel>> {
     cx.try_global::<CrateHandle>().map(|h| h.0.clone())
+}
+
+/// Delete while the Crate is being skimmed: the song playing leaves the Crate (one step for
+/// Ctrl+Z) and the skim goes on to the next. Whether it was a Crate skim (nothing happens
+/// otherwise).
+pub fn skim_toss(player: &Entity<PlayerModel>, cx: &mut App) -> bool {
+    if !player.read(cx).skimming_from(SKIM_SOURCE) {
+        return false;
+    }
+    let Some(video) = player.read(cx).current_video() else {
+        return false;
+    };
+    if let Some(model) = handle(cx) {
+        model.update(cx, |m, cx| m.remove(&video, cx));
+    }
+    player.update(cx, |p, cx| {
+        p.skim_forget(&video);
+        p.skim_pass(cx);
+    });
+    true
 }
 
 /// Set `track` aside. `thumbnail` is the cover the row knew; the player's own artwork URL stands

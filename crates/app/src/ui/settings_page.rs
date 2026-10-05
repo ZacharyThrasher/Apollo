@@ -13,7 +13,7 @@ use crate::autostart;
 use crate::player::PlayerModel;
 use crate::search::{HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES};
 use crate::settings::{
-    BoolSetting, SettingsModel, CLOSE_TO_TRAY, CONFIRM_ADDS, CRATE_FILE_AND_FORGET, DISCORD_PRESENCE,
+    BoolSetting, SettingsModel, CLOSE_TO_TRAY, CONFIRM_ADDS, CRATE_FILE_AND_FORGET, CRATE_MARK_FILED, DISCORD_PRESENCE,
     GLOBAL_HOTKEYS, HUD_AUTO_HIDE,
     INSTANT_PLAYLISTS, KEY_BADGES, SHOW_SHORTCUT_HINTS,
     MINI_COLLAPSE_ON_BLUR, MINI_DIM, MINI_FADE_CONTROLS, MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP,
@@ -108,7 +108,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(25, cx);
+        let h = self.handles(26, cx);
 
         let home_section = SettingsSection::new("Home")
             .row(self.bool_row(
@@ -174,6 +174,14 @@ impl Render for SettingsPage {
                 "Take songs out of the Crate once filed",
                 &CRATE_FILE_AND_FORGET,
                 &h[24],
+                accent,
+                cx,
+            ))
+            .row(self.bool_row(
+                "setting-crate-mark-filed",
+                "Mark songs already in the target playlist",
+                &CRATE_MARK_FILED,
+                &h[25],
                 accent,
                 cx,
             ));

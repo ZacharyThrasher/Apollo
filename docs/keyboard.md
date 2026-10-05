@@ -73,6 +73,32 @@ below the last row, or on the empty panel, is the bottom / the start. A song the
 holds moves to that place instead of being added twice. C still adds at the bottom. Rows of the
 panel drag to rearrange it, as on the page.
 
+### Skim the Crate, picks and filed markers
+
+- **Skim the Crate:** the **Skim** button beside Shuffle on the Crate page (and a second row in the
+  docked Crate's header), or **K** on the Crate list: from the cursor row, else the song playing,
+  else the top. The cursor follows the song being skimmed. While it runs: **Delete** takes the song
+  playing out of the Crate (wherever the cursor is; one step for Ctrl+Z) and goes on, **K** keeps
+  it and goes on, **Enter** plays it normally (ending the skim), **Esc** puts back what was playing
+  (Esc leaves the skim before it clears picks). Last song tossed or kept: the skim ends. Nothing
+  extra is fetched; it is Skim's own one-song-ahead prefetch.
+- **Picks narrow the buttons:** with 2 or more songs picked, **Save as playlist…** and **Add all
+  to…** read **Save 8 picked…** and **Add 8 picked to…** and act on the picked songs only, in the
+  Crate's order; the rest stay. The dialog's check then reads "Take these songs out of the Crate
+  after saving" and takes out only those. The docked Crate drops its "N selected" count, because
+  the buttons say it.
+- **Filed markers:** with a target playlist set and Settings > Playlists > **Mark songs already in
+  the target playlist** on (default), Crate rows the target holds show a small check
+  (text.secondary, no accent) after the duration (before the heart in the docked panel). **Hide
+  filed** / **Show filed** (a text button in the Crate header, and in the docked panel's second row)
+  leaves those rows out of the list; the header count says "· 4 filed hidden", and Play, Shuffle,
+  Skim, Add all to queue, Save and Add all follow the list shown. Arranging still works with rows
+  hidden (a move goes past the neighbour that is shown). Hide filed is a view only: it is not saved
+  and nothing leaves the Crate. A song filed while it is on (A, the picker) leaves the list at once.
+  The target's songs are read **once** per target and account (the page cache first, else one read
+  of the whole playlist, then kept); an add made here is known without reading again, and a failed
+  read is not retried until the target changes.
+
 ## Back and Forward
 
 Like a browser's. The window remembers the places it showed (Home, Explore, Search, a Library tab,
@@ -149,7 +175,7 @@ back as YouTube Music holds it and leaves the usual notice.
 |---|---|
 | K (in a playlist, album or Songs list, while not skimming) | Skim the list from the song under the pointer, or from the keyboard's row when the pointer is on none |
 
-Settings > Playback > Skim off turns it off. Once a skim runs, clicking any
+K also skims the Crate (below). Settings > Playback > Skim off turns it off. Once a skim runs, clicking any
 song of that same list moves the skim to that song and goes on skimming from there; Enter on a
 row (or on the song being skimmed, below) leaves skim and plays normally.
 
@@ -161,7 +187,8 @@ only then, and a text field or popup still keeps its own keys:
 
 | Key | Does |
 |---|---|
-| K | Set the song aside in the Crate; the skim carries on |
+| K | Set the song aside in the Crate; the skim carries on (skimming the Crate itself: keep the song and go on to the next) |
+| Delete | Only while the Crate is the list being skimmed: take the song playing out of the Crate (Ctrl+Z puts it back) and go on to the next |
 | Enter | Stop skimming and play this song from its start; the rest of the list plays after it (Ctrl+Z goes back to what was queued before) |
 | Esc | Stop skimming and put back what was playing before (nothing, if nothing was) |
 | Shift+Right / Shift+Left | Next / previous song's window |
