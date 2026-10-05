@@ -670,6 +670,27 @@ fn the_chevrons_show_on_hover_and_page_the_row(cx: &mut TestAppContext) {
     assert_eq!(page.view.read_with(vcx, |v, _| v.row_offset(0)), 0.0);
 }
 
+#[gpui::test]
+fn clicking_a_chevron_does_not_click_the_tile_behind_it(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    narrow(vcx);
+    let playing = current(&page, vcx);
+    let mut clicked = 0;
+    for (shelf, tile) in [("home-next-0", "home-0-1"), ("home-next-1", "home-1-1")] {
+        let over = vcx.debug_bounds(tile).expect("a tile").center();
+        vcx.simulate_mouse_move(over, None, Modifiers::none());
+        vcx.run_until_parked();
+        if vcx.debug_bounds(shelf).is_none() {
+            continue;
+        }
+        click(vcx, shelf);
+        clicked += 1;
+        assert_eq!(route(&page, vcx), Route::Home, "{shelf} did not open a page");
+        assert_eq!(current(&page, vcx), playing, "{shelf} did not play a song");
+    }
+    assert!(clicked > 0, "at least one shelf scrolls in a narrow window");
+}
+
 // ---- the track menu ------------------------------------------------------------------------------
 
 use apollo_app::ui::track_menu::{Command, Subject};

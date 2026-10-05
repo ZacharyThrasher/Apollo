@@ -21,7 +21,8 @@ use apollo_theme::tokens::{layout, motion, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
     actions, div, point, prelude::*, px, AnyElement, App, Context, ElementId, Entity, FocusHandle,
-    IntoElement, KeyBinding, ParentElement, Render, ScrollHandle, SharedString, Styled, Window,
+    IntoElement, KeyBinding, MouseButton, ParentElement, Render, ScrollHandle, SharedString, Styled,
+    Window,
 };
 
 use crate::assets::Icon;
@@ -1207,7 +1208,13 @@ impl RenderOnce for ScrollButton {
                     cx.notify();
                 });
             })
-            .on_click(move |_, window, cx| on_click(window, cx))
+            // The press is the arrow's alone: the card under it must not see it, or a click on the
+            // arrow would also open (or play) whatever sits behind it.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                on_click(window, cx)
+            })
             .child(
                 div()
                     .id("tint")

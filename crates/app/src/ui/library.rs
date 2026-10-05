@@ -77,6 +77,7 @@ actions!(
         CrateRow,
         AddRowToPlaylist,
         AddRowToTarget,
+        SkimRow,
         ExtendUp,
         ExtendDown,
         SelectAllRows,
@@ -104,6 +105,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("c", CrateRow, Some(LIST_CONTEXT)),
         KeyBinding::new("p", AddRowToPlaylist, Some(LIST_CONTEXT)),
         KeyBinding::new("a", AddRowToTarget, Some(LIST_CONTEXT)),
+        KeyBinding::new("k", SkimRow, Some(LIST_CONTEXT)),
         KeyBinding::new("shift-up", ExtendUp, Some(LIST_CONTEXT)),
         KeyBinding::new("shift-down", ExtendDown, Some(LIST_CONTEXT)),
         KeyBinding::new("ctrl-a", SelectAllRows, Some(LIST_CONTEXT)),
@@ -198,6 +200,15 @@ impl RowHover {
             }
             None => 0.0,
         }
+    }
+
+    /// The row the pointer is on, if any.
+    fn hovered(&self) -> Option<usize> {
+        self.fades
+            .iter()
+            .filter(|(_, f)| f.is_hovered())
+            .map(|(row, _)| *row)
+            .min()
     }
 
     fn prune(&mut self) {
@@ -865,20 +876,26 @@ impl LibraryView {
         ((f32::from(height) / row) as isize - 1).max(1)
     }
 
+    /// Enter on a track row plays it normally. That ends a skim, where a click on a row keeps it
+    /// going.
+    fn play_row_normally(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.player.update(cx, |p, _| p.skim_leave());
+        self.model
+            .update(cx, |m, cx| m.request_play(PlayRequest::row(row), cx));
+    }
+
     fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let model = self.model.read(cx);
         if model.artist().is_some() {
             if index < self.selectable_rows(cx) {
-                self.model
-                    .update(cx, |m, cx| m.request_play(PlayRequest::row(index), cx));
+                self.play_row_normally(index, cx);
             }
             return;
         }
         match model.detail() {
             Some(_) => {
                 if let Some(real) = self.visible(cx).get(index) {
-                    self.model
-                        .update(cx, |m, cx| m.request_play(PlayRequest::row(real), cx));
+                    self.play_row_normally(real, cx);
                 }
             }
             None if model.tab() == Tab::History => {
@@ -886,8 +903,7 @@ impl LibraryView {
             }
             None if model.tab() == Tab::Songs => {
                 if let Some(real) = self.visible(cx).get(index) {
-                    self.model
-                        .update(cx, |m, cx| m.request_play(PlayRequest::row(real), cx));
+                    self.play_row_normally(real, cx);
                 }
             }
             None if model.tab() == Tab::Stats => self.activate_stat(index, window, cx),
@@ -1261,6 +1277,7 @@ impl LibraryView {
                 crate::crate_list::add_track(&this.player, track, thumbnail, cx);
             }
         }))
+        .on_action(cx.listener(|this, _: &SkimRow, _, cx| this.skim_from_row(cx)))
         .on_action(cx.listener(|this, _: &AddRowToTarget, window, cx| {
             if !crate::target_playlist::key_enabled(cx) {
                 return;
@@ -1508,6 +1525,30 @@ impl LibraryView {
             model.list_rows().get(real)?.clone()
         };
         Some((row.track, row.thumbnail))
+    }
+
+    /// K on a playlist, album or Songs list. While a skim runs K keeps its skim meaning (the
+    /// shell's: set the song aside), so the key goes on to it. Otherwise it skims the list from
+    /// the row the pointer is on, or the keyboard's row when the pointer is on none.
+    fn skim_from_row(&mut self, cx: &mut Context<Self>) {
+        let player = self.player.read(cx);
+        if player.skimming() {
+            cx.propagate();
+            return;
+        }
+        let model = self.model.read(cx);
+        let skimmable = model.artist().is_none()
+            && !self.history_open(cx)
+            && !self.stats_open(cx)
+            && (model.detail().is_some() || model.tab() == Tab::Songs);
+        if !skimmable || !player.skim_enabled() {
+            return;
+        }
+        let index = self.hover.hovered().unwrap_or(self.selected);
+        if let Some(real) = self.visible(cx).get(index) {
+            self.model
+                .update(cx, |m, cx| m.request_play(PlayRequest::skim_row(real), cx));
+        }
     }
 
     /// The video id and title of the track row the keyboard is on (none in the lists of
@@ -2551,6 +2592,11 @@ impl Render for LibraryView {
             .id("library")
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, _: &Back, window, cx| {
+                // While skimming, Esc is the skim's: it puts back what was playing.
+                if this.player.read(cx).skimming() {
+                    cx.propagate();
+                    return;
+                }
                 // Esc clears picked songs first, then empties a filter in use, then closes the page.
                 if !this.selection.is_empty() {
                     this.selection.clear();

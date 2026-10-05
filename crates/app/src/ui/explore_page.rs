@@ -377,7 +377,14 @@ impl Render for ExploreView {
             .pt(px(spacing::S6))
             .when(in_mood, |d| {
                 d.key_context(KEY_CONTEXT)
-                    .on_action(cx.listener(|this, _: &Back, window, cx| this.back(window, cx)))
+                    .on_action(cx.listener(|this, _: &Back, window, cx| {
+                        // While skimming, Esc is the skim's.
+                        if this.player.read(cx).skimming() {
+                            cx.propagate();
+                        } else {
+                            this.back(window, cx)
+                        }
+                    }))
             });
 
         if let Some(open) = mood {
