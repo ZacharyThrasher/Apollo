@@ -1,6 +1,6 @@
 //! The Crate: a scratch list of songs to remember. One key (C) or "Add to Crate" in a song's menu
-//! sets a song aside without touching the queue; the Crate page plays it, moves it to the queue
-//! or a playlist, or empties it.
+//! sets a song aside at the bottom without touching the queue; the Crate page plays it, arranges
+//! it (drag, or Alt+Up/Down), moves it to the queue or a playlist, or empties it.
 //!
 //! It is local, kept in the app's SQLite store per account (see `apollo_store::CrateRow`), never
 //! written to YouTube. Reads come from memory; every change is written by one background thread
@@ -20,9 +20,13 @@ use crate::settings::SqliteSettings;
 
 /// Where the crate is kept. Blocking: call off the UI thread.
 pub trait CrateStore: Send + Sync {
-    /// The crate saved for `account_key`, newest first. Another account's is forgotten.
+    /// The crate saved for `account_key`, top to bottom as arranged. Another account's is
+    /// forgotten.
     fn load(&self, account_key: &str) -> Vec<CrateRow>;
+    /// Add a song below the last one.
     fn add(&self, account_key: &str, row: &CrateRow);
+    /// The whole crate as arranged now, top to bottom.
+    fn reorder(&self, account_key: &str, video_ids: &[String]);
     fn remove(&self, account_key: &str, video_id: &str);
     fn clear(&self, account_key: &str);
     /// Delete every account's crate (sign-out).
@@ -44,6 +48,14 @@ impl CrateStore for SqliteSettings {
         if let Some(mut store) = self.open() {
             if let Err(err) = store.crate_add(account_key, row) {
                 eprintln!("could not save to the crate: {err}");
+            }
+        }
+    }
+
+    fn reorder(&self, account_key: &str, video_ids: &[String]) {
+        if let Some(mut store) = self.open() {
+            if let Err(err) = store.crate_reorder(account_key, video_ids) {
+                eprintln!("could not save the crate's order: {err}");
             }
         }
     }
@@ -75,6 +87,7 @@ impl CrateStore for SqliteSettings {
 
 enum Write {
     Add(String, Box<CrateRow>),
+    Order(String, Vec<String>),
     Remove(String, String),
     Clear(String),
     Purge,
@@ -86,7 +99,7 @@ pub struct CrateModel {
     writer: Option<Sender<Write>>,
     /// The account the list belongs to; nothing is stored without one.
     key: Option<String>,
-    /// Newest first.
+    /// Top to bottom, as arranged; a new song goes last.
     items: Vec<CrateRow>,
     /// Bumped whenever the list is replaced, so a load that finishes late is dropped.
     epoch: u64,
@@ -120,6 +133,7 @@ impl CrateModel {
                     for write in rx {
                         match write {
                             Write::Add(key, row) => store.add(&key, &row),
+                            Write::Order(key, ids) => store.reorder(&key, &ids),
                             Write::Remove(key, video) => store.remove(&key, &video),
                             Write::Clear(key) => store.clear(&key),
                             Write::Purge => store.purge(),
@@ -162,16 +176,17 @@ impl CrateModel {
                 if m.epoch != epoch {
                     return;
                 }
-                // Anything set aside while this was loading stays on top.
+                // Anything set aside while this was loading goes below what was stored.
                 let added: Vec<CrateRow> = m.items.drain(..).collect();
-                let known: HashSet<String> = added
+                let stored: HashSet<String> = rows
                     .iter()
                     .map(|r| r.track.video_id.as_str().to_owned())
                     .collect();
-                m.items = added;
+                m.items = rows;
                 m.items.extend(
-                    rows.into_iter()
-                        .filter(|r| !known.contains(r.track.video_id.as_str())),
+                    added
+                        .into_iter()
+                        .filter(|r| !stored.contains(r.track.video_id.as_str())),
                 );
                 cx.notify();
             });
@@ -218,7 +233,8 @@ impl CrateModel {
         self.items.iter().map(|r| r.track.clone()).collect()
     }
 
-    /// Set a song aside. One already in the crate stays where it is. Returns whether it was new.
+    /// Set a song aside, at the bottom. One already in the crate stays where it is. Returns
+    /// whether it was new.
     pub fn add(&mut self, track: Track, thumbnail: Option<String>, cx: &mut Context<Self>) -> bool {
         if self.contains(track.video_id.as_str()) {
             return false;
@@ -231,9 +247,59 @@ impl CrateModel {
         if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
             let _ = writer.send(Write::Add(key.clone(), Box::new(row.clone())));
         }
-        self.items.insert(0, row);
+        self.items.push(row);
         cx.notify();
         true
+    }
+
+    /// Move the song at `from` so it sits before what is at slot `slot` now (`slot` counts the
+    /// list as it is, so `len` means the very end). Returns whether anything moved: a song
+    /// dropped where it already is changes nothing.
+    pub fn move_row(&mut self, from: usize, slot: usize, cx: &mut Context<Self>) -> bool {
+        let len = self.items.len();
+        if from >= len || slot > len {
+            return false;
+        }
+        let to = if slot > from { slot - 1 } else { slot };
+        if to == from {
+            return false;
+        }
+        let row = self.items.remove(from);
+        self.items.insert(to, row);
+        self.save_order();
+        cx.notify();
+        true
+    }
+
+    /// Move a song one place up (`-1`) or down (`1`). Returns whether it moved: the top song
+    /// cannot go up, nor the bottom one down.
+    pub fn nudge(&mut self, video_id: &str, delta: isize, cx: &mut Context<Self>) -> bool {
+        let Some(at) = self
+            .items
+            .iter()
+            .position(|r| r.track.video_id.as_str() == video_id)
+        else {
+            return false;
+        };
+        let to = at as isize + delta;
+        if to < 0 || to >= self.items.len() as isize {
+            return false;
+        }
+        // Moving before the next song's slot is moving to just after it.
+        let slot = if delta > 0 { to as usize + 1 } else { to as usize };
+        self.move_row(at, slot, cx)
+    }
+
+    /// Write the arranged order, after a move.
+    fn save_order(&self) {
+        if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
+            let ids = self
+                .items
+                .iter()
+                .map(|r| r.track.video_id.as_str().to_owned())
+                .collect();
+            let _ = writer.send(Write::Order(key.clone(), ids));
+        }
     }
 
     pub fn remove(&mut self, video_id: &str, cx: &mut Context<Self>) -> bool {
@@ -315,10 +381,21 @@ mod tests {
         fn load(&self, key: &str) -> Vec<CrateRow> {
             let mut rows = self.rows.lock().unwrap();
             rows.retain(|(k, _)| k == key);
-            rows.iter().rev().map(|(_, r)| r.clone()).collect()
+            rows.iter().map(|(_, r)| r.clone()).collect()
         }
         fn add(&self, key: &str, row: &CrateRow) {
             self.rows.lock().unwrap().push((key.into(), row.clone()));
+        }
+        fn reorder(&self, key: &str, video_ids: &[String]) {
+            let mut rows = self.rows.lock().unwrap();
+            let rank = |r: &CrateRow| {
+                video_ids
+                    .iter()
+                    .position(|id| id == r.track.video_id.as_str())
+                    .unwrap_or(usize::MAX)
+            };
+            // Stable: songs the order forgot keep their relative place.
+            rows.sort_by_key(|(k, r)| if k == key { rank(r) } else { 0 });
         }
         fn remove(&self, key: &str, video_id: &str) {
             self.rows
@@ -347,13 +424,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn songs_are_added_newest_first_once_each(cx: &mut TestAppContext) {
+    fn songs_are_added_at_the_bottom_once_each(cx: &mut TestAppContext) {
         let model = cx.new(|_| CrateModel::new());
         model.update(cx, |m, cx| {
             assert!(m.add(track("a"), None, cx));
             assert!(m.add(track("b"), None, cx));
             assert!(!m.add(track("a"), None, cx), "already there");
-            assert_eq!(ids(m), ["b", "a"]);
+            assert_eq!(ids(m), ["a", "b"]);
             assert!(m.contains("a") && !m.contains("z"));
             assert!(m.remove("b", cx));
             assert!(!m.remove("b", cx));
@@ -383,7 +460,7 @@ mod tests {
         }
         assert_eq!(store.rows.lock().unwrap().len(), 2);
 
-        // A fresh model for the same account reads it back, newest first.
+        // A fresh model for the same account reads it back in the same order.
         let again = cx.new(|_| CrateModel::new());
         again.update(cx, |m, cx| {
             m.install(Some(store.clone()), cx);
@@ -391,9 +468,9 @@ mod tests {
         });
         cx.run_until_parked();
         again.read_with(cx, |m, _| {
-            assert_eq!(ids(m), ["b", "a"]);
+            assert_eq!(ids(m), ["a", "b"]);
             assert_eq!(
-                m.items()[1].thumbnail.as_deref(),
+                m.items()[0].thumbnail.as_deref(),
                 Some("https://example.invalid/a.jpg")
             );
         });
@@ -402,6 +479,62 @@ mod tests {
         again.update(cx, |m, cx| m.set_account(Some("other".into()), cx));
         cx.run_until_parked();
         again.read_with(cx, |m, _| assert!(m.is_empty()));
+    }
+
+    #[gpui::test]
+    fn a_song_moves_to_a_slot_or_one_place_and_the_order_is_kept(cx: &mut TestAppContext) {
+        let store = Arc::new(Memory::default());
+        let model = cx.new(|_| CrateModel::new());
+        model.update(cx, |m, cx| {
+            m.install(Some(store.clone()), cx);
+            m.set_account(Some("acct".into()), cx);
+            for id in ["a", "b", "c", "d"] {
+                m.add(track(id), None, cx);
+            }
+            // Dropped before slot 0: it goes to the top.
+            assert!(m.move_row(2, 0, cx));
+            assert_eq!(ids(m), ["c", "a", "b", "d"]);
+            // Dropped on the end slot: it goes to the bottom.
+            assert!(m.move_row(0, 4, cx));
+            assert_eq!(ids(m), ["a", "b", "d", "c"]);
+            // Dropped on itself, or just after itself: nothing moves.
+            assert!(!m.move_row(1, 1, cx));
+            assert!(!m.move_row(1, 2, cx));
+            assert!(!m.move_row(9, 0, cx) && !m.move_row(0, 9, cx));
+            assert_eq!(ids(m), ["a", "b", "d", "c"]);
+            // One place at a time; the ends stay put.
+            assert!(m.nudge("d", -1, cx));
+            assert_eq!(ids(m), ["a", "d", "b", "c"]);
+            assert!(m.nudge("d", 1, cx));
+            assert_eq!(ids(m), ["a", "b", "d", "c"]);
+            assert!(!m.nudge("a", -1, cx));
+            assert!(!m.nudge("c", 1, cx));
+            assert!(!m.nudge("zzz", 1, cx));
+            m.add(track("e"), None, cx);
+            assert_eq!(ids(m), ["a", "b", "d", "c", "e"], "a new song goes below");
+        });
+        cx.run_until_parked();
+        for _ in 0..200 {
+            let order: Vec<String> = store
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, r)| r.track.video_id.as_str().to_owned())
+                .collect();
+            if order == ["a", "b", "d", "c", "e"] {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // A fresh model reads the arranged order back.
+        let again = cx.new(|_| CrateModel::new());
+        again.update(cx, |m, cx| {
+            m.install(Some(store.clone()), cx);
+            m.set_account(Some("acct".into()), cx);
+        });
+        cx.run_until_parked();
+        again.read_with(cx, |m, _| assert_eq!(ids(m), ["a", "b", "d", "c", "e"]));
     }
 
     #[gpui::test]

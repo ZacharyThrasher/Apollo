@@ -28,6 +28,19 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Esc | Close Now Playing |
 | F11 | Fullscreen while Now Playing is open (leaves fullscreen when Now Playing closes) |
 
+## In lists
+
+| Key | Does |
+|---|---|
+| Up / Down | Move the cursor |
+| Enter | Play the row |
+| L | Like / unlike the row |
+| C | Set the row aside in the Crate (queue, Library, Search) |
+| Delete / Backspace | Remove the row (queue, Crate) |
+| Alt+Up / Alt+Down | Move the row one place up / down (up-next in the queue; the Crate). The row keeps the cursor. |
+
+The Crate also drags: pick a row up and let go where it should go (an accent line shows the place; below the last song sends it to the bottom). New songs land at the bottom.
+
 ### While skimming
 
 Skim (the **Skim** button beside Play and Shuffle on playlist, album and Songs headers, and on
