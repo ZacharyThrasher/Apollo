@@ -13,8 +13,8 @@ use crate::autostart;
 use crate::player::PlayerModel;
 use crate::search::{HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES};
 use crate::settings::{
-    BoolSetting, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS, HUD_AUTO_HIDE,
-    INSTANT_PLAYLISTS, KEY_BADGES, PREFER_EXPLICIT, SHOW_SHORTCUT_HINTS,
+    BoolSetting, SettingsModel, CLOSE_TO_TRAY, CONFIRM_ADDS, DISCORD_PRESENCE, GLOBAL_HOTKEYS,
+    HUD_AUTO_HIDE, INSTANT_PLAYLISTS, KEY_BADGES, PREFER_EXPLICIT, SHOW_SHORTCUT_HINTS,
     MINI_COLLAPSE_ON_BLUR, MINI_DIM, MINI_FADE_CONTROLS, MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP,
     MINI_SHOW_LYRICS, MINI_SHOW_VOLUME, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES,
     START_MINIMIZED_TO_TRAY, TARGET_KEY, TARGET_PILL,
@@ -107,7 +107,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(24, cx);
+        let h = self.handles(25, cx);
 
         let home_section = SettingsSection::new("Home")
             .row(self.bool_row(
@@ -161,10 +161,18 @@ impl Render for SettingsPage {
                 cx,
             ))
             .row(self.bool_row(
+                "setting-confirm-adds",
+                "Confirm when adding",
+                &CONFIRM_ADDS,
+                &h[23],
+                accent,
+                cx,
+            ))
+            .row(self.bool_row(
                 "setting-prefer-explicit",
                 "Prefer explicit versions",
                 &PREFER_EXPLICIT,
-                &h[23],
+                &h[24],
                 accent,
                 cx,
             ));

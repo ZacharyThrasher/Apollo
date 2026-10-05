@@ -434,6 +434,9 @@ impl CrateModel {
         self.save_order();
         cx.notify();
         self.auto_swap(fresh, cx);
+        // Songs that were not in the crate before are the ones added (the rest only moved).
+        let added: Vec<String> = after.into_iter().filter(|v| !before.contains(v)).collect();
+        crate::confirm::crated(added, cx);
         true
     }
 
@@ -885,11 +888,30 @@ pub fn add_track(
     thumbnail: Option<String>,
     cx: &mut App,
 ) {
+    add_tracks(player, vec![(track, thumbnail)], cx);
+}
+
+/// [`add_track`] for several songs at once (a picked set): one confirmation says how many went
+/// in, or that they were all in already.
+pub fn add_tracks(
+    player: &Entity<PlayerModel>,
+    songs: Vec<(Track, Option<String>)>,
+    cx: &mut App,
+) {
     let Some(model) = handle(cx) else { return };
-    let thumbnail = thumbnail.or_else(|| player.read(cx).art_url(track.video_id.as_str()));
-    model.update(cx, |m, cx| {
-        m.add(track, thumbnail, cx);
-    });
+    let mut added = Vec::new();
+    for (track, thumbnail) in songs {
+        let thumbnail = thumbnail.or_else(|| player.read(cx).art_url(track.video_id.as_str()));
+        let video = track.video_id.as_str().to_owned();
+        if model.update(cx, |m, cx| m.add(track, thumbnail, cx)) {
+            added.push(video);
+        }
+    }
+    if added.is_empty() {
+        crate::confirm::already_crated(cx);
+    } else {
+        crate::confirm::crated(added, cx);
+    }
 }
 
 /// Swap the Crate's songs for their `want` version: every song, or only `only`. The window's tip

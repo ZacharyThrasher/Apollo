@@ -1056,9 +1056,8 @@ impl TrackMenu {
                 });
             }
             (Command::AddToCrate, Subject::Tracks(songs)) => {
-                for song in songs {
-                    crate::crate_list::add_track(&self.player, song.track, song.thumbnail, cx);
-                }
+                let songs = songs.into_iter().map(|s| (s.track, s.thumbnail)).collect();
+                crate::crate_list::add_tracks(&self.player, songs, cx);
             }
             (Command::ToggleLike, Subject::Tracks(songs)) => {
                 // Like them all, or (when they all are liked already) take them all out. The

@@ -17,6 +17,7 @@ pub mod accent_anim;
 pub mod account;
 pub mod app;
 pub mod art;
+pub mod confirm;
 pub mod crate_list;
 pub mod crate_swap;
 pub mod explicit_marks;

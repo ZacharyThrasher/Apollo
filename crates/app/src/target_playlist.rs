@@ -233,6 +233,18 @@ pub fn key_enabled(cx: &App) -> bool {
         .is_none_or(|h| h.0.read(cx).key_enabled(cx))
 }
 
+/// `playlist_id` (bare or not) is the target, and its pill is on show.
+pub fn is_target(playlist_id: &str, cx: &App) -> bool {
+    let Some(handle) = cx.try_global::<TargetHandle>() else {
+        return false;
+    };
+    let model = handle.0.read(cx);
+    model.pill_shown(cx)
+        && model
+            .target(cx)
+            .is_some_and(|t| t.id == bare_playlist_id(playlist_id))
+}
+
 /// What the player bar's pill says, when there is a target and the pill is switched on.
 pub fn pill_label(cx: &App) -> Option<SharedString> {
     let handle = cx.try_global::<TargetHandle>()?;

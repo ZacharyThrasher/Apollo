@@ -325,6 +325,7 @@ impl CratePage {
         .detach();
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
+        crate::confirm::watch(cx);
         let dock = layout == Layout::Dock;
         // The docked panel's stops are in the queue panel's slots; the page's own are as before.
         let at = |page: isize, docked: isize| if dock { docked } else { page };
@@ -1055,6 +1056,11 @@ impl CratePage {
             .px(px(spacing::S2))
             .rounded(px(radius::SMALL))
             .cursor_pointer()
+            // A song just set aside lights up where it landed.
+            .children(
+                crate::confirm::row_pulse(crate::confirm::Place::Crate, &video, cx)
+                    .map(|seq| crate::confirm::highlight(seq, radius::SMALL)),
+            )
             .when(selected, |d| d.bg(playing_row::tint()))
             .when(picked, |d| d.bg(tint))
             .hover(move |s| {
@@ -1396,9 +1402,15 @@ impl CratePage {
                     .child(selection::count_slot(self.selection.len(), cx)),
             );
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_none()
+            // Songs set aside light the header up (the pulse is one fade of bg.overlay).
+            .children(
+                crate::confirm::pulse(crate::confirm::Place::Crate, cx)
+                    .map(|seq| crate::confirm::highlight(seq, 0.0)),
+            )
             .children(tabs)
             .child(actions)
             .into_any_element()

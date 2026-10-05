@@ -887,17 +887,21 @@ impl PlayerModel {
 
     /// Add `track` to the end of the up-next list, ahead of the rest of the context.
     pub fn add_to_queue(&mut self, track: Track, cx: &mut Context<Self>) {
+        let video = track.video_id.as_str().to_owned();
         self.edit_queue(cx, |q| {
             q.add_to_queue(vec![track]);
         });
+        self.confirm_queued(vec![video], cx);
     }
 
     /// Put `track` right after the one playing.
     pub fn play_next(&mut self, track: Track, cx: &mut Context<Self>) {
+        let video = track.video_id.as_str().to_owned();
         self.edit_queue(cx, |q| {
             q.play_next(vec![track]);
         });
         self.prefetch_upcoming();
+        self.confirm_queued(vec![video], cx);
     }
 
     /// Put `tracks` right after the one playing, in their own order (one undo step).
@@ -905,17 +909,29 @@ impl PlayerModel {
         if tracks.is_empty() {
             return;
         }
+        let videos = tracks.iter().map(|t| t.video_id.as_str().to_owned()).collect();
         self.edit_queue(cx, |q| {
             q.play_next(tracks);
         });
         self.prefetch_upcoming();
+        self.confirm_queued(videos, cx);
     }
 
     /// Add `tracks` to the end of the up-next list, ahead of the rest of the context.
     pub fn add_tracks_to_queue(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        let videos = tracks.iter().map(|t| t.video_id.as_str().to_owned()).collect();
         self.edit_queue(cx, |q| {
             q.add_to_queue(tracks);
         });
+        self.confirm_queued(videos, cx);
+    }
+
+    /// Songs went into the queue: say so (see `confirm`). Nothing is said where there is no queue
+    /// to put them in.
+    fn confirm_queued(&self, videos: Vec<String>, cx: &mut Context<Self>) {
+        if self.driver.is_some() {
+            crate::confirm::queued(videos, cx);
+        }
     }
 
     /// Start a radio: `seed` plays now and the queue carries on as it, once `radio` arrives

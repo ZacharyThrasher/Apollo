@@ -146,6 +146,8 @@ struct PillShown {
     id: u64,
     text: gpui::SharedString,
     leaving: bool,
+    /// A one-time shortcut tip: an add's confirmation does not push it off the screen.
+    tip: bool,
 }
 
 /// A scroll position waiting for its page's content to be there to scroll.
@@ -334,6 +336,14 @@ impl Shell {
         let volume = cx.new(|_| SliderState::default());
         let root_focus = cx.focus_handle();
         let weak = cx.weak_entity();
+        // Adds confirm themselves through this (the pill here, a pulse where the list shows).
+        let confirm = cx.new(|_| crate::confirm::ConfirmModel::new(settings.clone()));
+        cx.set_global(crate::confirm::ConfirmHandle(confirm.clone()));
+        cx.subscribe(&confirm, |this, _, event: &crate::confirm::ConfirmEvent, cx| {
+            this.confirmed(event, cx)
+        })
+        .detach();
+        cx.observe(&confirm, |_, _, cx| cx.notify()).detach();
         let writes = cx.new(|cx| LibraryWrites::new(player.clone(), cx));
         let edits = cx.new(|_| LibraryEdits::new(player.clone(), writes.clone()));
         let picker = cx.new(|cx| {
@@ -1609,7 +1619,7 @@ impl Shell {
     /// Take back the last queue change.
     pub fn undo_queue(&mut self, cx: &mut Context<Self>) {
         if self.player.update(cx, |p, cx| p.undo_queue(cx)) {
-            self.show_pill("Queue restored", toast::PILL_FOR, cx);
+            self.show_pill("Queue restored", toast::PILL_FOR, false, cx);
         }
     }
 
@@ -1624,7 +1634,7 @@ impl Shell {
     /// Ctrl+Shift+Z: do again what Ctrl+Z took back.
     pub fn redo_queue(&mut self, cx: &mut Context<Self>) {
         if self.player.update(cx, |p, cx| p.redo_queue(cx)) {
-            self.show_pill("Queue redone", toast::PILL_FOR, cx);
+            self.show_pill("Queue redone", toast::PILL_FOR, false, cx);
         }
     }
 
@@ -1639,6 +1649,7 @@ impl Shell {
         &mut self,
         text: impl Into<gpui::SharedString>,
         lasts: std::time::Duration,
+        tip: bool,
         cx: &mut Context<Self>,
     ) {
         self.pill_seq += 1;
@@ -1647,6 +1658,7 @@ impl Shell {
             id,
             text: text.into(),
             leaving: false,
+            tip,
         });
         let animate = !cx.reduce_motion();
         cx.spawn(async move |this, cx| {
@@ -1675,9 +1687,20 @@ impl Shell {
         cx.notify();
     }
 
+    /// Something was added to a list: say so in the pill, for [`crate::confirm::CONFIRM_FOR`].
+    fn confirmed(&mut self, event: &crate::confirm::ConfirmEvent, cx: &mut Context<Self>) {
+        let crate::confirm::ConfirmEvent::Show(c) = event;
+        // A tip is shown once ever; it is not worth losing to an add's confirmation.
+        if self.pill.as_ref().is_some_and(|p| p.tip && !p.leaving) {
+            return;
+        }
+        let text = crate::confirm::with_undo_hint(&c.text, c.undoable, crate::shortcuts::hints_on(cx));
+        self.show_pill(text, crate::confirm::CONFIRM_FOR, false, cx);
+    }
+
     /// A one-line shortcut tip ("Tip: press C"), for [`toast::TIP_FOR`].
     pub fn show_tip(&mut self, text: gpui::SharedString, cx: &mut Context<Self>) {
-        self.show_pill(text, toast::TIP_FOR, cx);
+        self.show_pill(text, toast::TIP_FOR, true, cx);
     }
 
     /// Ctrl went down or up. Held alone for [`BADGE_AFTER`], the key badges show on the buttons
