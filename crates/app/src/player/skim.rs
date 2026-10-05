@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use apollo_domain::model::{QueueEntryId, Track};
+use apollo_domain::model::{QueueEntryId, Track, VideoId};
 use apollo_domain::playback::{Event, Intent, Phase};
 use apollo_domain::queue::{Queue, QueueSnapshot, QueueSource, Repeat};
 use gpui::Context;
@@ -75,6 +75,9 @@ pub(super) struct Skim {
     /// How long each song plays, in milliseconds.
     window_ms: u64,
     total: usize,
+    /// The list being skimmed, in order: a song picked from the same list moves the skim there
+    /// instead of ending it.
+    list: Vec<VideoId>,
     /// Every entry the skim made. A current entry outside the set means the user started
     /// something else and Skim steps aside.
     entries: HashSet<QueueEntryId>,
@@ -148,9 +151,21 @@ impl PlayerModel {
         source: Option<QueueSource>,
         cx: &mut Context<Self>,
     ) {
+        self.start_skim_at(tracks, 0, source, cx);
+    }
+
+    /// [`PlayerModel::start_skim`] from song `start` of the list (K on a row: skim from here).
+    pub fn start_skim_at(
+        &mut self,
+        tracks: Vec<Track>,
+        start: usize,
+        source: Option<QueueSource>,
+        cx: &mut Context<Self>,
+    ) {
         if !self.skim_enabled || tracks.is_empty() || self.driver.is_none() {
             return;
         }
+        let start = start.min(tracks.len() - 1);
         // Skimming again from inside a skim keeps the original "before".
         let (before, resume) = match self.skim.take() {
             Some(old) => (old.before, old.resume),
@@ -163,10 +178,11 @@ impl PlayerModel {
         };
         let window_ms = u64::from(self.skim_seconds) * 1_000;
         let first = start_ms(
-            tracks[0].duration.map(|d| d.as_millis() as u64),
+            tracks[start].duration.map(|d| d.as_millis() as u64),
             window_ms,
         );
         let total = tracks.len();
+        let list: Vec<VideoId> = tracks.iter().map(|t| t.video_id.clone()).collect();
         let seed = self.next_seed();
         if let Some(d) = self.driver.as_mut() {
             d.edit_queue(|q| {
@@ -178,6 +194,7 @@ impl PlayerModel {
         self.skim = Some(Skim {
             window_ms,
             total,
+            list,
             entries: HashSet::new(),
             entry: None,
             start_ms: first,
@@ -187,7 +204,7 @@ impl PlayerModel {
         self.handle(
             Event::PlayContextAt {
                 tracks,
-                start: 0,
+                start,
                 position_ms: first,
             },
             cx,
@@ -198,8 +215,9 @@ impl PlayerModel {
                 let q = d.coordinator().queue();
                 let snapshot = q.snapshot();
                 let ids: HashSet<QueueEntryId> = snapshot
-                    .context
+                    .history
                     .iter()
+                    .chain(&snapshot.context)
                     .map(|e| e.id)
                     .chain(snapshot.current.iter().map(|(e, _)| e.id))
                     .collect();
@@ -214,6 +232,27 @@ impl PlayerModel {
         self.prefetch_upcoming();
         self.ensure_skim_ticker(cx);
         cx.notify();
+    }
+
+    /// A song picked in a list while skimming: when it is the list being skimmed, the skim moves
+    /// to that song and goes on from there (what was playing before is still what Esc brings
+    /// back). Whether it was taken; a song of any other list is not, and plays normally.
+    pub(super) fn skim_pick(
+        &mut self,
+        tracks: &[Track],
+        start: usize,
+        source: Option<&QueueSource>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let same = self.skim.as_ref().is_some_and(|skim| {
+            skim.list.len() == tracks.len()
+                && skim.list.iter().zip(tracks).all(|(id, t)| *id == t.video_id)
+        });
+        if !same || start >= tracks.len() {
+            return false;
+        }
+        self.start_skim_at(tracks.to_vec(), start, source.cloned(), cx);
+        true
     }
 
     /// Esc: stop skimming and put back what was playing before (nothing, when nothing was).
@@ -235,6 +274,12 @@ impl PlayerModel {
         self.handle(Event::Play, cx);
         self.prefetch_upcoming();
         cx.notify();
+    }
+
+    /// Enter on a list row while skimming: that song plays normally, from its start, so the
+    /// skim is over (what was playing before is not coming back).
+    pub fn skim_leave(&mut self) {
+        self.skim_yield();
     }
 
     /// Something else took over the queue (another list was played): Skim just steps aside.
