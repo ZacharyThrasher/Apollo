@@ -20,6 +20,8 @@ pub mod art;
 pub mod confirm;
 pub mod crate_arrange;
 pub mod crate_list;
+pub mod crate_add;
+pub mod crate_paste;
 pub mod dig;
 pub mod crate_swap;
 pub mod explicit_marks;
