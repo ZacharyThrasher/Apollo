@@ -243,6 +243,16 @@ Applied to `ui/library.rs`, `ui/library/tabs.rs`, `ui/playlist_dialog.rs`, `ui/t
 4. **Edit playlist:** the Rename dialog is now "Edit playlist": Name, Description (multi-line, 3 rows, `text_field.rs` multiline mode) and Privacy (Private / Unlisted / Public, a choice-menu popover). Same dialog style. Description and privacy appear once the playlist page has been read; otherwise the dialog is name-only. Only changed fields are sent.
 5. **Feedback:** silent on success; errors "Couldn't update playlist", "Couldn't save queue".
 
+## Playlist picker 2.0 (coordinator brief, 2026-10-05; built choices flagged)
+Replaces items 3 and 4 of "Like and playlist decisions" and the fixed "New playlist…" row of "Playlists decisions"; applied to `ui/playlist_picker.rs`.
+1. **Surface:** the track menu's: an anchored popover on bg.overlay with border.subtle, 4px padding, 32px rows, no scrim, below the opening button with the right edges lined up (above when there is no room, centred with no anchor). Built choice: it stays 280px wide (not 220), because playlist names are long and the check sits at the right. 320px at most, the list scrolls.
+2. **Top:** the filter box, the plain text field in bg.raised ("Find or create a playlist"), with the caret in it on open. No title and no song name (the picker opens at the song). Built choice: with several songs a 11px text.secondary line above the box says "3 songs".
+3. **Rows:** playlist names only, body text. The recently added-to playlists (up to 8, newest first) come first, then a 1px border.subtle divider, then the rest in the order the service lists them. The check is right-aligned: text.secondary when the playlist already holds the song (the row is dimmed and does nothing), the accent when marked for Enter.
+4. **Create row:** last, under a divider, with a plus icon and `Create "name"`; shown when something is typed and no playlist has that name. Built choice: it also shows under partial matches, so "gym" can be made while "Gym Mix" exists.
+5. **Keys:** Space marks (only while the filter is empty, a space is a letter once typing; Ctrl+Space always), Enter adds to the marked playlists or the one under the cursor, Ctrl+Enter makes the typed name, Esc closes. Full table in `docs/keyboard.md`. Marks are add-only.
+6. **Settings > Playback:** "P opens the playlist picker" (on) and "Keep picker open after adding" (off: Enter and a click close it; on: the checks stay, marks and filter clear, the box keeps the caret).
+7. **Failure:** "Couldn't load playlists" with Retry; a new playlist can still be made from the box. A refused create is the usual "Couldn't create playlist" notice.
+
 ## Mini player (coordinator brief, 2026-10-04)
 The plain mini player (`ui/mini_player.rs` `render_plain`, `mini.rs`, `hud.rs` `IdleFade`). Every option is a switch in **Settings > Mini player**, the section directly after Window: Keep on top (on), Fade controls when idle (on), Dim when idle (on), Show volume (on), Show lyrics (off), Collapse when Apollo loses focus (on), HUD mode (off), Auto-hide HUD (on).
 1. **Idle:** after 4 s without the pointer over the window (or a track change), previous, play/pause, next and the volume slider fade out over 150 ms, and the text takes their room; then the whole window dims to 60% opacity (300 ms). The pointer coming back restores both at once. Each half is its own switch. The HUD keeps its own 30% dimming (HUD, 7) and ignores these two.
@@ -284,10 +294,11 @@ Audition a list (`player/skim.rs`). Settings > Playback > "Skim" (on) and "Secon
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.
 
 ## Multi-select decisions (coordinator, 2026-10-05)
-Shared helper `ui/selection.rs`; first on Search results and playlist pages.
+Shared helper `ui/selection.rs`; on Search results, playlist and album pages, the Library Songs tab, the Crate and the queue.
 1. **Picked rows:** background is the accent at 16% alpha (`selection::row_tint`). The keyboard cursor row keeps its existing look (focus ring on pages, marker bar on Search) on top of the tint. One picked row is drawn tinted too, but is not yet a selection: the verbs act from 2 up.
 2. **Count:** "N selected" in caption text.secondary at the right end of the list's header (the chip row on Search; beside the filter field on a playlist page, in a fixed 96px slot so the header does not shift), shown while 2 or more are picked. No floating action bar.
-3. **Menu:** the selection's menu is the track menu's usual popover with Play next, Add to queue, Add to playlist… (the picker takes the whole list), Add to Crate, Like (or Remove from Liked when all are liked), and Remove from playlist on a playlist of your own. No success toasts.
+3. **Menu:** the selection's menu is the track menu's usual popover with Play next, Add to queue, Add to playlist… (the picker takes the whole list), Add to Crate (Remove from Crate when every picked song is in it), Like (or Remove from Liked when all are liked), Remove from playlist on a playlist of your own and Remove from queue in the queue panel (its own last group, as in a single row's menu). No success toasts.
+4. **Everywhere else the same (built choices flagged):** album pages and the Songs tab use the playlist page's look. On the Songs tab "N selected" sits at the right end of the Play / Shuffle row (built choice: the filter lives in the tab row there). The Crate puts it at the right end of its button row, in the same 96px slot. The queue panel shows it beside the "Queue" title in the header with no slot (built choice: the panel is 320px wide and the title never moves). Delete removes the picks in the Crate and the queue (the playing row stays); a Crate row still drags alone.
 
 ## Crate arranging decisions (coordinator brief, 2026-10-05; built choices flagged)
 Applied to `crate_list.rs`, `ui/crate_page.rs` and the `crate_items.pos` column (migration 9).

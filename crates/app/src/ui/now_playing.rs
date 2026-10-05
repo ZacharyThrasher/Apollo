@@ -32,7 +32,7 @@ use crate::ui::transport::{self, on_off, TransportFocus};
 
 /// Tab order: after the nav rail, before the queue panel and the player bar.
 /// Where the add-to-playlist popover of Now Playing is anchored.
-const PLAYLIST_ANCHOR: &str = "np-playlist-anchor";
+pub const PLAYLIST_ANCHOR: &str = "np-playlist-anchor";
 /// Where the speed popover hangs from.
 const SPEED_ANCHOR: &str = "np-speed-anchor";
 /// How wide the speed popover is: four short rows.

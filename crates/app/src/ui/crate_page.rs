@@ -11,6 +11,11 @@
 //!
 //! The list is virtual and keyboard-first like the queue panel's: one tab stop, an arrow-key
 //! cursor, Enter plays, L likes, Delete removes.
+//!
+//! Songs can be picked for bulk verbs (`ui::selection`: Ctrl+click, Shift+click, Shift+Arrows,
+//! Ctrl+A, Esc). With 2 or more picked, L likes them all, Delete takes them out of the Crate, and
+//! the menu of a picked row (right-click or More) acts on every picked row, with Remove from
+//! Crate. A drag still moves the one row it is started on.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -37,8 +42,9 @@ use crate::ui::button::{focus_ring, keyboard_focused, Handler};
 use crate::ui::player_bar::text_line;
 use crate::ui::playing_row;
 use crate::ui::row_actions::{heart_action, more_slot, row_action, ACTION_SIZE};
+use crate::ui::selection::{self, Click, Selection};
 use crate::ui::text_button::TextButton;
-use crate::ui::track_menu::{self, Subject};
+use crate::ui::track_menu::{self, Command, Subject, TrackSubject};
 
 actions!(
     apollo_crate,
@@ -48,8 +54,13 @@ actions!(
         PlayCursor,
         RemoveCursor,
         LikeCursor,
+        PlaylistCursor,
         MoveCursorUp,
-        MoveCursorDown
+        MoveCursorDown,
+        ExtendUp,
+        ExtendDown,
+        SelectAll,
+        ClearPicks
     ]
 );
 
@@ -64,8 +75,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("backspace", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", MoveCursorDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-up", ExtendUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-down", ExtendDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-a", SelectAll, Some(KEY_CONTEXT)),
+        KeyBinding::new("escape", ClearPicks, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -191,6 +207,10 @@ pub struct CratePage {
     cursor: Option<String>,
     /// Clear was pressed and waits for a yes.
     confirming: bool,
+    /// Songs picked for bulk verbs, by video id.
+    selection: Selection<String>,
+    /// What a picked row's More button and right-click open: the menu of the whole selection.
+    bulk_menu: Option<Subject>,
     /// Copied at each render for the list's row callback.
     rows: Vec<CrateRow>,
     accent: Accent,
@@ -240,6 +260,8 @@ impl CratePage {
             scroll: UniformListScrollHandle::new(),
             cursor: None,
             confirming: false,
+            selection: Selection::new(),
+            bulk_menu: None,
             rows: Vec::new(),
             accent: Accent::fallback(),
             on_search: Rc::new(Box::new(on_search)),
@@ -254,10 +276,16 @@ impl CratePage {
         self.confirming
     }
 
+    /// How many songs are picked for bulk verbs (tests and diagnostics).
+    pub fn picked(&self) -> usize {
+        self.selection.len()
+    }
+
     /// The page was left: a half-answered Clear is forgotten.
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.confirming = false;
         self.cursor = None;
+        self.selection.clear();
         cx.notify();
     }
 
@@ -345,6 +373,7 @@ impl CratePage {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.confirming = false;
         self.cursor = None;
+        self.selection.clear();
         self.crate_.update(cx, |m, cx| m.clear(cx));
         cx.notify();
     }
@@ -472,15 +501,167 @@ impl CratePage {
     }
 
     fn remove_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.selection.is_bulk() {
+            self.remove_picked(cx);
+            return;
+        }
         if let Some(video) = self.cursor.clone() {
             self.remove(&video, cx);
         }
     }
 
-    fn like_cursor(&mut self, cx: &mut Context<Self>) {
+    fn like_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run_bulk(Command::ToggleLike, window, cx) {
+            return;
+        }
         if let Some(video) = self.cursor.clone() {
             self.writes.update(cx, |w, cx| w.toggle_like(&video, cx));
         }
+    }
+
+    // ---- picking songs -----------------------------------------------------------------
+
+    /// The picked songs in the crate's order, as the track menu takes them.
+    fn picked_songs(&self) -> Vec<TrackSubject> {
+        self.rows
+            .iter()
+            .filter(|r| self.selection.contains(&r.track.video_id.as_str().to_owned()))
+            .map(|r| TrackSubject::of_row(r.track.clone(), r.thumbnail.clone(), None))
+            .collect()
+    }
+
+    /// Per frame: drop picks that left the crate and work out the selection's menu.
+    fn refresh_selection(&mut self) {
+        let ids: Vec<String> = self
+            .rows
+            .iter()
+            .map(|r| r.track.video_id.as_str().to_owned())
+            .collect();
+        self.selection.keep(&ids);
+        self.bulk_menu = if self.selection.is_bulk() {
+            Subject::tracks(self.picked_songs())
+        } else {
+            None
+        };
+    }
+
+    /// A click on row `ix`. Whether it was a Ctrl or Shift click (a pick), which the row's own
+    /// action then leaves alone. A plain click clears the picks.
+    fn pick_row(&mut self, ix: usize, how: Click, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let ids = self.ids(cx);
+        let Some(video) = ids.get(ix) else {
+            return false;
+        };
+        let picked = self
+            .selection
+            .click(how, video, self.cursor.as_ref(), &ids);
+        if picked {
+            // The keyboard carries on from the clicked row: Shift+Arrows, Ctrl+A and Esc work.
+            self.cursor = Some(video.clone());
+            window.focus(&self.focus.list, cx);
+        }
+        cx.notify();
+        picked
+    }
+
+    /// Shift+Up / Shift+Down: the cursor moves and the picked rows stretch (or shrink) to it.
+    fn extend(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let ids = self.ids(cx);
+        if ids.is_empty() {
+            return;
+        }
+        let at = self
+            .cursor_or_playing(&ids, cx)
+            .and_then(|c| ids.iter().position(|id| *id == c))
+            .unwrap_or(0);
+        let to = (at as isize + delta).clamp(0, ids.len() as isize - 1) as usize;
+        self.selection.extend(ids.get(at), &ids[to], &ids);
+        self.cursor = Some(ids[to].clone());
+        self.scroll.scroll_to_item(to, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// Ctrl+A: every song.
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let ids = self.ids(cx);
+        self.selection.select_all(&ids);
+        cx.notify();
+    }
+
+    /// Esc: picked songs go first; with none picked Esc does what it did before.
+    fn clear_picks(&mut self, cx: &mut Context<Self>) {
+        if self.selection.is_empty() {
+            cx.propagate();
+            return;
+        }
+        self.selection.clear();
+        cx.notify();
+    }
+
+    /// Run a menu verb on the picked songs, when two or more are picked. Whether it did.
+    fn run_bulk(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.selection.is_bulk() {
+            return false;
+        }
+        if let Some(subject) = Subject::tracks(self.picked_songs()) {
+            track_menu::run_now(command, subject, window, cx);
+        }
+        true
+    }
+
+    /// Delete with 2 or more picked: they all leave the crate, and the cursor lands on the row
+    /// after them (else the one before).
+    fn remove_picked(&mut self, cx: &mut Context<Self>) {
+        let ids = self.ids(cx);
+        let picked: Vec<String> = self.selection.members(&ids).into_iter().cloned().collect();
+        if picked.is_empty() {
+            return;
+        }
+        if let Some(at) = self.cursor.as_ref().and_then(|c| ids.iter().position(|i| i == c)) {
+            let survives = |id: &&String| !picked.contains(*id);
+            self.cursor = ids[at..]
+                .iter()
+                .find(survives)
+                .or_else(|| ids[..at].iter().rev().find(survives))
+                .cloned();
+        }
+        self.selection.clear();
+        self.crate_.update(cx, |m, cx| {
+            for video in &picked {
+                m.remove(video, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// The P key: the playlist picker for the song under the cursor, or for every picked song.
+    fn playlist_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::ui::playlist_picker::key_enabled(cx) {
+            return;
+        }
+        let songs: Vec<crate::ui::playlist_picker::PickerSong> = if self.selection.is_bulk() {
+            self.picked_songs()
+                .into_iter()
+                .map(|s| {
+                    crate::ui::playlist_picker::PickerSong::new(
+                        s.track.video_id.as_str(),
+                        s.track.title.clone(),
+                    )
+                })
+                .collect()
+        } else {
+            let Some(ix) = self.cursor_index(cx) else {
+                return;
+            };
+            let Some(track) = self.crate_.read(cx).items().get(ix).map(|r| r.track.clone()) else {
+                return;
+            };
+            vec![crate::ui::playlist_picker::PickerSong::new(
+                track.video_id.as_str(),
+                track.title.clone(),
+            )]
+        };
+        crate::ui::playlist_picker::open_songs(songs, None, window, cx);
     }
 
     // ---- rows --------------------------------------------------------------------------
@@ -530,6 +711,7 @@ impl CratePage {
         let at_cursor = list_focused && self.cursor.as_deref() == Some(video.as_str());
         let ring = at_cursor && keyboard_focused(&self.focus.list, window);
         let accent = color::accent(self.accent);
+        let tint = selection::row_tint(self.accent);
         let selected = playing || at_cursor;
         let group: SharedString = format!("crate-row-{ix}").into();
         let thumb = self.player.read(cx).thumb(&video);
@@ -564,7 +746,12 @@ impl CratePage {
                 let (writes, video) = (self.writes.clone(), video.clone());
                 move |_, cx| writes.update(cx, |w, cx| w.toggle_like(&video, cx))
             }));
-        let subject = Subject::track(row.track.clone(), row.thumbnail.clone());
+        let picked = self.selection.contains(&video);
+        // A picked row speaks for every picked row.
+        let subject = match &self.bulk_menu {
+            Some(bulk) if picked => bulk.clone(),
+            _ => Subject::track(row.track.clone(), row.thumbnail.clone()),
+        };
         let more = more_slot(format!("crate-more-{ix}"), true, subject.clone())
             .when(!at_cursor, |d| {
                 d.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
@@ -606,8 +793,11 @@ impl CratePage {
             .rounded(px(radius::SMALL))
             .cursor_pointer()
             .when(selected, |d| d.bg(playing_row::tint()))
+            .when(picked, |d| d.bg(tint))
             .hover(move |s| {
-                s.bg(if selected {
+                s.bg(if picked {
+                    tint
+                } else if selected {
                     playing_row::tint()
                 } else {
                     color::state_hover()
@@ -615,7 +805,7 @@ impl CratePage {
             })
             .role(gpui::Role::ListItem)
             .aria_label(title.clone())
-            .aria_selected(playing)
+            .aria_selected(playing || picked)
             .on_click(cx.listener({
                 let video = video.clone();
                 move |this, event: &ClickEvent, window, cx| {
@@ -624,6 +814,10 @@ impl CratePage {
                         if k.button == KeyboardButton::Space {
                             return;
                         }
+                    }
+                    // Ctrl and Shift pick songs; a plain click clears the picks and plays.
+                    if this.pick_row(ix, Click::of_event(event), window, cx) {
+                        return;
                     }
                     window.focus(&this.focus.list, cx);
                     this.cursor = Some(video.clone());
@@ -813,7 +1007,14 @@ impl CratePage {
                             }),
                     ))
                 }
-            });
+            })
+            // "N selected" at the right end while 2 or more songs are picked.
+            .child(
+                div()
+                    .ml_auto()
+                    .debug_selector(|| "crate-selected-count".into())
+                    .child(selection::count_slot(self.selection.len(), cx)),
+            );
         div()
             .flex()
             .flex_col()
@@ -873,6 +1074,7 @@ impl Render for CratePage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.accent = self.player.read(cx).view().accent;
         self.rows = self.crate_.read(cx).items().to_vec();
+        self.refresh_selection();
         let accent = self.accent;
         let count = self.rows.len();
 
@@ -886,11 +1088,25 @@ impl Render for CratePage {
                 .track_focus(&self.focus.list)
                 .role(gpui::Role::List)
                 .aria_label("Crate")
-                .on_action(cx.listener(|this, _: &CursorUp, _, cx| this.step(-1, cx)))
-                .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.step(1, cx)))
+                .on_action(cx.listener(|this, _: &CursorUp, _, cx| {
+                    // The plain arrows only move the cursor: picked songs do not follow it.
+                    this.selection.clear();
+                    this.step(-1, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CursorDown, _, cx| {
+                    this.selection.clear();
+                    this.step(1, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.extend(-1, cx)))
+                .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.extend(1, cx)))
+                .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
+                .on_action(cx.listener(|this, _: &ClearPicks, _, cx| this.clear_picks(cx)))
                 .on_action(cx.listener(|this, _: &PlayCursor, _, cx| this.play_cursor(cx)))
                 .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
-                .on_action(cx.listener(|this, _: &LikeCursor, _, cx| this.like_cursor(cx)))
+                .on_action(cx.listener(|this, _: &LikeCursor, window, cx| this.like_cursor(window, cx)))
+                .on_action(cx.listener(|this, _: &PlaylistCursor, window, cx| {
+                    this.playlist_cursor(window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &MoveCursorUp, _, cx| this.move_cursor(-1, cx)))
                 .on_action(cx.listener(|this, _: &MoveCursorDown, _, cx| this.move_cursor(1, cx)))
                 .size_full()

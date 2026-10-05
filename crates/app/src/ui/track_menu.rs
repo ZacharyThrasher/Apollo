@@ -433,7 +433,12 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                     "Add to playlist\u{2026}",
                 ));
             }
-            keep.push(item(Command::AddToCrate, Icon::BoxRegular, "Add to Crate"));
+            // `in_crate` is true when every song is in the Crate: the item then takes them all out.
+            keep.push(if facts.in_crate {
+                item(Command::RemoveFromCrate, Icon::BoxFilled, "Remove from Crate")
+            } else {
+                item(Command::AddToCrate, Icon::BoxRegular, "Add to Crate")
+            });
             out.push(keep);
             // `liked` is true when every song is liked: the item then takes them all out.
             out.push(vec![if liked {
@@ -447,6 +452,15 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                     Command::RemoveFromPlaylist,
                     Icon::Delete,
                     "Remove from playlist",
+                )]);
+            }
+            // In the queue panel: the picked rows that are not playing can be taken out, in one
+            // step Ctrl+Z puts back.
+            if songs.iter().any(|s| s.entry.is_some()) {
+                out.push(vec![item(
+                    Command::RemoveFromQueue,
+                    Icon::Delete,
+                    "Remove from queue",
                 )]);
             }
             out
@@ -807,7 +821,13 @@ impl TrackMenu {
                 songs
                     .iter()
                     .all(|t| self.writes.read(cx).is_liked(t.track.video_id.as_str())),
-                Facts::default(),
+                Facts {
+                    in_crate: crate::crate_list::handle(cx).is_some_and(|c| {
+                        let crate_ = c.read(cx);
+                        songs.iter().all(|t| crate_.contains(t.track.video_id.as_str()))
+                    }),
+                    ..Facts::default()
+                },
             ),
             Subject::Queue => (false, Facts::default()),
         };
@@ -998,6 +1018,20 @@ impl TrackMenu {
                     .collect();
                 self.writes
                     .update(cx, |w, cx| w.set_liked_many(ids, !all_liked, cx));
+            }
+            (Command::RemoveFromCrate, Subject::Tracks(songs)) => {
+                if let Some(model) = crate::crate_list::handle(cx) {
+                    model.update(cx, |m, cx| {
+                        for song in &songs {
+                            m.remove(song.track.video_id.as_str(), cx);
+                        }
+                    });
+                }
+            }
+            (Command::RemoveFromQueue, Subject::Tracks(songs)) => {
+                // One step for Ctrl+Z, whatever the count. The playing row has no entry here.
+                let entries: Vec<_> = songs.iter().filter_map(|s| s.entry).collect();
+                self.player.update(cx, |p, cx| p.remove_entries(entries, cx));
             }
             (Command::RemoveFromPlaylist, Subject::Tracks(songs)) => {
                 // The playlist page's own edit queue sends the removals one at a time.
@@ -1744,5 +1778,33 @@ mod tests {
         let h = f32::from(menu().height);
         let at = menu_position(button(900.0, 700.0), menu(), window);
         assert_eq!(at.top, 700.0 - ANCHOR_GAP - h);
+    }
+
+    fn picked(entry: bool) -> TrackSubject {
+        TrackSubject {
+            track: Track::new("v", "Song"),
+            thumbnail: None,
+            entry: entry.then(|| QueueEntryId::from_raw(1)),
+            playlist_row: None,
+        }
+    }
+
+    #[test]
+    fn a_selection_menu_swaps_the_crate_item_when_all_are_in_it_and_adds_queue_removal_where_rows_have_entries() {
+        let two = Subject::Tracks(vec![picked(false), picked(false)]);
+        let flat: Vec<Command> = commands_with(&two, Facts::default()).concat();
+        assert!(flat.contains(&Command::AddToCrate));
+        assert!(!flat.contains(&Command::RemoveFromQueue));
+        let in_crate = Facts {
+            in_crate: true,
+            ..Facts::default()
+        };
+        let flat: Vec<Command> = commands_with(&two, in_crate).concat();
+        assert!(flat.contains(&Command::RemoveFromCrate) && !flat.contains(&Command::AddToCrate));
+
+        // Queue rows carry an entry (the playing row has none): any one is enough to offer it.
+        let queued = Subject::Tracks(vec![picked(true), picked(false)]);
+        let groups = commands_with(&queued, Facts::default());
+        assert_eq!(groups.last().unwrap(), &vec![Command::RemoveFromQueue]);
     }
 }

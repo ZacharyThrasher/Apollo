@@ -23,6 +23,7 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Ctrl+L | Show / hide lyrics (opens Now Playing) |
 | L | Like / unlike the playing song |
 | C | Set the playing song aside in the Crate (in the queue, Library and Search lists: the song under the cursor) |
+| P | Add to playlist: open the picker for the playing song (in the queue, Library, Search and Crate lists: the song under the cursor). Settings > Playback > "P opens the playlist picker" switches it off |
 | Ctrl+Z | Undo the last queue change |
 | Ctrl+Shift+Z or Ctrl+Y | Redo it |
 | Esc | Close Now Playing |
@@ -30,8 +31,8 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 
 ## Picking several songs
 
-On Search results and on a playlist page (albums, Library Songs, the Crate and the queue come
-later). The cursor row keeps its own ring; the picked rows are tinted with the accent.
+On Search results, playlist and album pages, the Library Songs tab, the Crate and the queue. The
+cursor row keeps its own ring; the picked rows are tinted with the accent.
 
 | Key | Does |
 |---|---|
@@ -41,12 +42,17 @@ later). The cursor row keeps its own ring; the picked rows are tinted with the a
 | Ctrl+A | Pick every song in the list |
 | Esc | Clear the picks (the next Esc does what it did before: leave the list, close the page) |
 | Up / Down | Move the cursor and clear the picks |
-| L / C / P / Ctrl+Enter | With 2 or more picked: like all (or un-like when all are liked) / Crate all / Add all to a playlist (the picker opens at the cursor row) / Add all to the queue (Search) |
+| L / C / P / Ctrl+Enter | With 2 or more picked: like all (or un-like when all are liked) / Crate all / Add all to a playlist (the picker opens at the cursor row; in the Crate and the queue it opens in the middle) / Add all to the queue (Search). C is not bound in the Crate |
+| Delete / Backspace | With 2 or more picked, in the Crate or the queue: take them all out (the playing row stays in the queue) |
 
 With 2 or more picked, right-click on any picked row (or its More button) opens a menu for all
-of them: Play next, Add to queue, Add to playlist…, Add to Crate, Like, and on a playlist of your own Move to top,
-Move to bottom and Remove from playlist. A row that is not picked keeps its own menu. A plain click plays the song as before
-and clears the picks. Likes and removals go to the account one at a time.
+of them: Play next, Add to queue, Add to playlist…, Add to Crate (Remove from Crate when they are
+all in it, as on the Crate page), Like, and on a playlist of your own Move to top, Move to bottom and Remove from playlist; in the
+queue Remove from queue. A row that is not picked keeps its own menu. A plain click plays the song
+as before and clears the picks. Likes and playlist removals go to the account one at a time;
+Remove from queue is one step for Ctrl+Z, whatever the count. The Crate still drags one row at a
+time (a drag does not take the picks with it). The picks belong to the list: another page, tab
+or search starts with none.
 
 ## In lists
 
@@ -101,6 +107,24 @@ playing; only when the undone action had changed that song (a new list replaced 
 the old song come back, paused where it was. A small "Queue restored" pill shows for 2 seconds.
 
 Media keys are the OS's (SMTC) and are untouched.
+
+## The playlist picker
+
+P (or the add-to-playlist button) opens it with the caret in a filter box. Recently used
+playlists are on top, a divider, then the rest in the order YouTube Music lists them.
+
+| Key | Does |
+|---|---|
+| Type | Narrow the list (every word must be in the name) |
+| Up / Down | Move the cursor |
+| Space | Mark / unmark the playlist under the cursor. Only while the filter is empty: with text in it a space is a space |
+| Ctrl+Space | Mark / unmark, any time |
+| Enter | Add to every marked playlist, or to the one under the cursor if none is marked; on the "Create" row, make that playlist with the song in it. Closes (unless Settings > Playback > "Keep picker open after adding" is on) |
+| Ctrl+Enter | Make a playlist of the typed name, whatever row the cursor is on |
+| Esc | Close (even with text in the filter) |
+
+A playlist that already holds the song shows its check and cannot be marked. Marks are add-only;
+taking a song out is done on the playlist's own page. A click on a row adds to it at once.
 
 ## Learning the keys
 

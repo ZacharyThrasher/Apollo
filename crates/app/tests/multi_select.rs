@@ -19,7 +19,7 @@ use apollo_app::ui::search_page::SearchPage;
 use apollo_app::ui::shell::{self, Shell};
 use apollo_app::ui::track_menu::{Command, Subject, TrackMenu};
 use apollo_app::url_thumbs::NoThumbs;
-use apollo_domain::library::WriteFailure;
+use apollo_domain::library::{CollectionKind, WriteFailure};
 use apollo_domain::listing::LoadFailure;
 use apollo_domain::model::Track;
 use apollo_provider::{ListedTrack, SearchResults};
@@ -685,4 +685,375 @@ fn picks_do_not_follow_to_another_page(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     open_playlist(&page, vcx, "Mix 020");
     assert_eq!(picked_rows(&page, vcx), 0);
+}
+
+// ---- the Library Songs tab and album pages --------------------------------------------------
+
+fn open_songs_tab(page: &Page, vcx: &mut VisualTestContext) {
+    page.shell.update(vcx, |s, cx| s.show_route(Route::Library, cx));
+    vcx.run_until_parked();
+    click(vcx, "library-tab-songs");
+}
+
+fn song_ids(page: &Page, vcx: &mut VisualTestContext) -> Vec<String> {
+    page.view.read_with(vcx, |v, cx| {
+        v.model()
+            .read(cx)
+            .list_rows()
+            .iter()
+            .map(|r| r.track.video_id.as_str().to_owned())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn the_songs_tab_picks_rows_and_the_menu_acts_on_all_of_them(cx: &mut TestAppContext) {
+    use Command::*;
+    let (page, vcx) = setup(cx);
+    open_songs_tab(&page, vcx);
+    let ids = song_ids(&page, vcx);
+    assert!(ids.len() >= 4);
+    ctrl_click_row(vcx, 3);
+    ctrl_click_row(vcx, 1);
+    assert_eq!(picked_rows(&page, vcx), 2);
+    assert!(on_screen(vcx, "library-selected-count"));
+
+    let at = bounds(vcx, "library-row-1").center();
+    right_click(vcx, at);
+    assert_eq!(
+        commands(&page, vcx),
+        [PlayNext, AddToQueue, AddToPlaylist, AddToCrate, ToggleLike],
+        "the standard set, in the order the picks have in the list"
+    );
+    choose(&page, vcx, AddToQueue);
+    assert_eq!(upcoming(&page, vcx), [ids[1].as_str(), ids[3].as_str()]);
+}
+
+#[gpui::test]
+fn the_songs_tab_keyboard_picks_and_a_plain_click_plays_and_clears(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_songs_tab(&page, vcx);
+    let ids = song_ids(&page, vcx);
+    ctrl_click_row(vcx, 0);
+    vcx.simulate_keystrokes("shift-down shift-down");
+    assert_eq!(picked_rows(&page, vcx), 3);
+    vcx.simulate_keystrokes("ctrl-a");
+    assert_eq!(picked_rows(&page, vcx), ids.len());
+    vcx.simulate_keystrokes("c");
+    let model = page.shell.read_with(vcx, |s, _| s.crate_model().clone());
+    for id in &ids {
+        assert!(model.read_with(vcx, |m, _| m.contains(id)), "{id} is in the Crate");
+    }
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(picked_rows(&page, vcx), 0);
+
+    ctrl_click_row(vcx, 0);
+    ctrl_click_row(vcx, 1);
+    let at = bounds(vcx, "library-row-2").center();
+    pick(vcx, at, Modifiers::none());
+    assert_eq!(picked_rows(&page, vcx), 0, "a plain click clears the picks");
+    assert_eq!(
+        page.player.read_with(vcx, |m, _| m.current_video()),
+        Some(ids[2].clone()),
+        "and plays the row"
+    );
+}
+
+#[gpui::test]
+fn the_songs_picks_stay_on_the_songs_tab(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_songs_tab(&page, vcx);
+    ctrl_click_row(vcx, 0);
+    ctrl_click_row(vcx, 1);
+    assert_eq!(picked_rows(&page, vcx), 2);
+    click(vcx, "library-tab-playlists");
+    click(vcx, "library-tab-songs");
+    assert_eq!(picked_rows(&page, vcx), 0);
+}
+
+#[gpui::test]
+fn an_album_page_picks_songs_with_the_standard_menu(cx: &mut TestAppContext) {
+    use Command::*;
+    let (page, vcx) = setup(cx);
+    page.shell.update(vcx, |s, cx| s.show_route(Route::Library, cx));
+    vcx.run_until_parked();
+    // The simulated albums hold one song each: a three-song collection of someone else's stands
+    // in, opened as an album (the page's look and rules follow the kind).
+    let album = page.view.read_with(vcx, |v, cx| {
+        let mut c = v
+            .model()
+            .read(cx)
+            .list(Tab::Playlists)
+            .iter()
+            .find(|c| c.title == "Mix 020")
+            .cloned()
+            .expect("Mix 020 is in the library");
+        c.kind = CollectionKind::Album;
+        c
+    });
+    page.view
+        .update_in(vcx, |v, window, cx| v.open(album, window, cx));
+    vcx.run_until_parked();
+    let before = rows(&page, vcx);
+    assert!(before.len() >= 3, "the album has songs");
+
+    ctrl_click_row(vcx, 0);
+    let at = bounds(vcx, "library-row-2").center();
+    pick(vcx, at, Modifiers::shift());
+    assert_eq!(picked_rows(&page, vcx), 3);
+    assert!(on_screen(vcx, "library-selected-count"));
+    right_click(vcx, at);
+    assert_eq!(
+        commands(&page, vcx),
+        [PlayNext, AddToQueue, AddToPlaylist, AddToCrate, ToggleLike],
+        "an album has no remove"
+    );
+    choose(&page, vcx, PlayNext);
+    assert_eq!(upcoming(&page, vcx).len(), 3);
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(picked_rows(&page, vcx), 0);
+    assert_eq!(depth(&page, vcx), 1, "Esc cleared the picks and left the page open");
+}
+
+// ---- the Crate ------------------------------------------------------------------------------
+
+const CRATED: [&str; 4] = ["crateAAAA01", "crateBBBB02", "crateCCCC03", "crateDDDD04"];
+
+fn fill_crate(page: &Page, vcx: &mut VisualTestContext) {
+    let model = page.shell.read_with(vcx, |s, _| s.crate_model().clone());
+    model.update(vcx, |m, cx| {
+        for id in CRATED {
+            m.add(Track::new(id, format!("Song {id}")), None, cx);
+        }
+    });
+    page.shell.update(vcx, |s, cx| s.show_route(Route::Crate, cx));
+    vcx.run_until_parked();
+}
+
+fn crate_ids(page: &Page, vcx: &mut VisualTestContext) -> Vec<String> {
+    let model = page.shell.read_with(vcx, |s, _| s.crate_model().clone());
+    model.read_with(vcx, |m, _| {
+        m.items()
+            .iter()
+            .map(|r| r.track.video_id.as_str().to_owned())
+            .collect()
+    })
+}
+
+fn picked_in_crate(page: &Page, vcx: &mut VisualTestContext) -> usize {
+    let crate_page = page.shell.read_with(vcx, |s, _| s.crate_page().clone());
+    crate_page.read_with(vcx, |p, _| p.picked())
+}
+
+fn ctrl_click_crate_row(vcx: &mut VisualTestContext, ix: usize) {
+    let at = bounds(vcx, &format!("crate-row-{ix}")).center();
+    pick(vcx, at, Modifiers::control());
+}
+
+#[gpui::test]
+fn the_crate_picks_songs_and_removes_them_from_the_menu(cx: &mut TestAppContext) {
+    use Command::*;
+    let (page, vcx) = setup(cx);
+    fill_crate(&page, vcx);
+    ctrl_click_crate_row(vcx, 0);
+    ctrl_click_crate_row(vcx, 2);
+    assert_eq!(picked_in_crate(&page, vcx), 2);
+    assert_eq!(
+        page.player.read_with(vcx, |m, _| m.current_video()).as_deref(),
+        Some(FIRST),
+        "a Ctrl+click does not play"
+    );
+
+    let at = bounds(vcx, "crate-row-2").center();
+    right_click(vcx, at);
+    assert_eq!(
+        commands(&page, vcx),
+        [PlayNext, AddToQueue, AddToPlaylist, RemoveFromCrate, ToggleLike],
+        "they are all in the Crate, so the Crate item takes them out"
+    );
+    choose(&page, vcx, RemoveFromCrate);
+    assert_eq!(crate_ids(&page, vcx), [CRATED[1], CRATED[3]]);
+    assert_eq!(picked_in_crate(&page, vcx), 0);
+}
+
+#[gpui::test]
+fn the_crate_menu_and_keys_act_on_picks_in_the_crates_order(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    fill_crate(&page, vcx);
+    ctrl_click_crate_row(vcx, 3);
+    ctrl_click_crate_row(vcx, 1);
+    let at = bounds(vcx, "crate-row-1").center();
+    right_click(vcx, at);
+    choose(&page, vcx, Command::AddToQueue);
+    assert_eq!(upcoming(&page, vcx), [CRATED[1], CRATED[3]]);
+
+    // Esc clears the picks and nothing else; Shift+Arrows and Ctrl+A pick from the keyboard.
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(picked_in_crate(&page, vcx), 0);
+    ctrl_click_crate_row(vcx, 0);
+    vcx.simulate_keystrokes("shift-down");
+    assert_eq!(picked_in_crate(&page, vcx), 2);
+    vcx.simulate_keystrokes("ctrl-a");
+    assert_eq!(picked_in_crate(&page, vcx), 4);
+    // Delete takes every pick out of the Crate.
+    vcx.simulate_keystrokes("delete");
+    assert!(crate_ids(&page, vcx).is_empty());
+}
+
+#[gpui::test]
+fn plain_arrows_and_a_plain_click_drop_the_crates_picks(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    fill_crate(&page, vcx);
+    ctrl_click_crate_row(vcx, 0);
+    ctrl_click_crate_row(vcx, 1);
+    vcx.simulate_keystrokes("down");
+    assert_eq!(picked_in_crate(&page, vcx), 0);
+    ctrl_click_crate_row(vcx, 0);
+    ctrl_click_crate_row(vcx, 1);
+    let at = bounds(vcx, "crate-row-3").center();
+    pick(vcx, at, Modifiers::none());
+    assert_eq!(picked_in_crate(&page, vcx), 0);
+    assert_eq!(
+        page.player.read_with(vcx, |m, _| m.current_video()).as_deref(),
+        Some(CRATED[3])
+    );
+}
+
+#[gpui::test]
+fn a_crate_row_still_drags_alone_with_songs_picked(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    fill_crate(&page, vcx);
+    ctrl_click_crate_row(vcx, 0);
+    ctrl_click_crate_row(vcx, 1);
+    let crate_page = page.shell.read_with(vcx, |s, _| s.crate_page().clone());
+    // The drop of row 3 before row 0 goes through the same call a drag ends in.
+    let model = page.shell.read_with(vcx, |s, _| s.crate_model().clone());
+    model.update(vcx, |m, cx| {
+        m.move_row(3, 0, cx);
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        crate_ids(&page, vcx),
+        [CRATED[3], CRATED[0], CRATED[1], CRATED[2]],
+        "one row moved"
+    );
+    assert_eq!(crate_page.read_with(vcx, |p, _| p.picked()), 2, "the picks stay on their songs");
+}
+
+// ---- the queue ------------------------------------------------------------------------------
+
+const QUEUED: [&str; 4] = ["queueTrk001", "queueTrk002", "queueTrk003", "queueTrk004"];
+
+/// Four songs up next, the panel open. Row 0 is the playing song, 1 the "Up next" header and the
+/// songs sit on rows 2 to 5.
+fn open_queue(page: &Page, vcx: &mut VisualTestContext) {
+    page.player.update(vcx, |m, cx| {
+        m.add_tracks_to_queue(
+            QUEUED.iter().map(|id| Track::new(*id, format!("Song {id}"))).collect(),
+            cx,
+        )
+    });
+    page.shell.update(vcx, |s, cx| s.toggle_queue(cx));
+    vcx.run_until_parked();
+}
+
+fn picked_in_queue(page: &Page, vcx: &mut VisualTestContext) -> usize {
+    let panel = page.shell.read_with(vcx, |s, _| s.queue_panel().clone());
+    panel.read_with(vcx, |p, _| p.picked())
+}
+
+fn ctrl_click_queue_row(vcx: &mut VisualTestContext, ix: usize) {
+    let at = bounds(vcx, &format!("queue-row-{ix}")).center();
+    pick(vcx, at, Modifiers::control());
+}
+
+#[gpui::test]
+fn the_queue_picks_rows_and_removing_them_is_one_undo_step(cx: &mut TestAppContext) {
+    use Command::*;
+    let (page, vcx) = setup(cx);
+    open_queue(&page, vcx);
+    assert_eq!(upcoming(&page, vcx), QUEUED);
+    assert!(!on_screen(vcx, "queue-selected-count"));
+    ctrl_click_queue_row(vcx, 2);
+    ctrl_click_queue_row(vcx, 4);
+    assert_eq!(picked_in_queue(&page, vcx), 2);
+    assert!(on_screen(vcx, "queue-selected-count"));
+    assert_eq!(
+        page.player.read_with(vcx, |m, _| m.current_video()).as_deref(),
+        Some(FIRST),
+        "a Ctrl+click does not play"
+    );
+
+    let at = bounds(vcx, "queue-row-4").center();
+    right_click(vcx, at);
+    assert_eq!(
+        commands(&page, vcx),
+        [PlayNext, AddToQueue, AddToPlaylist, AddToCrate, ToggleLike, RemoveFromQueue]
+    );
+    choose(&page, vcx, RemoveFromQueue);
+    assert_eq!(upcoming(&page, vcx), [QUEUED[1], QUEUED[3]]);
+    assert_eq!(picked_in_queue(&page, vcx), 0);
+
+    // Both come back with one Ctrl+Z.
+    assert!(page.player.update(vcx, |m, cx| m.undo_queue(cx)));
+    assert_eq!(upcoming(&page, vcx), QUEUED);
+}
+
+#[gpui::test]
+fn the_playing_row_can_be_picked_but_stays_when_the_picks_are_removed(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_queue(&page, vcx);
+    ctrl_click_queue_row(vcx, 0);
+    ctrl_click_queue_row(vcx, 2);
+    let at = bounds(vcx, "queue-row-2").center();
+    right_click(vcx, at);
+    choose(&page, vcx, Command::RemoveFromQueue);
+    assert_eq!(upcoming(&page, vcx), [QUEUED[1], QUEUED[2], QUEUED[3]]);
+    assert_eq!(
+        page.player.read_with(vcx, |m, _| m.current_video()).as_deref(),
+        Some(FIRST)
+    );
+}
+
+#[gpui::test]
+fn the_queue_keyboard_picks_removes_and_the_like_and_crate_keys_take_the_picks(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_queue(&page, vcx);
+    ctrl_click_queue_row(vcx, 2);
+    vcx.simulate_keystrokes("shift-down");
+    assert_eq!(picked_in_queue(&page, vcx), 2);
+    vcx.simulate_keystrokes("c");
+    let model = page.shell.read_with(vcx, |s, _| s.crate_model().clone());
+    let held: Vec<bool> = QUEUED
+        .iter()
+        .map(|id| model.read_with(vcx, |m, _| m.contains(id)))
+        .collect();
+    assert_eq!(held, [true, true, false, false]);
+    vcx.simulate_keystrokes("delete");
+    assert_eq!(upcoming(&page, vcx), [QUEUED[2], QUEUED[3]]);
+
+    ctrl_click_queue_row(vcx, 2);
+    vcx.simulate_keystrokes("ctrl-a");
+    assert_eq!(picked_in_queue(&page, vcx), 3, "the playing row and the two up next");
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(picked_in_queue(&page, vcx), 0);
+    vcx.simulate_keystrokes("shift-down");
+    ctrl_click_queue_row(vcx, 2);
+    vcx.simulate_keystrokes("down");
+    assert_eq!(picked_in_queue(&page, vcx), 0, "the plain arrows drop the picks");
+}
+
+#[gpui::test]
+fn a_plain_click_in_the_queue_plays_the_row_and_clears_the_picks(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_queue(&page, vcx);
+    ctrl_click_queue_row(vcx, 2);
+    ctrl_click_queue_row(vcx, 3);
+    let at = bounds(vcx, "queue-row-4").center();
+    pick(vcx, at, Modifiers::none());
+    assert_eq!(picked_in_queue(&page, vcx), 0);
+    assert_eq!(
+        page.player.read_with(vcx, |m, _| m.current_video()).as_deref(),
+        Some(QUEUED[2])
+    );
 }
