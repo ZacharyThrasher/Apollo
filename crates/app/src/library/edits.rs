@@ -418,6 +418,8 @@ struct Membership {
     loaded: bool,
     /// Bare ids of the library's playlists.
     playlists: HashSet<String>,
+    /// Titles of the library's playlists (what an instant playlist's default name steps around).
+    playlist_titles: HashSet<String>,
     /// Browse ids of the library's albums.
     albums: HashSet<String>,
     /// Bare ids of the playlists the account can edit; `None` until the service has said.
@@ -528,6 +530,11 @@ impl LibraryEdits {
         self.busy.contains(key)
     }
 
+    /// Whether the library holds a playlist with this title.
+    pub fn has_playlist_titled(&self, title: &str) -> bool {
+        self.membership.playlist_titles.contains(title)
+    }
+
     /// Every playlist id the library holds.
     pub fn known_playlists(&self) -> &HashSet<String> {
         &self.membership.playlists
@@ -596,6 +603,8 @@ impl LibraryEdits {
             .iter()
             .map(|c| c.library_key().to_owned())
             .collect();
+        self.membership.playlist_titles =
+            collections.playlists.iter().map(|c| c.title.clone()).collect();
         self.membership.albums = collections
             .albums
             .iter()
@@ -687,6 +696,23 @@ impl LibraryEdits {
         true
     }
 
+    /// A playlist of the account's was made: it is in the library and the account can edit it.
+    /// Before the editable list has been read, the new playlist is the one thing known to be
+    /// editable (so it can be renamed at once) and the full list is asked for.
+    fn note_created(&mut self, id: &str, title: &str, cx: &mut Context<Self>) {
+        self.membership.playlists.insert(id.to_owned());
+        self.membership.playlist_titles.insert(title.to_owned());
+        match self.membership.editable.as_mut() {
+            Some(set) => {
+                set.insert(id.to_owned());
+            }
+            None => {
+                self.membership.editable = Some(HashSet::from([id.to_owned()]));
+                self.load_editable(cx);
+            }
+        }
+    }
+
     fn fail(&mut self, edit: Edit, failure: WriteFailure, cx: &mut Context<Self>) {
         let text = failure_text(edit, failure);
         self.writes.update(cx, |w, cx| w.raise(text, cx));
@@ -712,10 +738,7 @@ impl LibraryEdits {
                         subtitle: Some("Playlist".into()),
                         thumbnail: None,
                     };
-                    m.membership.playlists.insert(id.clone());
-                    if let Some(set) = m.membership.editable.as_mut() {
-                        set.insert(id.clone());
-                    }
+                    m.note_created(&id, &collection.title, cx);
                     if let Some(video) = add_video {
                         let target = PlaylistTarget {
                             id,
@@ -781,10 +804,7 @@ impl LibraryEdits {
                         subtitle: Some("Playlist".into()),
                         thumbnail: None,
                     };
-                    m.membership.playlists.insert(id.clone());
-                    if let Some(set) = m.membership.editable.as_mut() {
-                        set.insert(id);
-                    }
+                    m.note_created(&id, &collection.title, cx);
                     cx.emit(EditEvent::Created(collection));
                 }
                 Err(failure) => m.fail(edit, failure, cx),
@@ -817,6 +837,8 @@ impl LibraryEdits {
                     }
                     let mut edited = collection;
                     if let Some(title) = change.title {
+                        m.membership.playlist_titles.remove(&edited.title);
+                        m.membership.playlist_titles.insert(title.clone());
                         edited.title = title;
                         cx.emit(EditEvent::Renamed(edited.clone()));
                     }
@@ -868,6 +890,7 @@ impl LibraryEdits {
             move |m, result, cx| match result {
                 Ok(()) => {
                     m.membership.playlists.remove(&key);
+                    m.membership.playlist_titles.remove(&collection.title);
                     if let Some(set) = m.membership.editable.as_mut() {
                         set.remove(&key);
                     }

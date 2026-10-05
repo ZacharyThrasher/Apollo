@@ -294,7 +294,7 @@ impl Shell {
             PlaylistPicker::new(player.clone(), writes.clone(), edits.clone(), settings.clone(), cx)
         });
         cx.set_global(PickerHandle(picker.clone()));
-        let dialog = cx.new(|cx| PlaylistDialog::new(player.clone(), edits.clone(), cx));
+        let dialog = cx.new(|cx| PlaylistDialog::new(player.clone(), edits.clone(), settings.clone(), cx));
         cx.observe(&dialog, |_, _, cx| cx.notify()).detach();
         cx.set_global(DialogHandle(dialog.clone()));
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
@@ -1545,6 +1545,18 @@ impl Render for Shell {
         }
         let accent = view.accent;
         let shell = cx.entity();
+
+        // An instant playlist was just made: open its page with the title ready to rename.
+        if let Some(made) = self.dialog.update(cx, |d, _| d.take_instant()) {
+            let shell = shell.clone();
+            window.defer(cx, move |window, cx| {
+                shell.update(cx, |s, cx| {
+                    s.open_target(Target::Collection(made.clone()), window, cx);
+                    s.library
+                        .update(cx, |l, cx| l.begin_rename(&made, window, cx));
+                });
+            });
+        }
 
         let nav_route = self.nav_route();
         let nav = NavRail::new(

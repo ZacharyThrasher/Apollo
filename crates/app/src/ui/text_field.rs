@@ -121,6 +121,8 @@ pub struct TextField {
     /// A plain field is for naming something (a dialog's): no search icon, no clear button, and
     /// Escape always goes to the owner.
     plain: bool,
+    /// Set in the page-title type, on a raised fill, for renaming a page's title in place.
+    title: bool,
     /// While the field is empty a Space goes to the owner instead of typing a leading space
     /// (the playlist picker marks the row under its cursor with it).
     space_to_owner_when_empty: bool,
@@ -151,6 +153,7 @@ impl TextField {
             last_bounds: None,
             is_selecting: false,
             plain: false,
+            title: false,
             space_to_owner_when_empty: false,
             max_chars: MAX_CHARS,
         }
@@ -168,6 +171,13 @@ impl TextField {
         self.plain = true;
         self.max_chars = max_chars;
         self
+    }
+
+    /// A one-line plain field that looks like a page title: the title's type, no border, a raised
+    /// fill that reaches a little past the text (the text itself stays where the title was).
+    pub fn title(mut self, max_chars: usize) -> Self {
+        self.title = true;
+        self.plain(max_chars)
     }
 
     /// Make this a plain field of `rows` wrapped rows that takes at most `max_chars` characters.
@@ -911,7 +921,13 @@ impl Render for TextField {
         let multiline = self.is_multiline();
         let rows = self.rows;
         let has_text = !self.content.is_empty() && !plain;
-        style::text_style(div(), typography::LIST_TITLE, cx)
+        let title = self.title;
+        let size = if title {
+            typography::PAGE_TITLE
+        } else {
+            typography::LIST_TITLE
+        };
+        style::text_style(div(), size, cx)
             .id("text-field")
             .key_context(if multiline { MULTILINE_CONTEXT } else { KEY_CONTEXT })
             .track_focus(&self.focus_handle)
@@ -944,20 +960,21 @@ impl Render for TextField {
             .flex_row()
             .items_center()
             .gap(px(spacing::S2))
-            .when(!multiline, |d| d.h(px(FIELD_HEIGHT)))
+            .when(!multiline && !title, |d| d.h(px(FIELD_HEIGHT)))
             .when(multiline, |d| {
                 d.items_start()
                     .py(px(spacing::S2))
                     .h(px(layout::ICON_SIZE * rows as f32 + spacing::S2 * 2.0 + 2.0))
             })
             .w_full()
-            .px(px(spacing::S3))
+            .px(px(if title { spacing::S2 } else { spacing::S3 }))
             .rounded(px(radius::SMALL))
             .bg(color::bg_raised())
-            .border_1()
-            .border_color(color::border_subtle())
+            .when(!title, |d| d.border_1().border_color(color::border_subtle()))
+            // The text of a title field sits where the title's text was.
+            .when(title, |d| d.ml(px(-spacing::S2)))
             .text_color(color::text_primary())
-            .line_height(px(layout::ICON_SIZE))
+            .when(!title, |d| d.line_height(px(layout::ICON_SIZE)))
             .when(!plain, |d| {
                 d.child(
                     gpui::svg()
