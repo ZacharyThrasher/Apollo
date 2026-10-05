@@ -148,6 +148,7 @@ fn write_failure(failure: LoadFailure) -> WriteFailure {
 }
 
 fn row(listed: ListedTrack) -> TrackRow {
+    crate::explicit_marks::note(listed.track.video_id.as_str(), listed.explicit);
     TrackRow {
         track: listed.track,
         occurrence: listed.occurrence,

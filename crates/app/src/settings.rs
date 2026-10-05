@@ -104,6 +104,9 @@ pub const DIG_KEY: BoolSetting = BoolSetting::new("dig_key", true);
 /// Playlists > Leave out songs I already have: a dig's radio drops songs that are in the Crate,
 /// the target playlist, the liked songs or the local play log. Off keeps them in.
 pub const DIG_LEAVE_OUT: BoolSetting = BoolSetting::new("dig_leave_out", true);
+/// Playlists > Prefer explicit versions: a clean song added to the Crate is swapped for its
+/// explicit version at once, when the service has one. Off until the owner asks for it.
+pub const PREFER_EXPLICIT: BoolSetting = BoolSetting::new("prefer_explicit", false);
 /// Window > Close to tray: the close button hides the window and playback continues.
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
@@ -192,6 +195,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     CRATE_FILE_AND_FORGET.key,
     DIG_KEY.key,
     DIG_LEAVE_OUT.key,
+    PREFER_EXPLICIT.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
     PAUSE_ON_OTHER_AUDIO.key,
