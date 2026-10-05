@@ -165,6 +165,12 @@ pub fn prepare(
             ));
         });
     }
+    // One line in latency.log for every InnerTube request, with its kind and video id: the next
+    // time YouTube pushes back, the log shows who asked and whether the same id repeats.
+    {
+        let handle = resolver.handle();
+        innertube::set_request_hook(move |kind, video_id| handle.request(kind, video_id));
+    }
     // Logout: forget every resolved URL and lease, and end the helpers that hold cookies.
     let handle = resolver.handle();
     account.on_logout(move || handle.invalidate());

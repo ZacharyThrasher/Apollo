@@ -33,6 +33,32 @@ pub fn set_throttle_hook(hook: impl Fn(Option<Duration>) + Send + Sync + 'static
     let _ = THROTTLE_HOOK.set(Box::new(hook));
 }
 
+type RequestHook = Box<dyn Fn(&str, &str) + Send + Sync>;
+static REQUEST_HOOK: OnceLock<RequestHook> = OnceLock::new();
+
+/// Register what happens on every request this crate sends to YouTube, once per HTTP attempt,
+/// with the kind (the endpoint, `player`, `next`, `browse`, `search`, `ping`, ...) and the video
+/// id the request is about (`-` when it is not about one). The app writes these to its log so a
+/// burst can be traced to who caused it. Set once; a second call is ignored. Nothing else leaves
+/// the crate: no cookie, no body, no URL.
+pub fn set_request_hook(hook: impl Fn(&str, &str) + Send + Sync + 'static) {
+    let _ = REQUEST_HOOK.set(Box::new(hook));
+}
+
+/// Tell the hook (if any) a request is going out. `body` is only parsed when a hook is set.
+fn note_request(path: &str, body: Option<&[u8]>) {
+    let Some(hook) = REQUEST_HOOK.get() else {
+        return;
+    };
+    let kind = path.split('?').next().unwrap_or(path);
+    let video = body
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        .and_then(|v| v.get("videoId").and_then(|v| v.as_str()).map(str::to_owned))
+        .filter(|id| id.len() <= 16 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+        .unwrap_or_else(|| "-".to_owned());
+    hook(kind, &video);
+}
+
 /// Pass a 429 to the hook; any other response is left alone.
 fn note_throttle(resp: &reqwest::Response) {
     if resp.status().as_u16() != 429 {
@@ -358,6 +384,7 @@ impl InnerTube {
             attempt += 1;
             // Rebuild headers on every iteration so retried requests use the updated cookie.
             let headers = self.headers(client, set_login);
+            note_request(path, Some(body.as_slice()));
             let res = self
                 .http
                 .post(&url)
@@ -454,6 +481,7 @@ impl InnerTube {
         headers.remove("content-type");
         headers.remove("x-goog-api-format-version");
         headers.insert(HeaderName::from_static("accept"), HeaderValue::from_static("*/*"));
+        note_request("ping", None);
         self.http
             .get(url)
             .headers(headers)
@@ -470,6 +498,7 @@ impl InnerTube {
 
     /// Bootstrap `visitorData` anonymously by scraping `sw.js_data`. context/04 §A.
     pub async fn fetch_visitor_data(&self) -> Result<String, Error> {
+        note_request("visitor_data", None);
         let text = self.http.get(SW_JS_DATA_URL).send().await?.error_for_status()?.text().await?;
         parse_visitor_data(&text)
     }
@@ -510,6 +539,30 @@ fn parse_visitor_data(body: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_request_hook_hears_the_kind_and_the_video_of_each_request() {
+        use std::sync::Mutex;
+        static HEARD: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+        set_request_hook(|kind, video| {
+            HEARD.lock().unwrap().push((kind.to_owned(), video.to_owned()));
+        });
+        note_request("player", Some(br#"{"videoId":"dQw4w9WgXcQ","context":{}}"#));
+        note_request("browse?ctoken=abc", Some(br#"{"continuation":"x"}"#));
+        note_request("next", Some(br#"{"videoId":"not a video id at all, far too long"}"#));
+        note_request("ping", None);
+        let heard = HEARD.lock().unwrap().clone();
+        let want = [
+            ("player", "dQw4w9WgXcQ"),
+            ("browse", "-"),
+            ("next", "-"),
+            ("ping", "-"),
+        ];
+        assert_eq!(heard.len(), want.len(), "{heard:?}");
+        for ((kind, video), (k, v)) in heard.iter().zip(want) {
+            assert_eq!((kind.as_str(), video.as_str()), (k, v));
+        }
+    }
 
     #[test]
     fn sha1_known_vector() {

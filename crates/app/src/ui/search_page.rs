@@ -690,8 +690,13 @@ impl SearchPage {
     }
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.selected = Some(index);
+        self.move_cursor(index, cx);
         self.hint_selected(cx);
+    }
+
+    /// The cursor goes to `index` and the list follows it, with no preload hint.
+    fn move_cursor(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.selected = Some(index);
         self.scroll.scroll_to_item(self.song_child(index, cx));
         cx.notify();
     }
@@ -760,7 +765,10 @@ impl SearchPage {
         let Some(at) = self.selected else { return };
         let len = self.songs(cx).len();
         if let Some(next) = crate::auto_advance::next_row(at, len, cx) {
-            self.select(next, cx);
+            // Collecting, not about to play: the cursor stepping down a list on C or A must not
+            // read as "resting on this song" (that is what kept the resolver busy for twenty
+            // minutes while a Crate was built, the second YouTube 429).
+            self.move_cursor(next, cx);
         }
     }
 

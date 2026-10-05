@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use apollo_domain::library::{
     is_user_playlist_id, moved, plan_move, Collection, CollectionKind, PageMeta,
@@ -46,6 +47,9 @@ use crate::stats::report::{Period, StatsReport};
 use crate::url_thumbs::Thumb as ThumbView;
 
 /// Cover downloads running at once. Fast scrolling queues many; the newest request goes first.
+/// A cached playlist, album or artist page opened again within this long of its last live fetch
+/// is shown from the cache without being fetched again (Retry and the Reload verbs always fetch).
+const REFRESH_AFTER: Duration = Duration::from_secs(30);
 const MAX_INFLIGHT_ART: usize = 4;
 /// Decoded covers kept. Rows are small, so this is a few dozen MB at most.
 const ART_CACHE_CAP: usize = 400;
@@ -442,6 +446,10 @@ pub struct LibraryModel {
     /// Open pages, the one on screen last. Album and playlist pages opened from an artist page
     /// stack on it, and back unwinds one at a time.
     stack: Vec<Entry>,
+    /// When each cached page was last fetched live in this run, by its cache key: a page opened
+    /// again within [`REFRESH_AFTER`] is drawn from the cache and not asked for again (Back and
+    /// Forward through the same pages must not be a request each).
+    refreshed: HashMap<String, Instant>,
     next_detail: u64,
     thumbs: Thumbs,
 }
@@ -500,6 +508,7 @@ impl LibraryModel {
             index: Arc::new(LocalIndex::default()),
             index_rev: 0,
             stack: Vec::new(),
+            refreshed: HashMap::new(),
             next_detail: 1,
             thumbs: Thumbs::default(),
         };
@@ -1343,6 +1352,7 @@ impl LibraryModel {
 
     /// Start over: used by Retry, and after a failure part-way through the pages.
     pub fn reload_detail(&mut self, cx: &mut Context<Self>) {
+        self.refreshed.clear();
         if self.songs_open() {
             self.load_songs(cx);
         } else {
@@ -1386,7 +1396,9 @@ impl LibraryModel {
                 skipped: 0,
             };
             self.apply_page(id, rev, Ok(page), Origin::Cached, cx);
-            self.refresh_detail(id, cx);
+            if self.refresh_due(keys::collection(&collection.id)) {
+                self.refresh_detail(id, cx);
+            }
             return;
         }
         let rev = detail.listing.begin();
@@ -1479,7 +1491,7 @@ impl LibraryModel {
             }
         }
         if let Some(track) = first.filter(|_| pending.is_none() && !failed) {
-            self.player.update(cx, |p, _| p.prefetch(&track));
+            self.player.update(cx, |p, _| p.prefetch_opened(&track));
         }
         if matches!(origin, Origin::Cached) {
             let writes = self.writes.read(cx);
@@ -1549,6 +1561,24 @@ impl LibraryModel {
     /// Load a page's list again without clearing what it shows; swap it in when it is complete
     /// (and only when it differs, so an unchanged page is not redrawn). Quiet on failure: the
     /// rows already shown stay.
+    /// Whether the cached page under `key` should be fetched again behind itself now: not if it
+    /// was already fetched live in the last [`REFRESH_AFTER`]. Says yes at most once per window.
+    fn refresh_due(&mut self, key: String) -> bool {
+        let now = Instant::now();
+        if self
+            .refreshed
+            .get(&key)
+            .is_some_and(|at| now.duration_since(*at) < REFRESH_AFTER)
+        {
+            return false;
+        }
+        if self.refreshed.len() >= 256 {
+            self.refreshed.retain(|_, at| now.duration_since(*at) < REFRESH_AFTER);
+        }
+        self.refreshed.insert(key, now);
+        true
+    }
+
     fn refresh_detail(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(source) = self.source.clone() else {
             return;
@@ -1588,6 +1618,10 @@ impl LibraryModel {
                     .await;
             };
             if !whole {
+                // A refresh that failed does not count as seen: the next visit asks again.
+                let _ = this.update(cx, |m, _| {
+                    m.refreshed.remove(&keys::collection(&collection.id));
+                });
                 return;
             }
             if let (Some(cache), Some(ticket)) = (&cache, &ticket) {
@@ -1968,6 +2002,7 @@ impl LibraryModel {
     // ---- artist --------------------------------------------------------------------------
 
     pub fn reload_artist(&mut self, cx: &mut Context<Self>) {
+        self.refreshed.clear();
         self.load_artist(cx);
     }
 
@@ -1991,12 +2026,17 @@ impl LibraryModel {
         } else {
             Answer::Fresh
         };
+        let had_cached = cached.is_some();
         match cached {
             Some(cached) => self.apply_artist(id, Ok(cached.value), Answer::Cached, cx),
             None => {
                 detail.state = Load::Loading;
                 cx.notify();
             }
+        }
+        // Seen live a moment ago: the cached page is the page.
+        if had_cached && !self.refresh_due(keys::artist(&browse_id)) {
+            return;
         }
         cx.spawn(async move |this, cx| {
             let asked = browse_id.clone();
@@ -2007,6 +2047,10 @@ impl LibraryModel {
             let _ = this.update(cx, |m, cx| {
                 if let (Ok(content), Some(cache), Some(ticket)) = (&result, &cache, &ticket) {
                     cache.put(ticket, keys::artist(&browse_id), content.clone());
+                }
+                if result.is_err() {
+                    // A failed fetch does not count as seen: the next visit asks again.
+                    m.refreshed.remove(&keys::artist(&browse_id));
                 }
                 m.apply_artist(id, result, how, cx)
             });
@@ -2053,7 +2097,7 @@ impl LibraryModel {
             _ => None,
         };
         if let Some(track) = first.filter(|_| pending.is_none()) {
-            self.player.update(cx, |p, _| p.prefetch(&track));
+            self.player.update(cx, |p, _| p.prefetch_opened(&track));
         }
         self.writes.update(cx, |w, cx| w.seed(seeds, cx));
         if let Some(request) = pending.filter(|_| ok) {

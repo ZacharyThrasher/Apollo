@@ -56,6 +56,7 @@ pub mod pc_watch_win;
 pub mod persist;
 pub mod platform;
 pub mod player;
+pub mod preload;
 pub mod reporting;
 pub mod queue_source;
 pub mod search;

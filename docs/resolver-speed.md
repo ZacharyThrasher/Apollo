@@ -14,7 +14,7 @@ the URL cache and prefetch remove the wait entirely for tracks resolved ahead of
 | Situation | What happens |
 |---|---|
 | Queue/playlist/album loaded | head + next 2 (play order) resolved in the background |
-| Pointer rests on a track row for 250 ms | that track is resolved speculatively |
+| Pointer or keyboard cursor rests on a track for 250 ms, or a page opens | nothing, unless Settings > Playback > **Preload songs on hover** is on (it is off by default); then that track (or the page's first song) is resolved speculatively, within the prefetch limits of ADR 0005 |
 | Click play | cached URL is used (no resolve), else a warm worker resolves it |
 | Next track | the engine's preload makes it near-instant |
 | Warm workers unavailable | old process-per-track path, reason shown in diagnostics |
@@ -32,6 +32,11 @@ the URL cache and prefetch remove the wait entirely for tracks resolved ahead of
    `t=<ms> kind=.. resolve_ms=.. open_ms=.. audio_ms=.. total_ms=..` (`resolve_ms=-` means a
    preloaded track was adopted; durations only, no ids or URLs). The resolver adds its own lines to the
    same file (source: warm/cache/cold, worker time, per-phase milliseconds).
+   Every request that goes out to YouTube also leaves one line, `yt_request kind=<what> video_id=<id>`
+   (`resolve`, `resolve_ahead`, `player`, `next`, `browse`, `search`, `ping`, ...; `-` when the request
+   is not about one video). These are the only lines that carry a video id. They are written to the
+   log file only, never to the diagnostics report. When YouTube pushes back again, count them per
+   minute by kind, and look for the same id coming back.
 
 ## Switches
 - `APOLLO_RESOLVER=legacy`: always use a process per track (A/B comparison, or if workers misbehave).

@@ -205,6 +205,10 @@ pub struct PlayerModel {
     latency: Latency,
     /// The track the user last showed interest in (hover/selection), for the prefetch debounce.
     intent: Option<String>,
+    /// Settings > Playback > Preload songs on hover: off, so that pointing at or moving the
+    /// cursor over a song, or opening a page, never starts a resolve. The queue's own lookahead
+    /// (the head and the next one) and Skim's one-ahead do not depend on it.
+    preload_hover: bool,
     autoplay: bool,
     autoplay_store: Option<Arc<dyn AutoplayStore>>,
     /// Volume normalization (Settings > Playback): on by default.
@@ -281,6 +285,7 @@ impl PlayerModel {
             shuffle_seed: seed_from_clock(),
             latency: Latency::default(),
             intent: None,
+            preload_hover: false,
             autoplay: true,
             autoplay_store: None,
             normalize: true,
@@ -703,9 +708,33 @@ impl PlayerModel {
         }
     }
 
+    /// Settings > Playback > Preload songs on hover.
+    pub fn set_preload_hover(&mut self, on: bool) {
+        self.preload_hover = on;
+        if !on {
+            self.intent = None;
+        }
+    }
+
+    pub fn preload_hover(&self) -> bool {
+        self.preload_hover
+    }
+
+    /// A page was opened and `track` is its first song: have it ready, if "Preload songs on
+    /// hover" lets pages do that. Off, opening a page never resolves anything.
+    pub fn prefetch_opened(&mut self, track: &Track) {
+        if self.preload_hover {
+            self.prefetch(track);
+        }
+    }
+
     /// The user is lingering on `track` (hover, keyboard selection): prefetch it once the interest
-    /// has lasted [`INTENT_DELAY`] and moved nowhere else.
+    /// has lasted [`INTENT_DELAY`] and moved nowhere else. Does nothing unless "Preload songs on
+    /// hover" is on.
     pub fn hint_play(&mut self, track: &Track, cx: &mut Context<Self>) {
+        if !self.preload_hover {
+            return;
+        }
         let id = track.video_id.as_str().to_owned();
         if self.intent.as_deref() == Some(id.as_str()) {
             return;

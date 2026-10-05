@@ -6,15 +6,24 @@
 //! * What is on screen stays until the new answer arrives. A failed answer replaces it with the
 //!   failure, because the old shelves belong to another track.
 //! * Answers for a track that is no longer playing are discarded (`rev`).
+//! * The request waits [`SETTLE`] after the track changed, and for YouTube's cooldown when one is
+//!   running, so skipping through songs (a held Shift+Right, Skim) asks once for the song that
+//!   was landed on, not once per song passed.
 
 use std::sync::Arc;
 
 use apollo_domain::listing::LoadFailure;
 use apollo_provider::HomeShelf;
+use std::time::Duration;
+
+use apollo_services_common::{Lane, Throttle};
 use gpui::{Context, Entity};
 
 use crate::library::LibrarySource;
 use crate::player::PlayerModel;
+
+/// How long the playing track must stay the same before its Related tab is asked for.
+pub const SETTLE: Duration = Duration::from_millis(600);
 
 /// What the pane shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,8 +155,24 @@ impl RelatedModel {
         self.asked = Some(video.clone());
         self.loading = true;
         self.failure = None;
-        self.requests += 1;
         cx.spawn(async move |this, cx| {
+            let wait = Throttle::global()
+                .blocked(Lane::Background)
+                .map_or(SETTLE, |cooldown| cooldown.max(SETTLE));
+            cx.background_executor().timer(wait).await;
+            // Another track (or the pane going away) in the meantime: that one asks, not this.
+            let current = this
+                .update(cx, |m, _| {
+                    let current = m.rev == rev;
+                    if current {
+                        m.requests += 1;
+                    }
+                    current
+                })
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
             let asked = video.clone();
             let result = cx
                 .background_executor()

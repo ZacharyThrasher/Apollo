@@ -108,6 +108,7 @@ fn a_track_played_now_prepares_what_follows_it(cx: &mut TestAppContext) {
 fn lingering_prepares_a_track_but_sweeping_past_does_not(cx: &mut TestAppContext) {
     let log = Arc::new(Mutex::new(Vec::new()));
     let player = player(cx, &log);
+    player.update(cx, |m, _| m.set_preload_hover(true));
     log.lock().unwrap().clear();
     let all = tracks(5);
 
@@ -126,4 +127,58 @@ fn lingering_prepares_a_track_but_sweeping_past_does_not(cx: &mut TestAppContext
     cx.executor().advance_clock(Duration::from_millis(400));
     cx.run_until_parked();
     assert_eq!(seen(&log), vec![id(2)]);
+}
+
+#[gpui::test]
+fn hover_and_page_opens_resolve_nothing_by_default(cx: &mut TestAppContext) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let player = player(cx, &log);
+    log.lock().unwrap().clear();
+    assert!(!player.read_with(cx, |m, _| m.preload_hover()), "off until switched on");
+    let all = tracks(5);
+
+    // A pointer resting on rows, a keyboard selection resting on one, a page opening.
+    for t in &all {
+        player.update(cx, |m, cx| m.hint_play(t, cx));
+        cx.executor().advance_clock(Duration::from_secs(2));
+    }
+    player.update(cx, |m, _| m.prefetch_opened(&all[0]));
+    cx.run_until_parked();
+    assert!(seen(&log).is_empty(), "nothing resolved: {:?}", seen(&log));
+}
+
+#[gpui::test]
+fn switching_it_on_then_off_stops_a_hint_that_was_waiting(cx: &mut TestAppContext) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let player = player(cx, &log);
+    log.lock().unwrap().clear();
+    let all = tracks(3);
+    player.update(cx, |m, cx| {
+        m.set_preload_hover(true);
+        m.hint_play(&all[0], cx);
+        m.set_preload_hover(false);
+    });
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(seen(&log).is_empty(), "{:?}", seen(&log));
+}
+
+#[gpui::test]
+fn page_opens_prepare_their_first_song_only_when_hover_preload_is_on(cx: &mut TestAppContext) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let player = player(cx, &log);
+    player.update(cx, |m, _| m.set_preload_hover(true));
+    log.lock().unwrap().clear();
+    player.update(cx, |m, _| m.prefetch_opened(&Track::new(id(7), "First")));
+    assert_eq!(seen(&log), vec![id(7)]);
+}
+
+#[gpui::test]
+fn the_queues_own_lookahead_does_not_depend_on_hover_preload(cx: &mut TestAppContext) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let player = player(cx, &log);
+    assert!(!player.read_with(cx, |m, _| m.preload_hover()));
+    log.lock().unwrap().clear();
+    player.update(cx, |m, cx| m.play_tracks(tracks(6), Some(0), Some(false), cx));
+    assert_eq!(seen(&log), vec![id(1), id(2)], "head + next, hover preload off");
 }

@@ -28,6 +28,10 @@ const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(60);
 /// The least time between two requests to the service. Loudness is background work: a queue of
 /// a hundred tracks must not become a hundred requests in a minute.
 pub const MIN_GAP: Duration = Duration::from_millis(1500);
+/// Lookups waiting at most. Lookahead beyond this is dropped (it is asked for again whenever the
+/// track is next wanted), so a burst of gestures cannot become minutes of requests after the
+/// user has long moved on. A track that is about to play is never refused.
+const MAX_WAITING: usize = 6;
 
 /// Loudness by video id, as the engine reads it. Cheap to clone; clones share the table.
 #[derive(Clone, Default)]
@@ -211,6 +215,9 @@ impl LoudnessFetcher {
                     q.items.push_front(id);
                 }
             }
+            return;
+        }
+        if !urgent && q.items.len() >= MAX_WAITING {
             return;
         }
         q.queued.insert(video_id.to_owned());
@@ -548,6 +555,24 @@ mod tests {
         }
         assert_eq!(fetcher.table().get("a"), Some(3.0));
         assert_eq!(fetcher.table().get("b"), Some(5.0));
+    }
+
+    #[test]
+    fn lookahead_waiting_is_bounded_but_a_track_about_to_play_is_not_refused() {
+        let (src, _) = Scripted::new(&[]);
+        let (inner, _) = inner(src, MemCache::default());
+        let fetcher = LoudnessFetcher {
+            inner: Arc::new(inner),
+        }; // no worker: inspect the queue
+        for n in 0..50 {
+            fetcher.want(&format!("ahead{n}"), false);
+        }
+        let waiting = fetcher.inner.queue.lock().unwrap().items.len();
+        assert_eq!(waiting, MAX_WAITING, "a burst of hints is cut off");
+        fetcher.want("now", true);
+        let q = fetcher.inner.queue.lock().unwrap();
+        assert_eq!(q.items.front().map(String::as_str), Some("now"));
+        assert_eq!(q.items.len(), MAX_WAITING + 1);
     }
 
     #[test]

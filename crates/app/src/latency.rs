@@ -1,7 +1,8 @@
 //! "How long until I hear it?" Measures the gap between a play request and the first sound, split
 //! into the stages the user waits through, and appends one line per start to a small log
 //! (`%LOCALAPPDATA%\Apollo\app\latency.log`). Only durations and a request kind are recorded:
-//! no ids, titles, URLs or account data.
+//! no ids, titles, URLs or account data. (The `yt_request kind=.. video_id=..` lines the resolver
+//! writes to the same file do carry a video id; see `docs/resolver-speed.md`.)
 //!
 //! * `resolve_ms`: request to the stream URL being ready (0 when a prefetched URL was used, `-`
 //!   when the preloaded next track was adopted without a resolution).

@@ -232,6 +232,12 @@ impl ResolverHandle {
     pub fn note(&self, line: String) {
         self.inner.note(line);
     }
+
+    /// Log one request that went out to YouTube: its kind and the video it is about (`-` for
+    /// none). Written to the log file only.
+    pub fn request(&self, kind: &str, video_id: &str) {
+        self.inner.log_request(kind, video_id);
+    }
 }
 
 pub struct YtDlpResolver {
@@ -527,7 +533,8 @@ impl Inner {
         }
     }
 
-    fn note(&self, line: String) {
+    /// Append a line to the log file (no-op without one), without keeping it for diagnostics.
+    fn write_log(&self, line: &str) {
         if let Some(path) = self.log_file.lock().unwrap().as_ref() {
             use std::io::Write;
             let stamp = SystemTime::now()
@@ -537,6 +544,17 @@ impl Inner {
                 let _ = f.write_all(format!("t={stamp} resolver {line}\n").as_bytes());
             }
         }
+    }
+
+    /// One line per request that goes out to YouTube (`yt_request kind=.. video_id=..`), so a
+    /// burst can be traced to a caller and a repeating id shows up. Log file only: these are
+    /// too many for the diagnostics ring.
+    fn log_request(&self, kind: &str, video_id: &str) {
+        self.write_log(&format!("yt_request kind={kind} video_id={video_id}"));
+    }
+
+    fn note(&self, line: String) {
+        self.write_log(&line);
         let mut d = self.diag.lock().unwrap();
         if d.len() == MAX_DIAG {
             d.pop_front();
@@ -795,6 +813,7 @@ impl Inner {
         #[cfg(windows)]
         {
             note.src = "cold";
+            self.log_request("resolve_cold", video_id.as_str());
             self.resolve_cold(video_id, 0, job)
         }
         #[cfg(not(windows))]
@@ -838,6 +857,10 @@ impl Inner {
         note: &mut Note,
         fast: bool,
     ) -> Warm {
+        self.log_request(
+            if foreground.load(Ordering::SeqCst) { "resolve" } else { "resolve_ahead" },
+            video_id.as_str(),
+        );
         let cfg = pool.config();
         let args: &[(String, Vec<String>)] = match (&cfg.foreground_youtube_args, fast) {
             (Some(a), true) => a,

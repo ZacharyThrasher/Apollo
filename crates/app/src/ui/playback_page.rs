@@ -1,5 +1,5 @@
-//! Settings > Playback: the playback switches. Normalize volume, Gapless playback, Add plays to
-//! history and Pause when other audio plays, then Skim (a switch) with its Seconds per song
+//! Settings > Playback: the playback switches. Normalize volume, Gapless playback, Preload songs
+//! on hover, Add plays to history and Pause when other audio plays, then Skim (a switch) with its Seconds per song
 //! select, then Blocked artists: how many there are and a Manage button that opens the list.
 
 use gpui::{div, prelude::*, Context, Entity, FocusHandle, IntoElement, Render, Window};
@@ -7,8 +7,8 @@ use gpui::{div, prelude::*, Context, Entity, FocusHandle, IntoElement, Render, W
 use crate::player::PlayerModel;
 use crate::player::SKIM_SECONDS_CHOICES;
 use crate::settings::{
-    SettingsModel, ADD_PLAYS_TO_HISTORY, PAUSE_ON_OTHER_AUDIO, PICKER_KEY, PICKER_STAY_OPEN, SKIM,
-    SKIM_SECONDS,
+    SettingsModel, ADD_PLAYS_TO_HISTORY, PAUSE_ON_OTHER_AUDIO, PICKER_KEY, PICKER_STAY_OPEN,
+    PRELOAD_ON_HOVER, SKIM, SKIM_SECONDS,
 };
 use crate::ui::account_page::TAB_INDEX;
 use crate::ui::blocked_dialog;
@@ -18,6 +18,8 @@ use crate::ui::text_button::TextButton;
 
 /// The Blocked artists row.
 pub const ROW_BLOCKED: &str = "setting-blocked-artists";
+/// The Preload songs on hover switch.
+pub const ROW_PRELOAD: &str = "setting-preload-on-hover";
 /// The Skim switch and its Seconds per song select.
 pub const ROW_SKIM: &str = "setting-skim";
 pub const ROW_SKIM_SECONDS: &str = "setting-skim-seconds";
@@ -42,6 +44,7 @@ pub struct PlaybackPage {
     settings: Entity<SettingsModel>,
     focus_normalize: FocusHandle,
     focus_gapless: FocusHandle,
+    focus_preload: FocusHandle,
     focus_history: FocusHandle,
     focus_other_audio: FocusHandle,
     focus_picker_key: FocusHandle,
@@ -69,6 +72,7 @@ impl PlaybackPage {
             settings,
             focus_normalize: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
             focus_gapless: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
+            focus_preload: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
             focus_history: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
             focus_other_audio: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
             focus_picker_key: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
@@ -88,6 +92,8 @@ impl Render for PlaybackPage {
             (p.normalize(), p.gapless(), p.view().accent)
         };
         let history = self.settings.read(cx).get(&ADD_PLAYS_TO_HISTORY);
+        let preload = self.settings.read(cx).get(&PRELOAD_ON_HOVER);
+        let for_preload = self.settings.clone();
         let (for_normalize, for_gapless) = (self.player.clone(), self.player.clone());
         let other_audio = self.settings.read(cx).get(&PAUSE_ON_OTHER_AUDIO);
         let (picker_key, picker_stay) = {
@@ -124,6 +130,18 @@ impl Render for PlaybackPage {
                 )
                 .on_toggle(move |value, _, cx| {
                     for_gapless.update(cx, |m, cx| m.set_gapless(value, cx));
+                }),
+            )
+            .row(
+                SettingsRow::switch(
+                    ROW_PRELOAD,
+                    &self.focus_preload,
+                    "Preload songs on hover",
+                    preload,
+                    accent,
+                )
+                .on_toggle(move |value, _, cx| {
+                    for_preload.update(cx, |m, cx| m.set(&PRELOAD_ON_HOVER, value, cx));
                 }),
             )
             .row(
