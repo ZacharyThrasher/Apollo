@@ -593,6 +593,15 @@ impl LibraryModel {
         }
     }
 
+    /// What the page on top is, as a card would open it again (none while the lists show).
+    pub fn top_target(&self) -> Option<Target> {
+        match self.stack.last() {
+            Some(Entry::Collection(d)) => Some(Target::Collection(d.collection.clone())),
+            Some(Entry::Artist(a)) => Some(Target::Artist(a.target.clone())),
+            None => None,
+        }
+    }
+
     /// Pages open over the overview (0 when the lists are showing).
     pub fn depth(&self) -> usize {
         self.stack.len()

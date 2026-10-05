@@ -88,7 +88,7 @@ Applied to the Library page (`ui/library.rs`).
 
 ## Album, artist and playlist decisions (coordinator, 2026-10-03)
 Applied to the pages opened from Search cards and artist pages (`ui/library.rs`, `ui/card.rs`).
-1. **Pages:** an album or playlist page is the Library's detail view. An artist page has the same header with Play and Shuffle acting on its top songs, a "Top songs" list, then a section per row of albums, singles and playlists. Pages stack; Back (Esc, Alt+Left, the back button) closes one at a time, and closing the last one returns to the route it was opened from. The nav keeps that route lit.
+1. **Pages:** an album or playlist page is the Library's detail view. An artist page has the same header with Play and Shuffle acting on its top songs, a "Top songs" list, then a section per row of albums, singles and playlists. Back (Esc, Alt+Left, the page's back button, the title bar's Back) goes to the previous place in the window's history (see "Back and Forward"), which for a page opened from Search or Home is that route. The nav keeps that route lit.
 2. **Cards:** 144px artwork inside an 8px inset (the hover tint and focus ring sit in the inset), title in body-strong, second line in body text.secondary. Cards wrap in a grid with 16px between cards, and the artwork lines up with the section heading above it.
 3. **Shape:** artist artwork is a circle, on Search's artist cards and on the artist page header. It is the one cue that tells an artist from an album at a glance. Albums, singles and playlists stay 8px-radius squares.
 4. **Header:** 96px artwork, page-title name, then the card's own second line and a "N songs" line in text.tertiary once every page has loaded. The count is dropped when the second line already says songs or tracks, and its line is held open while loading so nothing shifts. It never sits on bg.overlay.
@@ -289,6 +289,19 @@ Audition a list (`player/skim.rs`). Settings > Playback > "Skim" (on) and "Secon
 3. **Progress:** the bar (player bar, Now Playing and the mini player's line) shows only the skim window, from 0 to the seconds per song; dragging it moves inside the window.
 4. **Keys** (only while skimming; text fields and popups keep theirs): K sets the song aside in the Crate, Enter keeps the song and plays it from its start with the rest of the list after it, Esc puts back what was playing before.
 5. **Never leaves a trace:** skimmed songs are not reported to YouTube Music history or the local stats, the queue is not saved while it lasts, and a skim never starts or resumes at launch.
+
+## Back and Forward (coordinator brief, 2026-10-05)
+
+Zach: "a back arrow so you can always return to the previous screen". Browser-style history of places
+(Home, Explore, Search, a Library tab, a playlist, album or artist, Crate, Settings, Now Playing),
+50 at most, in memory only. Back and Forward are Fluent chevron icon buttons, 28px, text.secondary,
+at the left of the title bar row (disabled at the existing text.disabled level when there is nowhere
+to go; not Tab stops, they have keys). Keys: Alt+Left / Alt+Right (also in text fields), Backspace
+(only outside text fields), the mouse side buttons. Alt+Up/Down stay for arranging. Going back
+restores scroll position and the Search / filter text; opening a page from the middle drops the
+forward entries; choosing the nav item of the page you are on adds nothing. Built choices: the
+buttons sit at the window's top left over the nav rail's column (not the content's edge, which
+moves when the rail expands); closing Now Playing counts as stepping back.
 
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.
