@@ -231,7 +231,10 @@ fn the_plus_sets_the_song_aside_and_it_leaves_the_rail_without_another_request(
     let before = offered(&page, vcx, PAGE_ROWS);
     click(vcx, "crate-rail-add-0");
     assert_eq!(crate_ids(&page, vcx).last(), Some(&before[0]), "at the bottom of the Crate");
-    assert_eq!(pill(&page, vcx).as_deref(), Some("Added to Crate"));
+    assert!(
+        pill(&page, vcx).is_some_and(|p| p.starts_with("Added to Crate")),
+        "the usual pill (it may add the undo hint)"
+    );
     let after = offered(&page, vcx, PAGE_ROWS);
     assert!(!after.contains(&before[0]), "it is in the Crate, so it is not offered");
     assert_eq!(&after[..], &before[1..], "the others keep their order");
