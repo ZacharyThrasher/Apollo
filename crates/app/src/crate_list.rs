@@ -157,6 +157,8 @@ struct Batch {
     total: usize,
     done: usize,
     swapped: usize,
+    /// Songs the search showed to be that version already.
+    already: usize,
     /// Searches that failed (the service could not be reached).
     errors: usize,
     /// The queue history's depth when it started (see `domain::undo::newest`).
@@ -179,6 +181,8 @@ struct SwapStep {
 
 enum Outcome {
     Swapped,
+    /// The song is that version already (the crate had not known).
+    Already,
     /// Nothing changed: no match, already that version, or the song left the crate.
     Unchanged,
     Failed,
@@ -205,7 +209,7 @@ pub enum CrateEvent {
     /// A batch is under way.
     Progress { want: Want, done: usize, total: usize },
     /// A batch is over.
-    Finished { want: Want, swapped: usize, total: usize, unreachable: bool },
+    Finished { want: Want, swapped: usize, total: usize, already: usize, unreachable: bool },
 }
 
 impl EventEmitter<CrateEvent> for CrateModel {}
@@ -576,7 +580,7 @@ impl CrateModel {
             only,
         );
         if ids.is_empty() {
-            cx.emit(CrateEvent::Finished { want, swapped: 0, total: 0, unreachable: false });
+            cx.emit(CrateEvent::Finished { want, swapped: 0, total: 0, already: 0, unreachable: false });
             return SwapStart::Nothing;
         }
         self.serial += 1;
@@ -588,6 +592,7 @@ impl CrateModel {
             total,
             done: 0,
             swapped: 0,
+            already: 0,
             errors: 0,
             note,
             step: None,
@@ -714,7 +719,7 @@ impl CrateModel {
                     self.items[at] = row;
                     cx.notify();
                 }
-                Outcome::Unchanged
+                Outcome::Already
             }
             Pick::Swap(found_at) => {
                 let found = &songs[found_at];
@@ -787,6 +792,7 @@ impl CrateModel {
         batch.done += 1;
         match outcome {
             Outcome::Swapped => batch.swapped += 1,
+            Outcome::Already => batch.already += 1,
             Outcome::Failed => batch.errors += 1,
             Outcome::Unchanged => {}
         }
@@ -795,9 +801,9 @@ impl CrateModel {
             cx.emit(CrateEvent::Progress { want, done, total });
             return;
         }
-        let (swapped, unreachable) = (batch.swapped, batch.errors == total);
+        let (swapped, already, unreachable) = (batch.swapped, batch.already, batch.errors == total);
         self.batch = None;
-        cx.emit(CrateEvent::Finished { want, swapped, total, unreachable });
+        cx.emit(CrateEvent::Finished { want, swapped, total, already, unreachable });
     }
 
     /// A new crate (another account, sign-out): nothing waits and nothing can be taken back.
@@ -1285,7 +1291,7 @@ mod tests {
         assert_eq!(progress, [(0, 3), (1, 3), (2, 3)], "the pill counts up to the last song");
         assert_eq!(
             heard.last(),
-            Some(&CrateEvent::Finished { want: Want::Explicit, swapped: 2, total: 3, unreachable: false })
+            Some(&CrateEvent::Finished { want: Want::Explicit, swapped: 2, total: 3, already: 0, unreachable: false })
         );
         assert!(heard.contains(&CrateEvent::Swapped(vec![("a".into(), "a2".into())])));
     }
@@ -1424,7 +1430,7 @@ mod tests {
         );
         assert_eq!(
             heard.lock().unwrap().last(),
-            Some(&CrateEvent::Finished { want: Want::Explicit, swapped: 0, total: 0, unreachable: false })
+            Some(&CrateEvent::Finished { want: Want::Explicit, swapped: 0, total: 0, already: 0, unreachable: false })
         );
         model.update(cx, |m, cx| {
             assert_eq!(m.start_swap(Want::Explicit, None, 0, cx), SwapStart::Started(3));
@@ -1448,7 +1454,7 @@ mod tests {
         model.read_with(cx, |m, _| assert_eq!(ids(m), ["a", "b"]));
         assert_eq!(
             heard.lock().unwrap().last(),
-            Some(&CrateEvent::Finished { want: Want::Explicit, swapped: 0, total: 2, unreachable: true })
+            Some(&CrateEvent::Finished { want: Want::Explicit, swapped: 0, total: 2, already: 0, unreachable: true })
         );
         assert_eq!(model.read_with(cx, |m, _| m.undo_stamp()), None);
     }
@@ -1459,6 +1465,7 @@ mod tests {
         // The song itself comes back with the E: the crate had not known it was explicit.
         script.answers.insert("Song a Artist".into(), vec![found("a", "Song a", 200, true)]);
         let model = cx.new(|_| CrateModel::new());
+        let heard = listen(&model, cx);
         model.update(cx, |m, cx| {
             m.install_search(Arc::new(script));
             m.add(song("a", "Song a", 200), None, cx);
@@ -1466,6 +1473,10 @@ mod tests {
             m.start_swap(Want::Explicit, None, 0, cx);
         });
         cx.run_until_parked();
+        assert_eq!(
+            heard.lock().unwrap().last(),
+            Some(&CrateEvent::Finished { want: Want::Explicit, swapped: 0, total: 1, already: 1, unreachable: false })
+        );
         model.read_with(cx, |m, _| {
             assert_eq!(ids(m), ["a"]);
             assert!(m.is_explicit("a"), "now it is known");

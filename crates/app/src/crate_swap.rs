@@ -54,11 +54,19 @@ pub fn progress_text(want: Want, done: usize, total: usize) -> String {
 }
 
 /// What the tip pill says when a batch is over.
-pub fn finished_text(want: Want, swapped: usize, total: usize, unreachable: bool) -> String {
+pub fn finished_text(
+    want: Want,
+    swapped: usize,
+    total: usize,
+    already: usize,
+    unreachable: bool,
+) -> String {
     if total == 0 {
         "Nothing to swap".to_owned()
     } else if unreachable {
         "Couldn't reach YouTube Music".to_owned()
+    } else if swapped == 0 && already == total {
+        format!("Already {}", want.word())
     } else if swapped == 0 {
         format!("No {} versions found", want.word())
     } else {
@@ -396,10 +404,13 @@ mod tests {
     fn the_pill_words() {
         assert_eq!(progress_text(Want::Explicit, 3, 15), "Finding explicit versions\u{2026} 3/15");
         assert_eq!(progress_text(Want::Clean, 0, 4), "Finding clean versions\u{2026} 0/4");
-        assert_eq!(finished_text(Want::Explicit, 12, 15, false), "Swapped 12 of 15");
-        assert_eq!(finished_text(Want::Explicit, 0, 15, false), "No explicit versions found");
-        assert_eq!(finished_text(Want::Clean, 0, 3, false), "No clean versions found");
-        assert_eq!(finished_text(Want::Explicit, 0, 3, true), "Couldn't reach YouTube Music");
-        assert_eq!(finished_text(Want::Explicit, 0, 0, false), "Nothing to swap");
+        assert_eq!(finished_text(Want::Explicit, 12, 15, 0, false), "Swapped 12 of 15");
+        assert_eq!(finished_text(Want::Explicit, 0, 15, 0, false), "No explicit versions found");
+        assert_eq!(finished_text(Want::Explicit, 0, 15, 4, false), "No explicit versions found");
+        assert_eq!(finished_text(Want::Explicit, 0, 3, 3, false), "Already explicit");
+        assert_eq!(finished_text(Want::Clean, 0, 3, 3, false), "Already clean");
+        assert_eq!(finished_text(Want::Clean, 0, 3, 0, false), "No clean versions found");
+        assert_eq!(finished_text(Want::Explicit, 0, 3, 0, true), "Couldn't reach YouTube Music");
+        assert_eq!(finished_text(Want::Explicit, 0, 0, 0, false), "Nothing to swap");
     }
 }

@@ -363,8 +363,9 @@ impl Shell {
             CrateEvent::Progress { want, done, total } => {
                 this.show_tip(crate::crate_swap::progress_text(*want, *done, *total).into(), cx)
             }
-            CrateEvent::Finished { want, swapped, total, unreachable } => this.show_tip(
-                crate::crate_swap::finished_text(*want, *swapped, *total, *unreachable).into(),
+            CrateEvent::Finished { want, swapped, total, already, unreachable } => this.show_tip(
+                crate::crate_swap::finished_text(*want, *swapped, *total, *already, *unreachable)
+                    .into(),
                 cx,
             ),
             CrateEvent::Swapped(_) => {}

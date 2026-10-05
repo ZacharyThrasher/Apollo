@@ -868,8 +868,8 @@ fn the_crate_picks_songs_and_removes_them_from_the_menu(cx: &mut TestAppContext)
     right_click(vcx, at);
     assert_eq!(
         commands(&page, vcx),
-        [PlayNext, AddToQueue, AddToPlaylist, RemoveFromCrate, ToggleLike],
-        "they are all in the Crate, so the Crate item takes them out"
+        [PlayNext, AddToQueue, AddToPlaylist, RemoveFromCrate, SwapToExplicit, ToggleLike],
+        "they are all in the Crate, so the Crate item takes them out (and can be swapped)"
     );
     choose(&page, vcx, RemoveFromCrate);
     assert_eq!(crate_ids(&page, vcx), [CRATED[1], CRATED[3]]);
