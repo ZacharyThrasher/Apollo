@@ -59,6 +59,9 @@ struct Pulse {
     place: Place,
     /// Songs added, for the rows that show them (empty: only the place itself lights up).
     rows: Vec<String>,
+    /// An open list scrolls to the last of `rows` (not for a drop, which lands where the pointer
+    /// already is).
+    scroll: bool,
 }
 
 pub struct ConfirmModel {
@@ -93,7 +96,7 @@ impl ConfirmModel {
         &mut self,
         text: String,
         undoable: bool,
-        pulse: Option<(Place, Vec<String>)>,
+        pulse: Option<(Place, Vec<String>, bool)>,
         cx: &mut Context<Self>,
     ) {
         if !self.enabled(cx) {
@@ -101,7 +104,7 @@ impl ConfirmModel {
         }
         self.seq += 1;
         let seq = self.seq;
-        self.pulse = pulse.map(|(place, rows)| Pulse { seq, place, rows });
+        self.pulse = pulse.map(|(place, rows, scroll)| Pulse { seq, place, rows, scroll });
         cx.emit(ConfirmEvent::Show(Confirmation {
             text: text.into(),
             undoable,
@@ -132,7 +135,7 @@ pub fn handle(cx: &App) -> Option<Entity<ConfirmModel>> {
 pub fn confirm(
     text: String,
     undoable: bool,
-    pulse: Option<(Place, Vec<String>)>,
+    pulse: Option<(Place, Vec<String>, bool)>,
     cx: &mut App,
 ) {
     if let Some(model) = handle(cx) {
@@ -170,6 +173,19 @@ pub fn row_pulse(place: Place, video_id: &str, cx: &App) -> Option<u64> {
         .as_ref()
         .filter(|p| p.place == place && p.rows.iter().any(|r| r == video_id))
         .map(|p| p.seq)
+}
+
+/// The songs an open list at `place` should scroll to (the last of them), once per add: the
+/// number says which add, so a list that draws again does not scroll again. Independent of
+/// reduced motion (a jump is not an animation).
+pub fn scroll_to(place: Place, cx: &App) -> Option<(u64, Vec<String>)> {
+    let model = handle(cx)?;
+    let model = model.read(cx);
+    model
+        .pulse
+        .as_ref()
+        .filter(|p| p.place == place && p.scroll && !p.rows.is_empty())
+        .map(|p| (p.seq, p.rows.clone()))
 }
 
 /// How far into its fade a pulse is: 0 at the ends, 1 in the middle.
@@ -247,32 +263,32 @@ pub fn queued(videos: Vec<String>, cx: &mut App) {
     confirm(
         added_text(videos.len(), "Queue"),
         true,
-        Some((Place::Queue, videos)),
+        Some((Place::Queue, videos, true)),
         cx,
     );
 }
 
 /// Songs went into the Crate.
-pub fn crated(videos: Vec<String>, cx: &mut App) {
+pub fn crated(videos: Vec<String>, scroll: bool, cx: &mut App) {
     if videos.is_empty() {
         return;
     }
     confirm(
         added_text(videos.len(), "Crate"),
         false,
-        Some((Place::Crate, videos)),
+        Some((Place::Crate, videos, scroll)),
         cx,
     );
 }
 
 /// What was asked for is in the Crate already.
 pub fn already_crated(cx: &mut App) {
-    confirm("Already in Crate".to_owned(), false, Some((Place::Crate, Vec::new())), cx);
+    confirm("Already in Crate".to_owned(), false, Some((Place::Crate, Vec::new(), false)), cx);
 }
 
 /// Songs went into a playlist; the service has said so.
 pub fn added_to_playlist(playlist_id: &str, title: &str, count: usize, cx: &mut App) {
-    let place = crate::target_playlist::is_target(playlist_id, cx).then_some((Place::Target, Vec::new()));
+    let place = crate::target_playlist::is_target(playlist_id, cx).then_some((Place::Target, Vec::new(), false));
     confirm(added_text(count, &short_title(title)), true, place, cx);
 }
 

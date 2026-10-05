@@ -302,7 +302,7 @@ impl CrateModel {
         cx.notify();
         // Songs that were not in the crate before are the ones added (the rest only moved).
         let added: Vec<String> = after.into_iter().filter(|v| !before.contains(v)).collect();
-        crate::confirm::crated(added, cx);
+        crate::confirm::crated(added, false, cx);
         true
     }
 
@@ -432,7 +432,7 @@ pub fn add_tracks(
     if added.is_empty() {
         crate::confirm::already_crated(cx);
     } else {
-        crate::confirm::crated(added, cx);
+        crate::confirm::crated(added, true, cx);
     }
 }
 

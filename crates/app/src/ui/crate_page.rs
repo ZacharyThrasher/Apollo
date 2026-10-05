@@ -236,6 +236,8 @@ pub struct CratePage {
     picker: Entity<PlaylistPicker>,
     focus: Focus,
     scroll: UniformListScrollHandle,
+    /// The add (see `confirm::scroll_to`) this list last scrolled for.
+    scrolled: u64,
     /// The row the keyboard acts on (by video id), shown only while the list has focus.
     cursor: Option<String>,
     /// Clear was pressed and waits for a yes.
@@ -330,6 +332,7 @@ impl CratePage {
             picker,
             focus,
             scroll: UniformListScrollHandle::new(),
+            scrolled: 0,
             cursor: None,
             confirming: false,
             selection: Selection::new(),
@@ -1394,6 +1397,19 @@ impl Render for CratePage {
         self.accent = self.player.read(cx).view().accent;
         self.rows = self.crate_.read(cx).items().to_vec();
         self.refresh_selection();
+        // A song just set aside at the bottom is brought into view (a drop is where it was let go).
+        if let Some((seq, videos)) = crate::confirm::scroll_to(crate::confirm::Place::Crate, cx) {
+            if seq != self.scrolled {
+                self.scrolled = seq;
+                if let Some(ix) = self
+                    .rows
+                    .iter()
+                    .rposition(|r| videos.iter().any(|v| v == r.track.video_id.as_str()))
+                {
+                    self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+                }
+            }
+        }
         let accent = self.accent;
         let count = self.rows.len();
 

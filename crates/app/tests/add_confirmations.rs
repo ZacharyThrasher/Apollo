@@ -459,3 +459,74 @@ fn a_shortcut_tip_is_not_pushed_off_by_a_confirmation(cx: &mut TestAppContext) {
     page.player.update(vcx, |p, cx| p.add_to_queue(t("two"), cx));
     assert!(pill(&page, vcx).is_some_and(|p| p.starts_with("Added to Queue")));
 }
+
+// ---- scrolling to what was added ---------------------------------------------------------------
+
+fn many(n: usize, prefix: &str) -> Vec<Track> {
+    (0..n).map(|i| t(&format!("{prefix}{i:03}"))).collect()
+}
+
+#[gpui::test]
+fn a_song_added_below_the_fold_of_the_crate_page_is_scrolled_to(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.crate_model.update(vcx, |m, cx| {
+        for track in many(40, "fill") {
+            m.add(track, None, cx);
+        }
+    });
+    page.shell.update(vcx, |s, cx| s.show_route(Route::Crate, cx));
+    vcx.run_until_parked();
+    let crate_page = page.shell.read_with(vcx, |s, _| s.crate_page().clone());
+    assert_eq!(crate_page.read_with(vcx, |p, _| p.scroll_offset().y.as_f32()), 0.0);
+    vcx.update(|_, cx| apollo_app::crate_list::add_tracks(&page.player, vec![(t("last"), None)], cx));
+    vcx.run_until_parked();
+    assert!(crate_page.read_with(vcx, |p, _| p.scroll_offset().y.as_f32()) < 0.0, "the new row is brought into view");
+}
+
+#[gpui::test]
+fn a_drop_in_the_crate_does_not_scroll(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.crate_model.update(vcx, |m, cx| {
+        for track in many(40, "fill") {
+            m.add(track, None, cx);
+        }
+    });
+    page.shell.update(vcx, |s, cx| s.show_route(Route::Crate, cx));
+    vcx.run_until_parked();
+    let crate_page = page.shell.read_with(vcx, |s, _| s.crate_page().clone());
+    page.crate_model.update(vcx, |m, cx| {
+        m.insert_at(vec![(t("dropped"), None)], 99, cx);
+    });
+    vcx.run_until_parked();
+    assert_eq!(crate_page.read_with(vcx, |p, _| p.scroll_offset().y.as_f32()), 0.0);
+}
+
+#[gpui::test]
+fn the_scroll_follows_the_switch(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.crate_model.update(vcx, |m, cx| {
+        for track in many(40, "fill") {
+            m.add(track, None, cx);
+        }
+    });
+    page.settings.update(vcx, |s, cx| s.set(&CONFIRM_ADDS, false, cx));
+    page.shell.update(vcx, |s, cx| s.show_route(Route::Crate, cx));
+    vcx.run_until_parked();
+    let crate_page = page.shell.read_with(vcx, |s, _| s.crate_page().clone());
+    vcx.update(|_, cx| apollo_app::crate_list::add_tracks(&page.player, vec![(t("last"), None)], cx));
+    vcx.run_until_parked();
+    assert_eq!(crate_page.read_with(vcx, |p, _| p.scroll_offset().y.as_f32()), 0.0);
+}
+
+#[gpui::test]
+fn songs_added_to_an_open_queue_are_scrolled_to(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.shell.update(vcx, |s, cx| s.toggle_queue(cx));
+    vcx.run_until_parked();
+    let panel = page.shell.read_with(vcx, |s, _| s.queue_panel().clone());
+    assert_eq!(panel.read_with(vcx, |p, _| p.scroll_offset().y.as_f32()), 0.0);
+    page.player
+        .update(vcx, |p, cx| p.add_tracks_to_queue(many(40, "q"), cx));
+    vcx.run_until_parked();
+    assert!(panel.read_with(vcx, |p, _| p.scroll_offset().y.as_f32()) < 0.0);
+}
