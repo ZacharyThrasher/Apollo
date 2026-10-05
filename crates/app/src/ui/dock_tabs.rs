@@ -1,6 +1,7 @@
-//! The two-segment control at the top of the docked right panel of the main window:
-//! Queue · Crate. The queue panel and the Crate panel share that slot, one at a time; picking
-//! the other segment swaps them.
+//! The three-segment control at the top of the docked right panel of the main window:
+//! Queue · Crate · Recent. The queue panel and the Crate panel share that slot, one at a time;
+//! Recent is the Crate panel showing the recently played list instead of the Crate. Picking
+//! another segment swaps them.
 //!
 //! Same look as the Now Playing pane control (`ui::pane_tabs`): the active segment is
 //! body-strong in text.primary with a 2px accent underline, the other is body in text.secondary.
@@ -21,15 +22,18 @@ use crate::ui::button::{focus_ring, keyboard_focused};
 pub enum Dock {
     Queue,
     Crate,
+    /// The Crate panel, showing the recently played songs.
+    Recent,
 }
 
 impl Dock {
-    pub const ALL: [Dock; 2] = [Dock::Queue, Dock::Crate];
+    pub const ALL: [Dock; 3] = [Dock::Queue, Dock::Crate, Dock::Recent];
 
     pub fn label(self) -> &'static str {
         match self {
             Dock::Queue => "Queue",
             Dock::Crate => "Crate",
+            Dock::Recent => "Recent",
         }
     }
 
@@ -37,6 +41,7 @@ impl Dock {
         match self {
             Dock::Queue => 0,
             Dock::Crate => 1,
+            Dock::Recent => 2,
         }
     }
 }
@@ -45,9 +50,9 @@ impl Dock {
 pub const HEIGHT: f32 = layout::MIN_HIT_TARGET + 2.0 * spacing::S2;
 const UNDERLINE: f32 = 2.0;
 
-/// One tab stop per segment, shared by the two panels (they never show together).
+/// One tab stop per segment, shared by the panels (they never show together).
 #[derive(Clone)]
-pub struct DockFocus(Rc<[FocusHandle; 2]>);
+pub struct DockFocus(Rc<[FocusHandle; 3]>);
 
 impl DockFocus {
     /// The pane control's slot (they never show together), ahead of the panels' own controls.
@@ -55,7 +60,7 @@ impl DockFocus {
 
     pub fn new(cx: &mut App) -> Self {
         let stop = |cx: &mut App| cx.focus_handle().tab_index(Self::TAB_INDEX).tab_stop(true);
-        Self(Rc::new([stop(cx), stop(cx)]))
+        Self(Rc::new([stop(cx), stop(cx), stop(cx)]))
     }
 
     /// Whether the keyboard is on either segment.

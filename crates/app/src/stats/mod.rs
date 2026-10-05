@@ -16,10 +16,11 @@ pub mod tally;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use apollo_domain::model::{AlbumRef, ArtistRef, Track};
-use apollo_store::{NewPlay, PlayTotal};
+use apollo_store::{NewPlay, PlayTotal, RecentPlay};
 use gpui::{App, Global};
 
 use crate::page_cache::open_store;
@@ -90,6 +91,8 @@ const REMEMBERED_ROWS: usize = 4;
 struct Inner {
     path: Option<PathBuf>,
     writer: Option<Mutex<Sender<Job>>>,
+    /// Counts the writes that reached the file, so a screen showing the log can tell it changed.
+    written: AtomicU64,
 }
 
 /// See the module docs. Cheap to clone; clones share one writer.
@@ -110,14 +113,18 @@ impl PlayLog {
             }
             None => (None, None),
         };
-        if let (Some(path), Some(rx)) = (path.clone(), rx) {
+        let inner = Arc::new(Inner {
+            path: path.clone(),
+            writer,
+            written: AtomicU64::new(0),
+        });
+        if let (Some(path), Some(rx)) = (path, rx) {
+            let inner = inner.clone();
             let _ = std::thread::Builder::new()
                 .name("apollo-play-log".into())
-                .spawn(move || write_loop(path, rx));
+                .spawn(move || write_loop(path, rx, &inner.written));
         }
-        Self {
-            inner: Arc::new(Inner { path, writer }),
-        }
+        Self { inner }
     }
 
     /// Makes this the app's play log.
@@ -157,6 +164,27 @@ impl PlayLog {
         let _ = wait.recv_timeout(std::time::Duration::from_secs(5));
     }
 
+    /// How many writes have reached the file; it changes whenever what [`totals`](Self::totals)
+    /// and [`recent`](Self::recent) say may have.
+    pub fn written(&self) -> u64 {
+        self.inner.written.load(Ordering::Acquire)
+    }
+
+    /// The newest `limit` plays `account` made at or after `since_unix`, newest first. Blocking:
+    /// call off the UI thread. A log that cannot be read says nothing.
+    pub fn recent(&self, account: &str, since_unix: i64, limit: usize) -> Vec<RecentPlay> {
+        let Some(store) = self.inner.path.as_deref().and_then(open_store) else {
+            return Vec::new();
+        };
+        match store.recent_plays(account, since_unix, limit) {
+            Ok(plays) => plays,
+            Err(err) => {
+                eprintln!("play log read failed: {err}");
+                Vec::new()
+            }
+        }
+    }
+
     /// Per track, what `account` played at or after `since_unix` (everything for `None`). Blocking:
     /// call off the UI thread. A log that cannot be read says nothing.
     pub fn totals(&self, account: &str, since_unix: Option<i64>) -> Vec<PlayTotal> {
@@ -173,7 +201,7 @@ impl PlayLog {
     }
 }
 
-fn write_loop(path: PathBuf, rx: std::sync::mpsc::Receiver<Job>) {
+fn write_loop(path: PathBuf, rx: std::sync::mpsc::Receiver<Job>, written: &AtomicU64) {
     // The rows written this run, newest last, so a play's listening time can be settled.
     let mut rows: Vec<(u64, i64)> = Vec::new();
     let mut ids: HashMap<u64, i64> = HashMap::new();
@@ -188,6 +216,7 @@ fn write_loop(path: PathBuf, rx: std::sync::mpsc::Receiver<Job>) {
                 };
                 match store.record_play(&account, &play) {
                     Ok(id) => {
+                        written.fetch_add(1, Ordering::Release);
                         rows.push((key, id));
                         ids.insert(key, id);
                         while rows.len() > REMEMBERED_ROWS {

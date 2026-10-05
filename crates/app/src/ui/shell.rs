@@ -14,6 +14,7 @@ use gpui::{
 use crate::account::AccountModel;
 use crate::blocked_artists::{BlockHandle, BlockModel};
 use crate::crate_list::{CrateHandle, CrateModel};
+use crate::recent::{RecentHandle, RecentModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
@@ -120,6 +121,7 @@ pub fn bind_keys(cx: &mut App) {
     home_page::bind_keys(cx);
     explore_page::bind_keys(cx);
     crate_page::bind_keys(cx);
+    crate::ui::recent_list::bind_keys(cx);
     playlist_picker::bind_keys(cx);
     track_menu::bind_keys(cx);
     playlist_dialog::bind_keys(cx);
@@ -225,6 +227,8 @@ pub struct Shell {
     block_model: Entity<BlockModel>,
     target_model: Entity<TargetModel>,
     crate_page: Entity<CratePage>,
+    /// What was played lately, for the Crate page's section and the dock's Recent tab.
+    recent_model: Entity<RecentModel>,
     /// "Queue restored", after Ctrl+Z / Ctrl+Shift+Z.
     pill: Option<PillShown>,
     pill_seq: u64,
@@ -360,6 +364,8 @@ impl Shell {
         let crate_model = cx.new(|_| CrateModel::new());
         cx.observe(&crate_model, |_, _, cx| cx.notify()).detach();
         cx.set_global(CrateHandle(crate_model.clone()));
+        let recent_model = cx.new(|_| RecentModel::new());
+        cx.set_global(RecentHandle(recent_model.clone()));
         crate_model.update(cx, |m, cx| {
             m.follow(player.clone(), &writes, settings.clone(), cx)
         });
@@ -759,6 +765,7 @@ impl Shell {
             block_model,
             target_model,
             crate_page,
+            recent_model,
             pill: None,
             pill_seq: 0,
             routed_to_sign_in: false,
@@ -1846,10 +1853,14 @@ impl Shell {
         cx.notify();
     }
 
-    /// The Queue · Crate control: the other panel takes the slot.
+    /// The Queue · Crate · Recent control: the other panel (or list) takes the slot.
     pub fn show_dock(&mut self, dock: Dock, cx: &mut Context<Self>) {
         match dock {
-            Dock::Crate => self.set_crate_dock(true, cx),
+            Dock::Crate | Dock::Recent => {
+                // The Crate panel shows the Crate or the recently played list.
+                self.crate_dock_panel.update(cx, |p, cx| p.show_view(dock, cx));
+                self.set_crate_dock(true, cx);
+            }
             Dock::Queue => {
                 self.set_crate_dock(false, cx);
                 if !self.queue.is_open() {
@@ -1882,6 +1893,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.crate_dock_store = store.clone();
+        self.recent_model
+            .update(cx, |m, cx| m.install(store.clone(), cx));
         let Some(store) = store else { return };
         cx.spawn(async move |this, cx| {
             let saved = cx

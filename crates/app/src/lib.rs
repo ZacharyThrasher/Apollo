@@ -54,6 +54,7 @@ pub mod platform;
 pub mod player;
 pub mod reporting;
 pub mod queue_source;
+pub mod recent;
 pub mod search;
 pub mod settings;
 pub mod shortcuts;
