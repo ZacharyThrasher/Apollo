@@ -685,7 +685,20 @@ impl LibraryView {
             .flex_col()
             .size_full()
             .min_h_0()
-            .children(buttons.map(|b| div().flex_none().mb(px(spacing::S3)).child(b)))
+            .children(buttons.map(|b| {
+                // "N selected" at the right end while 2 or more songs are picked.
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_none()
+                    .mb(px(spacing::S3))
+                    .child(div().flex_1().child(b))
+                    .child(
+                        selection::count_slot(self.selection.len(), cx)
+                            .debug_selector(|| "library-selected-count".into()),
+                    )
+            }))
             .child(div().flex_1().min_h_0().child(body))
             .into_any_element()
     }

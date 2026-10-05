@@ -1057,6 +1057,18 @@ impl PlayerModel {
         });
     }
 
+    /// Take several entries out as one edit: Ctrl+Z puts them all back together.
+    pub fn remove_entries(&mut self, ids: Vec<QueueEntryId>, cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        self.edit_queue(cx, |q| {
+            for id in ids {
+                q.remove(id);
+            }
+        });
+    }
+
     /// Move an upcoming entry to `index` in the up-next order (it takes that row's place).
     pub fn move_upcoming(&mut self, id: QueueEntryId, index: usize, cx: &mut Context<Self>) {
         self.edit_queue(cx, |q| {

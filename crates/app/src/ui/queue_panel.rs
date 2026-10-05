@@ -4,6 +4,12 @@
 //! one tab stop with an arrow-key cursor. Enter plays, L likes, Delete removes, Alt+Up/Down reorders;
 //! the mouse can click a row to play it, drag an up-next row to reorder, or use the row's
 //! heart and remove button.
+//!
+//! Rows can be picked for bulk verbs (`ui::selection`: Ctrl+click, Shift+click, Shift+Arrows,
+//! Ctrl+A, Esc). With 2 or more picked, L likes them all, C sets them aside in the Crate, Delete
+//! takes them out of the queue (the playing row stays), and the menu of a picked row (right-click
+//! or More) acts on every picked row. Removing is one step for Ctrl+Z. A drag moves the one row
+//! it is started on.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -32,8 +38,9 @@ use crate::ui::player_bar::text_line;
 use crate::ui::playing_row;
 use crate::ui::row_actions::{heart_action, more_slot, ACTION_SIZE};
 use crate::ui::search_page::OpenTarget;
+use crate::ui::selection::{self, Click, Selection};
 use crate::ui::switch::LabeledSwitch;
-use crate::ui::track_menu::{self, Subject};
+use crate::ui::track_menu::{self, Command, Subject, TrackSubject};
 use crate::ui::tooltip::Tooltip;
 use crate::ui::transport::on_off;
 
@@ -49,7 +56,11 @@ actions!(
         PlaylistCursor,
         TargetCursor,
         MoveCursorUp,
-        MoveCursorDown
+        MoveCursorDown,
+        ExtendUp,
+        ExtendDown,
+        SelectAll,
+        ClearPicks
     ]
 );
 
@@ -91,6 +102,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("a", TargetCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", MoveCursorDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-up", ExtendUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-down", ExtendDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-a", SelectAll, Some(KEY_CONTEXT)),
+        KeyBinding::new("escape", ClearPicks, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -232,6 +247,10 @@ pub struct QueuePanel {
     scroll: UniformListScrollHandle,
     /// The row the keyboard acts on; shown only while the list has focus.
     cursor: Option<QueueEntryId>,
+    /// Rows picked for bulk verbs, by queue entry.
+    selection: Selection<QueueEntryId>,
+    /// What a picked row's More button and right-click open: the menu of the whole selection.
+    bulk_menu: Option<Subject>,
     /// Copied at each render for the list's row callback.
     view: QueueView,
     items: Vec<Item>,
@@ -274,6 +293,8 @@ impl QueuePanel {
             writes,
             scroll: UniformListScrollHandle::new(),
             cursor: None,
+            selection: Selection::new(),
+            bulk_menu: None,
             view: QueueView::default(),
             items: Vec::new(),
             accent: Accent::fallback(),
@@ -300,6 +321,11 @@ impl QueuePanel {
 
     pub fn cursor(&self) -> Option<QueueEntryId> {
         self.cursor
+    }
+
+    /// How many rows are picked for bulk verbs (tests and diagnostics).
+    pub fn picked(&self) -> usize {
+        self.selection.len()
     }
 
     /// Scroll so what is playing sits at the top, with the history above it.
@@ -385,13 +411,20 @@ impl QueuePanel {
     }
 
     fn remove_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.selection.is_bulk() {
+            self.remove_picked(cx);
+            return;
+        }
         if let Some(id) = self.cursor {
             self.remove(id, cx);
         }
     }
 
-    /// Like or unlike the track under the cursor.
-    fn like_cursor(&mut self, cx: &mut Context<Self>) {
+    /// Like or unlike the track under the cursor (or every picked one).
+    fn like_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run_bulk(Command::ToggleLike, window, cx) {
+            return;
+        }
         let view = self.fresh_view(cx);
         let Some(id) = self.cursor else {
             return;
@@ -402,37 +435,64 @@ impl QueuePanel {
         }
     }
 
-    /// The P key: the playlist picker for the track under the cursor.
+    /// The P key: the playlist picker for the track under the cursor, or for every picked row.
     fn playlist_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !crate::ui::playlist_picker::key_enabled(cx) {
             return;
         }
-        let view = self.fresh_view(cx);
-        let Some(row) = self.cursor.and_then(|id| view.row_by_id(id)) else {
-            return;
+        let songs: Vec<crate::ui::playlist_picker::PickerSong> = if self.selection.is_bulk() {
+            self.picked_songs()
+                .into_iter()
+                .map(|s| {
+                    crate::ui::playlist_picker::PickerSong::new(
+                        s.track.video_id.as_str(),
+                        s.track.title.clone(),
+                    )
+                })
+                .collect()
+        } else {
+            let view = self.fresh_view(cx);
+            let Some(row) = self.cursor.and_then(|id| view.row_by_id(id)) else {
+                return;
+            };
+            vec![crate::ui::playlist_picker::PickerSong::new(
+                row.track.video_id.as_str(),
+                row.track.title.clone(),
+            )]
         };
-        let song = crate::ui::playlist_picker::PickerSong::new(
-            row.track.video_id.as_str(),
-            row.track.title.clone(),
-        );
-        crate::ui::playlist_picker::open_songs(vec![song], None, window, cx);
+        crate::ui::playlist_picker::open_songs(songs, None, window, cx);
     }
 
-    /// The A key: the track under the cursor to the target playlist.
+    /// The A key: every picked track, or the one under the cursor, to the target playlist.
     fn target_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let view = self.fresh_view(cx);
-        let Some(row) = self.cursor.and_then(|id| view.row_by_id(id)) else {
-            return;
+        let songs: Vec<crate::ui::playlist_picker::PickerSong> = if self.selection.is_bulk() {
+            self.picked_songs()
+                .into_iter()
+                .map(|s| {
+                    crate::ui::playlist_picker::PickerSong::new(
+                        s.track.video_id.as_str(),
+                        s.track.title.clone(),
+                    )
+                })
+                .collect()
+        } else {
+            let view = self.fresh_view(cx);
+            let Some(row) = self.cursor.and_then(|id| view.row_by_id(id)) else {
+                return;
+            };
+            vec![crate::ui::playlist_picker::PickerSong::new(
+                row.track.video_id.as_str(),
+                row.track.title.clone(),
+            )]
         };
-        let song = crate::ui::playlist_picker::PickerSong::new(
-            row.track.video_id.as_str(),
-            row.track.title.clone(),
-        );
-        crate::target_playlist::add_songs(vec![song], None, window, cx);
+        crate::target_playlist::add_songs(songs, None, window, cx);
     }
 
-    /// Set the track under the cursor aside in the Crate.
-    fn crate_cursor(&mut self, cx: &mut Context<Self>) {
+    /// Set the track under the cursor (or every picked one) aside in the Crate.
+    fn crate_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run_bulk(Command::AddToCrate, window, cx) {
+            return;
+        }
         let view = self.fresh_view(cx);
         let Some(row) = self.cursor.and_then(|id| view.row_by_id(id)) else {
             return;
@@ -457,6 +517,126 @@ impl QueuePanel {
             .update(cx, |m, cx| m.move_upcoming(id, to as usize, cx));
         let moved = self.fresh_view(cx);
         self.scroll_to(&moved, id);
+        cx.notify();
+    }
+
+    // ---- picking rows ------------------------------------------------------------------
+
+    /// The picked rows in queue order, as the track menu takes them. The playing row is a song
+    /// like the others but has no entry to remove, as in its own menu.
+    fn picked_songs(&self) -> Vec<TrackSubject> {
+        let current = self.view.current.as_ref().map(|r| r.id);
+        self.view
+            .history
+            .iter()
+            .chain(&self.view.current)
+            .chain(&self.view.upcoming)
+            .filter(|r| self.selection.contains(&r.id))
+            .map(|r| TrackSubject {
+                track: r.track.clone(),
+                thumbnail: None,
+                entry: (Some(r.id) != current).then_some(r.id),
+                playlist_row: None,
+            })
+            .collect()
+    }
+
+    /// Per frame: drop picks that left the queue and work out the selection's menu.
+    fn refresh_selection(&mut self) {
+        self.selection.keep(&self.view.ordered_ids());
+        self.bulk_menu = if self.selection.is_bulk() {
+            Subject::tracks(self.picked_songs())
+        } else {
+            None
+        };
+    }
+
+    /// A click on the row of entry `id`. Whether it was a Ctrl or Shift click (a pick), which the
+    /// row's own action (play) then leaves alone. A plain click clears the picks.
+    fn pick_row(&mut self, id: QueueEntryId, how: Click, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let ids = self.fresh_view(cx).ordered_ids();
+        let picked = self.selection.click(how, &id, self.cursor.as_ref(), &ids);
+        if picked {
+            // The keyboard carries on from the clicked row: Shift+Arrows, Ctrl+A and Esc work.
+            self.cursor = Some(id);
+            window.focus(&self.focus_list, cx);
+        }
+        cx.notify();
+        picked
+    }
+
+    /// Shift+Up / Shift+Down: the cursor moves and the picked rows stretch (or shrink) to it.
+    fn extend(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let view = self.fresh_view(cx);
+        let ids = view.ordered_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let at = self
+            .cursor_or_current(&view)
+            .and_then(|c| ids.iter().position(|id| *id == c))
+            .unwrap_or(0);
+        let to = (at as isize + delta).clamp(0, ids.len() as isize - 1) as usize;
+        self.selection.extend(ids.get(at), &ids[to], &ids);
+        self.cursor = Some(ids[to]);
+        self.scroll_to(&view, ids[to]);
+        cx.notify();
+    }
+
+    /// Ctrl+A: every row.
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let ids = self.fresh_view(cx).ordered_ids();
+        self.selection.select_all(&ids);
+        cx.notify();
+    }
+
+    /// Esc: picked rows go first; with none picked Esc does what it did before.
+    fn clear_picks(&mut self, cx: &mut Context<Self>) {
+        if self.selection.is_empty() {
+            cx.propagate();
+            return;
+        }
+        self.selection.clear();
+        cx.notify();
+    }
+
+    /// Run a menu verb on the picked rows, when two or more are picked. Whether it did.
+    fn run_bulk(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.selection.is_bulk() {
+            return false;
+        }
+        if let Some(subject) = Subject::tracks(self.picked_songs()) {
+            track_menu::run_now(command, subject, window, cx);
+        }
+        true
+    }
+
+    /// Delete with 2 or more picked: they leave the queue as one step (the playing row stays),
+    /// and the cursor lands on the row after them, else the one before.
+    fn remove_picked(&mut self, cx: &mut Context<Self>) {
+        let view = self.fresh_view(cx);
+        let ids = view.ordered_ids();
+        let playing = view.current.as_ref().map(|r| r.id);
+        let picked: Vec<QueueEntryId> = self
+            .selection
+            .members(&ids)
+            .into_iter()
+            .copied()
+            .filter(|id| Some(*id) != playing)
+            .collect();
+        if picked.is_empty() {
+            return;
+        }
+        if let Some(at) = self.cursor.and_then(|c| ids.iter().position(|i| *i == c)) {
+            let survives = |id: &&QueueEntryId| !picked.contains(*id);
+            self.cursor = ids[at..]
+                .iter()
+                .find(survives)
+                .or_else(|| ids[..at].iter().rev().find(survives))
+                .copied();
+        }
+        self.selection.clear();
+        self.player.update(cx, |m, cx| m.remove_entries(picked, cx));
         cx.notify();
     }
 
@@ -631,12 +811,17 @@ impl QueuePanel {
         // More (and Remove) take the place of the duration while the pointer is on the row or
         // the cursor is on it, so the title keeps its full width at rest. The playing row has
         // no remove, so its menu has none either.
-        let menu = if is_current {
-            Subject::track(row.track.clone(), None)
-        } else {
-            Subject::queued(row.track.clone(), id)
+        let picked = self.selection.contains(&id);
+        let menu = match &self.bulk_menu {
+            // A picked row speaks for every picked row.
+            Some(bulk) if picked => bulk.clone(),
+            _ if is_current => Subject::track(row.track.clone(), None),
+            _ => Subject::queued(row.track.clone(), id),
         };
-        let row_tint = if selected {
+        let pick_tint = selection::row_tint(self.accent);
+        let row_tint = if picked {
+            pick_tint
+        } else if selected {
             playing_row::tint()
         } else {
             color::state_hover()
@@ -676,8 +861,11 @@ impl QueuePanel {
             .rounded(px(radius::SMALL))
             .cursor_pointer()
             .when(selected, |d| d.bg(playing_row::tint()))
+            .when(picked, |d| d.bg(pick_tint))
             .hover(move |s| {
-                s.bg(if selected {
+                s.bg(if picked {
+                    pick_tint
+                } else if selected {
                     playing_row::tint()
                 } else {
                     color::state_hover()
@@ -685,13 +873,17 @@ impl QueuePanel {
             })
             .role(gpui::Role::ListItem)
             .aria_label(row.title.clone())
-            .aria_selected(is_current)
+            .aria_selected(is_current || picked)
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 // Space is the global play/pause key.
                 if let ClickEvent::Keyboard(k) = event {
                     if k.button == KeyboardButton::Space {
                         return;
                     }
+                }
+                // Ctrl and Shift pick rows; a plain click clears the picks and plays.
+                if this.pick_row(id, Click::of_event(event), window, cx) {
+                    return;
                 }
                 window.focus(&this.focus_list, cx);
                 this.cursor = Some(id);
@@ -954,6 +1146,7 @@ impl Render for QueuePanel {
         self.accent = player_view.accent;
         self.items = flatten(&view);
         self.view = view;
+        self.refresh_selection();
         let ready = player_view.status == Status::Ready;
         let has_upcoming = !self.view.upcoming.is_empty();
         let has_current = self.view.current.is_some();
@@ -979,14 +1172,23 @@ impl Render for QueuePanel {
             .justify_between()
             .h(px(ROW_HEIGHT))
             .px(px(spacing::S4))
-            .child(if titled {
-                style::text_style(div(), typography::SECTION, cx)
-                    .text_color(color::text_primary())
-                    .child("Queue")
-                    .into_any_element()
-            } else {
-                div().into_any_element()
-            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(spacing::S2))
+                    .children(titled.then(|| {
+                        style::text_style(div(), typography::SECTION, cx)
+                            .text_color(color::text_primary())
+                            .child("Queue")
+                    }))
+                    // "N selected" beside the title while 2 or more rows are picked.
+                    .children(
+                        selection::count_label(self.selection.len(), cx)
+                            .map(|label| label.debug_selector(|| "queue-selected-count".into())),
+                    ),
+            )
             .child(
                 div()
                     .flex()
@@ -1084,12 +1286,23 @@ impl Render for QueuePanel {
             .track_focus(&self.focus_list)
             .role(gpui::Role::List)
             .aria_label("Queue")
-            .on_action(cx.listener(|this, _: &CursorUp, _, cx| this.step(-1, cx)))
-            .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.step(1, cx)))
+            .on_action(cx.listener(|this, _: &CursorUp, _, cx| {
+                // The plain arrows only move the cursor: picked rows do not follow it.
+                this.selection.clear();
+                this.step(-1, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CursorDown, _, cx| {
+                this.selection.clear();
+                this.step(1, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.extend(-1, cx)))
+            .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.extend(1, cx)))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
+            .on_action(cx.listener(|this, _: &ClearPicks, _, cx| this.clear_picks(cx)))
             .on_action(cx.listener(|this, _: &PlayCursor, _, cx| this.play_cursor(cx)))
             .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
-            .on_action(cx.listener(|this, _: &LikeCursor, _, cx| this.like_cursor(cx)))
-            .on_action(cx.listener(|this, _: &CrateCursor, _, cx| this.crate_cursor(cx)))
+            .on_action(cx.listener(|this, _: &LikeCursor, window, cx| this.like_cursor(window, cx)))
+            .on_action(cx.listener(|this, _: &CrateCursor, window, cx| this.crate_cursor(window, cx)))
             .on_action(
                 cx.listener(|this, _: &PlaylistCursor, window, cx| this.playlist_cursor(window, cx)),
             )

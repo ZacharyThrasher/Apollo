@@ -1194,12 +1194,29 @@ impl LibraryView {
 
     // ---- picking songs ---------------------------------------------------------------------
 
-    /// Songs can be picked on a playlist page (albums, the Songs tab and the rest come later).
+    /// Songs can be picked on a playlist or album page and on the Songs tab (not on an artist's
+    /// top songs, nor in the History).
     fn selection_enabled(&self, cx: &App) -> bool {
+        self.selection_scope(cx).is_some()
+    }
+
+    /// What the picks belong to: the page's own key, or "songs" for the Songs tab. Another
+    /// scope starts with nothing picked.
+    fn selection_scope(&self, cx: &App) -> Option<String> {
         let model = self.model.read(cx);
-        model
-            .detail()
-            .is_some_and(|d| d.collection.kind == CollectionKind::Playlist)
+        if let Some(detail) = model.detail() {
+            return Some(detail.collection.library_key().to_owned());
+        }
+        model.songs_open().then(|| "songs".to_owned())
+    }
+
+    /// Forget the picks when the list on screen is not the one they were made in.
+    fn sync_selection_scope(&mut self, cx: &App) {
+        let scope = self.selection_scope(cx);
+        if scope != self.selection_page {
+            self.selection.clear();
+            self.selection_page = scope;
+        }
     }
 
     /// A row's name in the selection: its own token, else its video id.
@@ -1223,14 +1240,7 @@ impl LibraryView {
     /// what the selection's menu is. Does nothing while nothing is picked.
     fn refresh_selection(&mut self, kind: ListKind, cx: &App) -> std::collections::HashSet<usize> {
         let enabled = kind == ListKind::Tracks && self.selection_enabled(cx);
-        let page = enabled
-            .then(|| self.model.read(cx).detail().map(|d| d.collection.library_key().to_owned()))
-            .flatten();
-        if page != self.selection_page {
-            // Another playlist: nothing carries over.
-            self.selection.clear();
-            self.selection_page = page;
-        }
+        self.sync_selection_scope(cx);
         self.bulk_menu = None;
         if !enabled || self.selection.is_empty() {
             return Default::default();
@@ -1778,12 +1788,10 @@ impl LibraryView {
                     .child(buttons),
             )
             // "N selected" at the list header's right end while 2 or more songs are picked.
-            .when(collection.kind == CollectionKind::Playlist, |d| {
-                d.child(
-                    selection::count_slot(self.selection.len(), cx)
-                        .debug_selector(|| "library-selected-count".into()),
-                )
-            })
+            .child(
+                selection::count_slot(self.selection.len(), cx)
+                    .debug_selector(|| "library-selected-count".into()),
+            )
             // Right-aligned, once there are rows to filter.
             .children(filter.filter(|_| items > 0).map(|field| {
                 div()
@@ -2311,6 +2319,8 @@ impl Render for LibraryView {
         };
         // Pages the model opened directly (not through this view) still get scroll state.
         self.pages.resize_with(depth, PageScroll::new);
+        // Picks belong to the list they were made in.
+        self.sync_selection_scope(cx);
         // A playlist deleted while its page is open: the page has nothing left to show.
         if let Some(key) = self.deleted.take() {
             let open_here = self
