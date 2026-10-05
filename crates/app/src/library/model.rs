@@ -419,6 +419,11 @@ impl LibraryModel {
         // Liked Music follows the likes made anywhere in the app.
         cx.subscribe(&writes, |m, _, event, cx| match event {
             WritesEvent::LikeSettled { video_id, liked } => m.liked_changed(video_id, *liked, cx),
+            WritesEvent::PlaylistAddSettled {
+                playlist_id,
+                video_id,
+                added,
+            } => m.playlist_add_settled(playlist_id, video_id, *added, cx),
         })
         .detach();
         let mut model = Self {
@@ -1662,6 +1667,64 @@ impl LibraryModel {
             occurrence: occurrence.to_owned(),
         };
         self.queue_edit(collection, edit, cx);
+        cx.notify();
+    }
+
+    /// Show a song just added to the playlist whose page is on top, at its end, before the service
+    /// has answered ([`LibraryWrites::add_to_playlist`] sends the write). Only the page of a
+    /// playlist the account owns, once all its rows are loaded; anything else is ignored.
+    pub fn show_added_row(
+        &mut self,
+        playlist_key: &str,
+        mut row: TrackRow,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(Entry::Collection(d)) = self.stack.last_mut() else {
+            return false;
+        };
+        if d.collection.library_key() != playlist_key || !d.can_edit() {
+            return false;
+        }
+        // Whatever token the row came with is another list's: this playlist has not given it one.
+        row.occurrence = None;
+        let shown = d.listing.push(row);
+        cx.notify();
+        shown
+    }
+
+    /// An add to a playlist was answered. A page of that playlist takes back the row it showed for
+    /// a refused add; a landed one is read again, so the row has the service's own token and
+    /// position (an edit of the page's rows still out is left to settle first).
+    fn playlist_add_settled(
+        &mut self,
+        playlist_id: &str,
+        video_id: &str,
+        added: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut to_read = Vec::new();
+        for entry in &mut self.stack {
+            let Entry::Collection(d) = entry else {
+                continue;
+            };
+            if d.collection.kind != CollectionKind::Playlist
+                || d.collection.library_key() != playlist_id
+            {
+                continue;
+            }
+            if added {
+                to_read.push(d.id);
+            } else {
+                // Only a row shown here, with no token of the service's, is taken back.
+                d.listing
+                    .retain(|r| !(r.occurrence.is_none() && r.track.video_id.as_str() == video_id));
+            }
+        }
+        if !self.edits_pending(playlist_id) {
+            for id in to_read {
+                self.refresh_detail(id, cx);
+            }
+        }
         cx.notify();
     }
 

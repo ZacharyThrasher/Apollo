@@ -38,6 +38,7 @@ pub mod lyrics;
 pub mod related;
 pub mod loudness;
 pub mod mini;
+pub mod more_like;
 pub mod motion;
 pub mod os_media;
 pub mod page_cache;
