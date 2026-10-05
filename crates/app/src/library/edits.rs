@@ -754,7 +754,9 @@ impl LibraryEdits {
         self.create_songs(Edit::SaveCrate, title, video_ids, cx);
     }
 
-    fn create_songs(
+    /// The same write for a playlist made from the add-to-playlist picker (a typed name and the
+    /// songs it was opened for), with `edit` choosing the words of a failure.
+    pub fn create_songs(
         &mut self,
         edit: Edit,
         title: String,

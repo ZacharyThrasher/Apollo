@@ -23,6 +23,7 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Ctrl+L | Show / hide lyrics (opens Now Playing) |
 | L | Like / unlike the playing song |
 | C | Set the playing song aside in the Crate (in the queue, Library and Search lists: the song under the cursor) |
+| P | Add to playlist: open the picker for the playing song (in the queue, Library, Search and Crate lists: the song under the cursor). Settings > Playback > "P opens the playlist picker" switches it off |
 | Ctrl+Z | Undo the last queue change |
 | Ctrl+Shift+Z or Ctrl+Y | Redo it |
 | Esc | Close Now Playing |
@@ -86,6 +87,24 @@ playing; only when the undone action had changed that song (a new list replaced 
 the old song come back, paused where it was. A small "Queue restored" pill shows for 2 seconds.
 
 Media keys are the OS's (SMTC) and are untouched.
+
+## The playlist picker
+
+P (or the add-to-playlist button) opens it with the caret in a filter box. Recently used
+playlists are on top, a divider, then the rest in the order YouTube Music lists them.
+
+| Key | Does |
+|---|---|
+| Type | Narrow the list (every word must be in the name) |
+| Up / Down | Move the cursor |
+| Space | Mark / unmark the playlist under the cursor. Only while the filter is empty: with text in it a space is a space |
+| Ctrl+Space | Mark / unmark, any time |
+| Enter | Add to every marked playlist, or to the one under the cursor if none is marked; on the "Create" row, make that playlist with the song in it. Closes (unless Settings > Playback > "Keep picker open after adding" is on) |
+| Ctrl+Enter | Make a playlist of the typed name, whatever row the cursor is on |
+| Esc | Close (even with text in the filter) |
+
+A playlist that already holds the song shows its check and cannot be marked. Marks are add-only;
+taking a song out is done on the playlist's own page. A click on a row adds to it at once.
 
 ## Learning the keys
 

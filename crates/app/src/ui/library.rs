@@ -1141,6 +1141,9 @@ impl LibraryView {
             }
         }))
         .on_action(cx.listener(|this, _: &AddRowToPlaylist, window, cx| {
+            if !this.picker.read(cx).key_enabled(cx) {
+                return;
+            }
             if this.selection_enabled(cx) && this.selection.is_bulk() {
                 // The picker opens at the cursor row, for every picked song.
                 let ids: Vec<String> = this

@@ -46,6 +46,7 @@ actions!(
         RemoveCursor,
         LikeCursor,
         CrateCursor,
+        PlaylistCursor,
         MoveCursorUp,
         MoveCursorDown
     ]
@@ -85,6 +86,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("c", CrateCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", MoveCursorDown, Some(KEY_CONTEXT)),
     ]);
@@ -396,6 +398,22 @@ impl QueuePanel {
         if let Some(video) = video {
             self.writes.update(cx, |w, cx| w.toggle_like(&video, cx));
         }
+    }
+
+    /// The P key: the playlist picker for the track under the cursor.
+    fn playlist_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::ui::playlist_picker::key_enabled(cx) {
+            return;
+        }
+        let view = self.fresh_view(cx);
+        let Some(row) = self.cursor.and_then(|id| view.row_by_id(id)) else {
+            return;
+        };
+        let song = crate::ui::playlist_picker::PickerSong::new(
+            row.track.video_id.as_str(),
+            row.track.title.clone(),
+        );
+        crate::ui::playlist_picker::open_songs(vec![song], None, window, cx);
     }
 
     /// Set the track under the cursor aside in the Crate.
@@ -1057,6 +1075,9 @@ impl Render for QueuePanel {
             .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
             .on_action(cx.listener(|this, _: &LikeCursor, _, cx| this.like_cursor(cx)))
             .on_action(cx.listener(|this, _: &CrateCursor, _, cx| this.crate_cursor(cx)))
+            .on_action(
+                cx.listener(|this, _: &PlaylistCursor, window, cx| this.playlist_cursor(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &MoveCursorUp, _, cx| this.move_cursor(-1, cx)))
             .on_action(cx.listener(|this, _: &MoveCursorDown, _, cx| this.move_cursor(1, cx)))
             .flex_1()
