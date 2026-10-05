@@ -169,4 +169,18 @@ Migration {
             PRIMARY KEY (account_key, entry_key)
         );
     ",
+}, Migration {
+    version: 9,
+    sql: "
+        -- The Crate is arranged by hand: `pos` is a song's place in it, 0 at the top. A new song
+        -- goes below the last one. Songs already there keep the order the page showed so far
+        -- (newest on top).
+        ALTER TABLE crate_items ADD COLUMN pos INTEGER NOT NULL DEFAULT 0;
+        UPDATE crate_items SET pos = (
+            SELECT COUNT(*) FROM crate_items AS newer
+            WHERE newer.account_key = crate_items.account_key
+              AND (newer.added_ms > crate_items.added_ms
+                   OR (newer.added_ms = crate_items.added_ms AND newer.rowid > crate_items.rowid))
+        );
+    ",
 }];

@@ -112,7 +112,7 @@ fn click(vcx: &mut VisualTestContext, id: &'static str) {
     vcx.simulate_click(at, Modifiers::none());
 }
 
-/// The crate, newest first as the page shows it.
+/// The crate, each song below the last as the page shows it.
 fn fill(page: &Page, vcx: &mut VisualTestContext, ids: &[&str]) {
     page.crate_model.update(vcx, |m, cx| {
         for id in ids {
@@ -142,7 +142,7 @@ fn notice(page: &Page, vcx: &mut VisualTestContext) -> Option<String> {
     })
 }
 
-const SAVED: [&str; 3] = ["crateCCCC03", "crateBBBB02", "crateAAAA01"];
+const SAVED: [&str; 3] = ["crateAAAA01", "crateBBBB02", "crateCCCC03"];
 
 #[gpui::test]
 fn save_as_playlist_opens_the_dialog_filled_in_with_the_whole_crate(cx: &mut TestAppContext) {
@@ -322,5 +322,105 @@ fn new_playlist_in_the_add_all_picker_saves_the_crate(cx: &mut TestAppContext) {
             name: "My Crate".into(),
             video_ids: SAVED.map(str::to_owned).to_vec(),
         })
+    );
+}
+
+// ---- arranging -------------------------------------------------------------------------------
+
+/// Drag the row whose debug id is `from` and let go at `to`.
+fn drag(vcx: &mut VisualTestContext, from: &'static str, to: gpui::Point<gpui::Pixels>) {
+    let start = vcx.debug_bounds(from).expect("the row is on screen").center();
+    vcx.simulate_mouse_move(start, None, Modifiers::none());
+    vcx.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::none());
+    for step in 1..=8 {
+        let t = step as f32 / 8.0;
+        let at = gpui::point(
+            start.x + (to.x - start.x) * t,
+            start.y + (to.y - start.y) * t,
+        );
+        vcx.simulate_mouse_move(at, Some(gpui::MouseButton::Left), Modifiers::none());
+    }
+    vcx.simulate_mouse_up(to, gpui::MouseButton::Left, Modifiers::none());
+    vcx.run_until_parked();
+}
+
+fn upper_part_of(vcx: &mut VisualTestContext, id: &'static str) -> gpui::Point<gpui::Pixels> {
+    let b = vcx.debug_bounds(id).expect("on screen");
+    gpui::point(b.center().x, b.origin.y + gpui::px(8.0))
+}
+
+#[gpui::test]
+fn alt_up_and_alt_down_move_the_row_under_the_cursor(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    fill(&page, vcx, &["crateAAAA01", "crateBBBB02", "crateCCCC03"]);
+    open_crate(&page, vcx);
+    let crate_page = page.shell.read_with(vcx, |s, _| s.crate_page().clone());
+    vcx.update(|window, cx| {
+        let focus = gpui::Focusable::focus_handle(crate_page.read(cx), cx);
+        window.focus(&focus, cx);
+    });
+    // With no cursor yet, the key moves nothing.
+    vcx.simulate_keystrokes("alt-down");
+    assert_eq!(crate_ids(&page, vcx), SAVED);
+    // The first press shows the cursor on the top row; the next goes down to the second.
+    vcx.simulate_keystrokes("down down");
+    vcx.simulate_keystrokes("alt-up");
+    assert_eq!(crate_ids(&page, vcx), ["crateBBBB02", "crateAAAA01", "crateCCCC03"]);
+    // The cursor went with the row: it can keep going, and stops at the top.
+    vcx.simulate_keystrokes("alt-up alt-down alt-down alt-down");
+    assert_eq!(crate_ids(&page, vcx), ["crateAAAA01", "crateCCCC03", "crateBBBB02"]);
+
+    // What the playlist gets is the arranged order.
+    click(vcx, "crate-save-playlist");
+    assert_eq!(
+        dialog_of(&page, vcx).read_with(vcx, |d, _| d.mode().cloned()),
+        Some(Mode::FromCrate {
+            name: "My Crate".into(),
+            video_ids: ["crateAAAA01", "crateCCCC03", "crateBBBB02"]
+                .map(str::to_owned)
+                .to_vec(),
+        })
+    );
+}
+
+#[gpui::test]
+fn dragging_a_row_rearranges_the_crate_and_the_saved_playlist_follows(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    fill(&page, vcx, &["crateAAAA01", "crateBBBB02", "crateCCCC03"]);
+    open_crate(&page, vcx);
+
+    // The last row, let go on the upper half of the first: it lands before it.
+    let to = upper_part_of(vcx, "crate-row-0");
+    drag(vcx, "crate-row-2", to);
+    assert_eq!(crate_ids(&page, vcx), ["crateCCCC03", "crateAAAA01", "crateBBBB02"]);
+
+    // The first row, let go below the last: it goes to the bottom.
+    let last = vcx.debug_bounds("crate-row-2").expect("on screen");
+    let end = gpui::point(last.center().x, last.bottom() + gpui::px(20.0));
+    drag(vcx, "crate-row-0", end);
+    assert_eq!(crate_ids(&page, vcx), ["crateAAAA01", "crateBBBB02", "crateCCCC03"]);
+
+    // A row let go on itself changes nothing.
+    let on_itself = upper_part_of(vcx, "crate-row-1");
+    drag(vcx, "crate-row-1", on_itself);
+    assert_eq!(crate_ids(&page, vcx), SAVED);
+
+    // Arranged, then added to a playlist: one request, in the arranged order.
+    let to = upper_part_of(vcx, "crate-row-0");
+    drag(vcx, "crate-row-1", to);
+    let arranged = ["crateBBBB02", "crateAAAA01", "crateCCCC03"];
+    assert_eq!(crate_ids(&page, vcx), arranged);
+    click(vcx, "crate-add-to-playlist");
+    vcx.run_until_parked();
+    let picker = picker_of(&page, vcx);
+    let target = picker.read_with(vcx, |p, _| match p.playlists() {
+        Some(apollo_app::library::model::Load::Ready(list)) => list[0].clone(),
+        other => panic!("playlists are listed: {}", other.is_some()),
+    });
+    vcx.update(|window, cx| picker.update(cx, |p, cx| p.choose(0, window, cx)));
+    vcx.run_until_parked();
+    assert_eq!(
+        page.sim.write_log(),
+        vec![(format!("add-many:{}", target.id), arranged.join(","))],
     );
 }
