@@ -1,6 +1,9 @@
 //! Lyrics for the playing track: looked up off the UI thread when a track becomes current, and
 //! for the track after it, so they are there when it starts. Answers (including "no lyrics")
 //! are kept for the session on top of the SQLite cache the service has.
+//!
+//! A lookup for a track not known yet waits [`SETTLE`] after the current track changed, so
+//! skipping through songs looks up the song landed on and the one after it, not every song passed.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -12,6 +15,8 @@ use gpui::{Context, Entity};
 
 use crate::player::PlayerModel;
 
+/// How long the current and next track must stay the same before a new lookup starts.
+pub use crate::related::SETTLE;
 /// Answers kept in memory; the oldest go first.
 const MAX_SLOTS: usize = 24;
 /// A lookup that could not reach the source is tried again this long after, a few times.
@@ -44,6 +49,8 @@ pub struct LyricsModel {
     order: VecDeque<String>,
     /// The current and next track as last looked at, so a position tick costs one comparison.
     seen: (Option<String>, Option<String>),
+    /// Bumped when the current and next track change; a waiting lookup for an older one is dropped.
+    settle: u64,
 }
 
 impl LyricsModel {
@@ -55,6 +62,7 @@ impl LyricsModel {
             slots: HashMap::new(),
             order: VecDeque::new(),
             seen: (None, None),
+            settle: 0,
         }
     }
 
@@ -107,9 +115,24 @@ impl LyricsModel {
             return;
         }
         self.seen = ids;
-        for track in current.iter().chain(next.iter()) {
-            self.ensure(track, cx);
+        let wanted: Vec<Track> = current.iter().chain(next.iter()).cloned().collect();
+        // Anything already looked up is nothing to wait for.
+        if wanted.iter().all(|t| self.slots.contains_key(t.video_id.as_str())) {
+            return;
         }
+        self.settle += 1;
+        let settle = self.settle;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SETTLE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.settle == settle {
+                    for track in &wanted {
+                        this.ensure(track, cx);
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     fn ensure(&mut self, track: &Track, cx: &mut Context<Self>) {

@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use apollo_domain::blocklist::retain_allowed;
 use apollo_domain::library::{CollectionKind, PlaylistTarget};
 use apollo_domain::listing::LoadFailure;
+use apollo_services_common::{Lane, Throttle};
 use gpui::{Context, Entity};
 
 use crate::library::source::TrackRow;
@@ -266,6 +267,11 @@ impl MoreLikeModel {
             self.failure = Some(LoadFailure::Other);
             return;
         };
+        // YouTube asked the app to slow down: suggestions are optional, so they wait (Refresh
+        // and Retry ask again once the cooldown is over).
+        if Throttle::global().blocked(Lane::Background).is_some() {
+            return;
+        }
         self.asked += 1;
         self.requests += 1;
         self.loading = true;

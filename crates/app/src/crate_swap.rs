@@ -26,8 +26,9 @@ pub const DURATION_SLACK: Duration = Duration::from_secs(5);
 /// How many searches run at once. Low on purpose: a long Crate must not hammer the service.
 pub const CONCURRENCY: usize = 2;
 
-/// How long to wait between one pair of searches and the next, so a long Crate trickles.
-pub const PAUSE: Duration = Duration::from_millis(400);
+/// How long to wait between one pair of searches and the next, so a long Crate trickles (about
+/// 90 searches a minute at the very most, with the time each search itself takes).
+pub const PAUSE: Duration = Duration::from_millis(1000);
 
 /// How long searches stay stopped once the service says "too many requests".
 pub const COOLDOWN: Duration = Duration::from_secs(120);
