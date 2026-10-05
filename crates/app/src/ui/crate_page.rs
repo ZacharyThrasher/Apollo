@@ -143,8 +143,6 @@ struct Focus {
     save: FocusHandle,
     add_to: FocusHandle,
     clear: FocusHandle,
-    confirm: FocusHandle,
-    cancel: FocusHandle,
     list: FocusHandle,
     search: FocusHandle,
 }
@@ -239,7 +237,6 @@ pub struct CratePage {
     /// The row the keyboard acts on (by video id), shown only while the list has focus.
     cursor: Option<String>,
     /// Clear was pressed and waits for a yes.
-    confirming: bool,
     /// Songs picked for bulk verbs, by video id.
     selection: Selection<String>,
     /// What a picked row's More button and right-click open: the menu of the whole selection.
@@ -297,13 +294,7 @@ impl CratePage {
         let stop = |cx: &mut Context<Self>, index: isize| {
             cx.focus_handle().tab_index(index).tab_stop(true)
         };
-        cx.observe(&crate_, |this, _, cx| {
-            if this.crate_.read(cx).is_empty() {
-                this.confirming = false;
-            }
-            cx.notify();
-        })
-        .detach();
+        cx.observe(&crate_, |_, _, cx| cx.notify()).detach();
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         crate::confirm::watch(cx);
@@ -317,9 +308,6 @@ impl CratePage {
             save: stop(cx, at(TAB_SAVE, DOCK_TAB_SAVE)),
             add_to: stop(cx, at(TAB_ADD_TO, DOCK_TAB_ADD_TO)),
             clear: stop(cx, at(TAB_CLEAR, DOCK_TAB_ADD_TO)),
-            // The confirmation takes the Clear button's place in the tab order.
-            confirm: stop(cx, at(TAB_CLEAR, DOCK_TAB_ADD_TO)),
-            cancel: stop(cx, at(TAB_CLEAR, DOCK_TAB_ADD_TO)),
             list: stop(cx, at(TAB_LIST, DOCK_TAB_LIST)),
             search: stop(cx, at(TAB_SEARCH, DOCK_TAB_LIST)),
         };
@@ -331,7 +319,6 @@ impl CratePage {
             focus,
             scroll: UniformListScrollHandle::new(),
             cursor: None,
-            confirming: false,
             selection: Selection::new(),
             bulk_menu: None,
             rows: Vec::new(),
@@ -355,18 +342,13 @@ impl CratePage {
         self.cursor.as_deref()
     }
 
-    pub fn confirming(&self) -> bool {
-        self.confirming
-    }
-
     /// How many songs are picked for bulk verbs (tests and diagnostics).
     pub fn picked(&self) -> usize {
         self.selection.len()
     }
 
-    /// The page was left: a half-answered Clear is forgotten.
+    /// The page was left: the cursor and picks are forgotten.
     pub fn reset(&mut self, cx: &mut Context<Self>) {
-        self.confirming = false;
         self.cursor = None;
         self.selection.clear();
         cx.notify();
@@ -453,24 +435,11 @@ impl CratePage {
         }
     }
 
-    /// Clear was pressed: ask first.
-    pub fn ask_to_clear(&mut self, cx: &mut Context<Self>) {
-        if !self.crate_.read(cx).is_empty() {
-            self.confirming = true;
-            cx.notify();
-        }
-    }
-
+    /// Clear: no question asked, Ctrl+Z puts the songs back.
     pub fn clear(&mut self, cx: &mut Context<Self>) {
-        self.confirming = false;
         self.cursor = None;
         self.selection.clear();
         self.crate_.update(cx, |m, cx| m.clear(cx));
-        cx.notify();
-    }
-
-    pub fn cancel_clear(&mut self, cx: &mut Context<Self>) {
-        self.confirming = false;
         cx.notify();
     }
 
@@ -759,9 +728,7 @@ impl CratePage {
         }
         self.selection.clear();
         self.crate_.update(cx, |m, cx| {
-            for video in &picked {
-                m.remove(video, cx);
-            }
+            m.remove_many(&picked, cx);
         });
         cx.notify();
     }
@@ -1188,44 +1155,15 @@ impl CratePage {
                     }),
                 ),
             ))
-            .map(|row| {
-                if self.confirming {
-                    // Clear asks first: the button turns into the question and its two answers.
-                    row.child(
-                        style::text_style(div(), typography::BODY, cx)
-                            .ml(px(spacing::S2))
-                            .text_color(color::text_secondary())
-                            .child(format!("Clear {}?", count_text(count))),
-                    )
-                    .child(named(
-                        "crate-clear-yes",
-                        TextButton::new("crate-clear-yes", &self.focus.confirm, "Clear", accent)
-                            .strong()
-                            .on_click({
-                                let page = page.clone();
-                                move |_, cx| page.update(cx, |p, cx| p.clear(cx))
-                            }),
-                    ))
-                    .child(named(
-                        "crate-clear-no",
-                        TextButton::new("crate-clear-no", &self.focus.cancel, "Cancel", accent)
-                            .on_click({
-                                let page = page.clone();
-                                move |_, cx| page.update(cx, |p, cx| p.cancel_clear(cx))
-                            }),
-                    ))
-                } else {
-                    row.child(named(
-                        "crate-clear",
-                        TextButton::new("crate-clear", &self.focus.clear, "Clear", accent)
-                            .enabled(has_rows)
-                            .on_click({
-                                let page = page.clone();
-                                move |_, cx| page.update(cx, |p, cx| p.ask_to_clear(cx))
-                            }),
-                    ))
-                }
-            })
+            .child(named(
+                "crate-clear",
+                TextButton::new("crate-clear", &self.focus.clear, "Clear", accent)
+                    .enabled(has_rows)
+                    .on_click({
+                        let page = page.clone();
+                        move |_, cx| page.update(cx, |p, cx| p.clear(cx))
+                    }),
+            ))
             // "N selected" at the right end while 2 or more songs are picked.
             .child(
                 div()

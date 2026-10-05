@@ -356,6 +356,9 @@ impl Shell {
         let crate_model = cx.new(|_| CrateModel::new());
         cx.observe(&crate_model, |_, _, cx| cx.notify()).detach();
         cx.set_global(CrateHandle(crate_model.clone()));
+        crate_model.update(cx, |m, cx| {
+            m.follow(player.clone(), &writes, settings.clone(), cx)
+        });
         let target_model =
             cx.new(|cx| TargetModel::new(settings.clone(), writes.clone(), &edits, cx));
         cx.observe(&target_model, |_, _, cx| cx.notify()).detach();
@@ -1561,11 +1564,20 @@ impl Shell {
             let player = self.player.read(cx);
             (player.queue_undo_depth(), player.queue_undoable())
         };
-        let note = self.writes.read(cx).playlist_undo_note();
-        match apollo_domain::undo::newest(depth, queue_undoable, note) {
+        let playlist = self.writes.read(cx).playlist_undo_side();
+        let crate_ = self.crate_model.read(cx).undo_side();
+        match apollo_domain::undo::newest(depth, queue_undoable, playlist, crate_) {
             apollo_domain::undo::Newest::Queue => self.undo_queue(cx),
             apollo_domain::undo::Newest::Playlist => self.undo_playlist(cx),
+            apollo_domain::undo::Newest::Crate => self.undo_crate(cx),
             apollo_domain::undo::Newest::Nothing => {}
+        }
+    }
+
+    /// Take back the last change to the Crate; the pill says what was undone.
+    fn undo_crate(&mut self, cx: &mut Context<Self>) {
+        if let Some(words) = self.crate_model.update(cx, |m, cx| m.undo(cx)) {
+            self.show_tip(format!("Undid: {words}").into(), cx);
         }
     }
 
