@@ -156,6 +156,15 @@ impl PlayRequest {
             skim: false,
         }
     }
+
+    /// Skim from row `index` (K on a row: skim from here).
+    pub fn skim_row(index: usize) -> Self {
+        Self {
+            start: Some(index),
+            shuffle: Some(false),
+            skim: true,
+        }
+    }
 }
 
 /// Something a card can open: an album or playlist (a collection) or an artist.
@@ -2136,7 +2145,7 @@ impl LibraryModel {
                 p.hint_art(track.video_id.as_str(), thumb.as_deref());
             }
             if request.skim {
-                p.start_skim(tracks, source, cx)
+                p.start_skim_at(tracks, request.start.unwrap_or(0), source, cx)
             } else {
                 p.play_tracks_from(tracks, request.start, request.shuffle, source, cx)
             }
