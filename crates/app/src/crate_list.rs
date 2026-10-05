@@ -5,18 +5,50 @@
 //! It is local, kept in the app's SQLite store per account (see `apollo_store::CrateRow`), never
 //! written to YouTube. Reads come from memory; every change is written by one background thread
 //! in the order it was made. Signing out deletes it.
+//!
+//! Every change is a step for Ctrl+Z (see [`CrateModel::undo`]): the list as it was before, kept
+//! in memory for this session. The steps are one line in time with the queue's and the
+//! playlists' (`apollo_domain::undo::newest`).
+//!
+//! "File and forget": with Settings > Playlists > "Take songs out of the Crate once filed" on, a
+//! song the service confirms is in a playlist leaves the Crate ([`CrateModel::file`]), as one
+//! step for Ctrl+Z.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apollo_domain::model::Track;
+use apollo_domain::undo::Side;
 use apollo_store::CrateRow;
 use gpui::{App, Context, Entity, Global};
 
+use crate::library::writes::{LibraryWrites, WritesEvent};
 use crate::player::PlayerModel;
-use crate::settings::SqliteSettings;
+use crate::settings::{SettingsModel, SqliteSettings, CRATE_FILE_AND_FORGET};
+
+/// How many changes to the Crate Ctrl+Z can take back.
+pub const UNDO_LIMIT: usize = 30;
+
+/// The Crate as it was before one change.
+struct Step {
+    before: Vec<CrateRow>,
+    /// What the change did, in words for "Undid: …".
+    words: String,
+    /// The queue history's depth when the change was made.
+    note: i64,
+    /// Where the change sits in time among the playlist edits.
+    seq: u64,
+}
+
+/// "a song" or "3 songs".
+fn songs(count: usize) -> String {
+    match count {
+        1 => "a song".to_owned(),
+        n => format!("{n} songs"),
+    }
+}
 
 /// Where the crate is kept. Blocking: call off the UI thread.
 pub trait CrateStore: Send + Sync {
@@ -103,6 +135,16 @@ pub struct CrateModel {
     items: Vec<CrateRow>,
     /// Bumped whenever the list is replaced, so a load that finishes late is dropped.
     epoch: u64,
+    /// What Ctrl+Z can take back, oldest first.
+    history: VecDeque<Step>,
+    /// Read for the queue history's depth, which steps note (see `apollo_domain::undo`).
+    player: Option<Entity<PlayerModel>>,
+    /// Read for "Take songs out of the Crate once filed".
+    settings: Option<Entity<SettingsModel>>,
+    /// Songs a picker is open for: filing them waits until it closes (see [`Self::hold`]).
+    held: HashSet<String>,
+    /// Songs filed while held, to leave the Crate when the picker closes.
+    waiting: Vec<String>,
 }
 
 impl Default for CrateModel {
@@ -120,7 +162,34 @@ impl CrateModel {
             key: None,
             items: Vec::new(),
             epoch: 0,
+            history: VecDeque::new(),
+            player: None,
+            settings: None,
+            held: HashSet::new(),
+            waiting: Vec::new(),
         }
+    }
+
+    /// Put the Crate in the app's line of undo steps and let it follow what is filed: `player`
+    /// says where the queue's history is, `writes` says when a song is in a playlist, and
+    /// `settings` whether that takes it out of the Crate.
+    pub fn follow(
+        &mut self,
+        player: Entity<PlayerModel>,
+        writes: &Entity<LibraryWrites>,
+        settings: Entity<SettingsModel>,
+        cx: &mut Context<Self>,
+    ) {
+        self.player = Some(player);
+        self.settings = Some(settings);
+        cx.subscribe(writes, |m, _, event, cx| match event {
+            WritesEvent::PlaylistAddSettled { video_id, added: true, .. } => {
+                m.filed(std::slice::from_ref(video_id), cx)
+            }
+            WritesEvent::PlaylistAddedMany { video_ids, .. } => m.filed(video_ids, cx),
+            _ => {}
+        })
+        .detach();
     }
 
     /// Where the crate is kept between runs. An account already chosen has its crate read now.
@@ -157,6 +226,8 @@ impl CrateModel {
         self.key = key;
         self.epoch += 1;
         self.items.clear();
+        self.history.clear();
+        self.waiting.clear();
         cx.notify();
         self.load(cx);
     }
@@ -188,6 +259,8 @@ impl CrateModel {
                         .into_iter()
                         .filter(|r| !stored.contains(r.track.video_id.as_str())),
                 );
+                // Steps made while this was loading hold a list that was missing what was stored.
+                m.history.clear();
                 cx.notify();
             });
         })
@@ -199,6 +272,8 @@ impl CrateModel {
         self.key = None;
         self.epoch += 1;
         self.items.clear();
+        self.history.clear();
+        self.waiting.clear();
         if let Some(writer) = &self.writer {
             let _ = writer.send(Write::Purge);
         }
@@ -239,6 +314,7 @@ impl CrateModel {
         if self.contains(track.video_id.as_str()) {
             return false;
         }
+        let before = self.items.clone();
         let row = CrateRow {
             track,
             thumbnail,
@@ -248,26 +324,25 @@ impl CrateModel {
             let _ = writer.send(Write::Add(key.clone(), Box::new(row.clone())));
         }
         self.items.push(row);
+        self.record(before, "added a song to the Crate".to_owned(), cx);
         cx.notify();
         true
     }
 
     /// Drop songs into the crate before what is at slot `slot` now (`len` or more means the
     /// bottom). A song already in the crate moves there instead of being added twice; the songs
-    /// keep the order they are given in. Returns whether anything changed.
+    /// keep the order they are given in. Returns whether anything changed. One step for Ctrl+Z.
     pub fn insert_at(
         &mut self,
-        songs: Vec<(Track, Option<String>)>,
+        songs_in: Vec<(Track, Option<String>)>,
         slot: usize,
         cx: &mut Context<Self>,
     ) -> bool {
-        let before = self
-            .items
-            .iter()
-            .map(|r| r.track.video_id.as_str().to_owned())
-            .collect::<Vec<_>>();
+        let before = self.items.clone();
+        let asked = songs_in.len();
+        let mut added = 0;
         let mut slot = slot.min(self.items.len());
-        for (track, thumbnail) in songs {
+        for (track, thumbnail) in songs_in {
             let video = track.video_id.as_str();
             if let Some(at) = self.items.iter().position(|r| r.track.video_id.as_str() == video) {
                 // Already here: it moves to the drop point (the slot is counted in the list as it
@@ -287,18 +362,25 @@ impl CrateModel {
                     let _ = writer.send(Write::Add(key.clone(), Box::new(row.clone())));
                 }
                 self.items.insert(slot, row);
+                added += 1;
             }
             slot += 1;
         }
-        let after = self
-            .items
-            .iter()
-            .map(|r| r.track.video_id.as_str().to_owned())
-            .collect::<Vec<_>>();
-        if before == after {
+        let ids = |rows: &[CrateRow]| {
+            rows.iter()
+                .map(|r| r.track.video_id.as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        if ids(&before) == ids(&self.items) {
             return false;
         }
         self.save_order();
+        let words = if added > 0 {
+            format!("added {} to the Crate", songs(added))
+        } else {
+            format!("moved {} in the Crate", songs(asked))
+        };
+        self.record(before, words, cx);
         cx.notify();
         true
     }
@@ -315,9 +397,11 @@ impl CrateModel {
         if to == from {
             return false;
         }
+        let before = self.items.clone();
         let row = self.items.remove(from);
         self.items.insert(to, row);
         self.save_order();
+        self.record(before, "moved a song in the Crate".to_owned(), cx);
         cx.notify();
         true
     }
@@ -354,30 +438,170 @@ impl CrateModel {
     }
 
     pub fn remove(&mut self, video_id: &str, cx: &mut Context<Self>) -> bool {
-        let Some(at) = self
-            .items
-            .iter()
-            .position(|r| r.track.video_id.as_str() == video_id)
-        else {
-            return false;
-        };
-        self.items.remove(at);
-        if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
-            let _ = writer.send(Write::Remove(key.clone(), video_id.to_owned()));
+        self.remove_many(&[video_id.to_owned()], cx) > 0
+    }
+
+    /// Take several songs out as one step for Ctrl+Z. Returns how many were in the crate.
+    pub fn remove_many(&mut self, video_ids: &[String], cx: &mut Context<Self>) -> usize {
+        let words = |n| format!("removed {} from the Crate", songs(n));
+        self.take_out(video_ids, words, cx)
+    }
+
+    fn take_out(
+        &mut self,
+        video_ids: &[String],
+        words: impl FnOnce(usize) -> String,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let before = self.items.clone();
+        let gone: HashSet<&str> = video_ids.iter().map(String::as_str).collect();
+        self.items.retain(|r| !gone.contains(r.track.video_id.as_str()));
+        let count = before.len() - self.items.len();
+        if count == 0 {
+            return 0;
         }
+        if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
+            for row in &before {
+                let video = row.track.video_id.as_str();
+                if gone.contains(video) {
+                    let _ = writer.send(Write::Remove(key.clone(), video.to_owned()));
+                }
+            }
+        }
+        self.record(before, words(count), cx);
         cx.notify();
-        true
+        count
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         if self.items.is_empty() {
             return;
         }
-        self.items.clear();
+        let before = std::mem::take(&mut self.items);
         if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
             let _ = writer.send(Write::Clear(key.clone()));
         }
+        self.record(before, "cleared the Crate".to_owned(), cx);
         cx.notify();
+    }
+
+    /// Put the crate in exactly this state (a rearrangement made elsewhere, such as a swap in
+    /// place) as one step for Ctrl+Z; `words` say what it did ("swapped 3 songs").
+    pub fn replace_all(
+        &mut self,
+        rows: Vec<CrateRow>,
+        words: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.items.clone();
+        if before == rows {
+            return;
+        }
+        self.write_state(&rows);
+        self.items = rows;
+        self.record(before, words.into(), cx);
+        cx.notify();
+    }
+
+    // ---- undo ----------------------------------------------------------------------------
+
+    /// Note that a change turned `before` into the list now.
+    fn record(&mut self, before: Vec<CrateRow>, words: String, cx: &App) {
+        let note = self
+            .player
+            .as_ref()
+            .map_or(0, |p| p.read(cx).queue_undo_depth());
+        self.history.push_back(Step {
+            before,
+            words,
+            note,
+            seq: apollo_domain::undo::tick(),
+        });
+        while self.history.len() > UNDO_LIMIT {
+            self.history.pop_front();
+        }
+    }
+
+    /// Where the newest change sits in time, for Ctrl+Z to choose between histories.
+    pub fn undo_side(&self) -> Option<Side> {
+        self.history.back().map(|s| Side { note: s.note, seq: s.seq })
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.history.is_empty()
+    }
+
+    /// Ctrl+Z: take back the newest change. Returns what it was, in words for "Undid: …".
+    pub fn undo(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let step = self.history.pop_back()?;
+        self.write_state(&step.before);
+        self.items = step.before;
+        cx.notify();
+        Some(step.words)
+    }
+
+    /// Make the store hold `rows`, in order, given what the list holds now.
+    fn write_state(&self, rows: &[CrateRow]) {
+        let (Some(writer), Some(key)) = (&self.writer, &self.key) else {
+            return;
+        };
+        let want: HashSet<&str> = rows.iter().map(|r| r.track.video_id.as_str()).collect();
+        let have: HashSet<&str> = self.items.iter().map(|r| r.track.video_id.as_str()).collect();
+        for row in &self.items {
+            let video = row.track.video_id.as_str();
+            if !want.contains(video) {
+                let _ = writer.send(Write::Remove(key.clone(), video.to_owned()));
+            }
+        }
+        for row in rows {
+            if !have.contains(row.track.video_id.as_str()) {
+                let _ = writer.send(Write::Add(key.clone(), Box::new(row.clone())));
+            }
+        }
+        let ids = rows
+            .iter()
+            .map(|r| r.track.video_id.as_str().to_owned())
+            .collect();
+        let _ = writer.send(Write::Order(key.clone(), ids));
+    }
+
+    // ---- file and forget -----------------------------------------------------------------
+
+    /// Songs are being filed through a picker: they stay in the crate until [`Self::release`],
+    /// so a song marked for several playlists is not gone after the first.
+    pub fn hold(&mut self, video_ids: &[String]) {
+        self.held = video_ids.iter().cloned().collect();
+    }
+
+    /// The picker closed: songs filed while it was open leave the crate now.
+    pub fn release(&mut self, cx: &mut Context<Self>) {
+        self.held.clear();
+        let waiting = std::mem::take(&mut self.waiting);
+        self.take_out(&waiting, |n| format!("took {} out of the Crate", songs(n)), cx);
+    }
+
+    /// The service holds these songs in a playlist: with "Take songs out of the Crate once
+    /// filed" on, the ones in the crate leave it as one step for Ctrl+Z.
+    pub fn filed(&mut self, video_ids: &[String], cx: &mut Context<Self>) {
+        let on = self
+            .settings
+            .as_ref()
+            .is_some_and(|s| s.read(cx).get(&CRATE_FILE_AND_FORGET));
+        if on {
+            self.file(video_ids, cx);
+        }
+    }
+
+    /// Take filed songs out of the crate (a held song waits for the picker to close). Returns
+    /// how many left now.
+    pub fn file(&mut self, video_ids: &[String], cx: &mut Context<Self>) -> usize {
+        let (held, free): (Vec<&String>, Vec<&String>) = video_ids
+            .iter()
+            .filter(|v| self.contains(v))
+            .partition(|v| self.held.contains(*v));
+        self.waiting.extend(held.into_iter().cloned());
+        let free: Vec<String> = free.into_iter().cloned().collect();
+        self.take_out(&free, |n| format!("took {} out of the Crate", songs(n)), cx)
     }
 }
 
