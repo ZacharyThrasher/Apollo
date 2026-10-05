@@ -11,6 +11,7 @@ use gpui::{
 };
 
 use crate::assets::Icon;
+use crate::confirm::{pulsing, Place};
 use crate::player::{failure_text, PlayerModel, PlayerView, Status};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
@@ -241,6 +242,12 @@ impl RenderOnce for PlayerBar {
                         .size(px(TARGET_GLYPH))
                         .flex_none()
                         .text_color(color::text_secondary()),
+                )
+                // The pill is bg.overlay itself, so its pulse is the next step up.
+                .children(
+                    crate::confirm::pulse(Place::Target, cx).map(|seq| {
+                        crate::confirm::overlay(seq, color::state_selected(), TARGET_PILL_HEIGHT / 2.0)
+                    }),
                 )
                 .child(div().min_w_0().truncate().child(name))
                 .child(crate::ui::anchor::probe(TARGET_ANCHOR))
@@ -494,7 +501,7 @@ impl RenderOnce for PlayerBar {
                 }),
             )
             .child(
-                button(
+                pulsing(crate::confirm::pulse(Place::Queue, cx), radius::SMALL).child(button(
                     "queue",
                     &self.focus.queue,
                     if self.queue_open {
@@ -510,10 +517,12 @@ impl RenderOnce for PlayerBar {
                 .on_click({
                     let f = self.on_queue_toggle.clone();
                     move |w, cx| f(w, cx)
-                }),
+                })),
             )
             .child(
-                div().debug_selector(|| "bar-crate".into()).child(
+                pulsing(crate::confirm::pulse(Place::Crate, cx), radius::SMALL)
+                    .debug_selector(|| "bar-crate".into())
+                    .child(
                     button(
                         "crate-panel",
                         &self.focus.crate_dock,

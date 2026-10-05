@@ -89,6 +89,8 @@ pub struct LibraryWrites {
     /// Likes of a selection still to go out, one at a time (see [`Self::set_liked_many`]).
     bulk: std::collections::VecDeque<(String, bool)>,
     bulk_running: bool,
+    /// Likes of the run in progress that the service has taken: one confirmation says how many.
+    bulk_liked: usize,
     notice: Option<Notice>,
     next_notice: u64,
     /// The playlist edits Ctrl+Z can take back (see [`super::undo`]).
@@ -111,6 +113,7 @@ impl LibraryWrites {
             generation: 0,
             bulk: std::collections::VecDeque::new(),
             bulk_running: false,
+            bulk_liked: 0,
             notice: None,
             next_notice: 1,
             log: PlaylistLog::default(),
@@ -166,6 +169,7 @@ impl LibraryWrites {
         self.generation += 1;
         self.bulk.clear();
         self.bulk_running = false;
+        self.bulk_liked = 0;
         self.likes.clear();
         self.disliking.clear();
         self.disliked.clear();
@@ -313,7 +317,13 @@ impl LibraryWrites {
                     let next = m.bulk.pop_front();
                     match &next {
                         Some((id, liked)) => m.set_liked(id, *liked, cx),
-                        None => m.bulk_running = false,
+                        None => {
+                            m.bulk_running = false;
+                            let liked = std::mem::take(&mut m.bulk_liked);
+                            if liked > 0 {
+                                crate::confirm::liked(liked, cx);
+                            }
+                        }
                     }
                     next
                 });
@@ -394,6 +404,13 @@ impl LibraryWrites {
         // Toggled again while the write was out: send the latest wish now.
         if wish != sent {
             self.send_like(video_id, wish, cx);
+        } else if sent {
+            // A run of likes says how many once it ends; a single one says so now.
+            if self.bulk_running {
+                self.bulk_liked += 1;
+            } else {
+                crate::confirm::liked(1, cx);
+            }
         }
         cx.notify();
     }
@@ -585,6 +602,7 @@ impl LibraryWrites {
         cx: &mut Context<Self>,
     ) {
         if self.holds(playlist, video_id) {
+            crate::confirm::already_in_playlist(&playlist.title, cx);
             return;
         }
         let key = (playlist.id.clone(), video_id.to_owned());
@@ -600,6 +618,7 @@ impl LibraryWrites {
         };
         let step = self.record_added(playlist, vec![video_id.to_owned()], cx);
         let generation = self.generation;
+        let title = playlist.title.clone();
         cx.spawn(async move |this, cx| {
             let (playlist_id, video) = key.clone();
             let result = {
@@ -646,7 +665,9 @@ impl LibraryWrites {
                             playlist_id: key.0.clone(),
                             video_id: key.1.clone(),
                             added: true,
-                        })
+                        });
+                        // Said only now: the service has the song.
+                        crate::confirm::added_to_playlist(&key.0, &title, 1, cx);
                     }
                     Err(failure) => {
                         m.log.drop_step(step);
@@ -690,6 +711,7 @@ impl LibraryWrites {
         });
         let generation = self.generation;
         let playlist_id = playlist.id.clone();
+        let title = playlist.title.clone();
         let videos = video_ids.to_vec();
         cx.spawn(async move |this, cx| {
             let result = {
@@ -730,6 +752,12 @@ impl LibraryWrites {
                     Ok(rows) => {
                         if let Some(step) = step {
                             m.log.settle_added(step, rows);
+                        }
+                        // Songs the playlist already held are not counted; none new says so.
+                        if fresh.is_empty() {
+                            crate::confirm::already_in_playlist(&title, cx);
+                        } else {
+                            crate::confirm::added_to_playlist(&playlist_id, &title, fresh.len(), cx);
                         }
                     }
                     Err(failure) => {
