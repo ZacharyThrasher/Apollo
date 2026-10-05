@@ -28,7 +28,8 @@ actions!(
         CrateCurrent,
         UndoQueue,
         RedoQueue,
-        ToggleFullscreen
+        ToggleFullscreen,
+        ShowShortcuts
     ]
 );
 
@@ -39,7 +40,7 @@ pub const VOLUME_STEP: i8 = 5;
 
 /// Where the plain (unmodified) shortcuts apply: anywhere in the shell unless a text field or a
 /// popup owns the keys.
-const PLAIN: &str = "Shell && !TextField && !TrackMenu && !PlaylistPicker";
+const PLAIN: &str = "Shell && !TextField && !TrackMenu && !PlaylistPicker && !CheatSheet";
 
 /// The in-app shortcuts. Space, Ctrl+K/F and Esc are bound with the shell's own list.
 pub fn bind_keys(cx: &mut App) {
@@ -59,6 +60,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-z", RedoQueue, plain),
         KeyBinding::new("ctrl-y", RedoQueue, plain),
         KeyBinding::new("f11", ToggleFullscreen, plain),
+        // "?" is Shift+/ on most layouts; a layout that types it on its own key sends "?".
+        KeyBinding::new("shift-/", ShowShortcuts, plain),
+        KeyBinding::new("?", ShowShortcuts, plain),
     ]);
     // The shell context is what the plain keys hang off; keep the constant honest.
     debug_assert!(PLAIN.starts_with(KEY_CONTEXT));

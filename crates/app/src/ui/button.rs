@@ -12,6 +12,7 @@ use gpui::{
 use crate::assets::Icon;
 use crate::motion::HoverFade;
 use crate::style::color;
+use crate::shortcuts::{self, Scope};
 use crate::ui::tooltip::Tooltip;
 
 #[derive(Default)]
@@ -35,6 +36,9 @@ pub struct IconButton {
     /// What assistive technology calls the button when that differs from the tooltip.
     name: Option<SharedString>,
     tooltip: bool,
+    /// The tooltip, the Ctrl badge and the third-use tip name the key of the command the label
+    /// stands for (`shortcuts`); off where that key does not work (the mini player).
+    key_hint: bool,
     size: f32,
     icon_color: Hsla,
     fill: Option<Hsla>,
@@ -61,6 +65,7 @@ impl IconButton {
             label: label.into(),
             name: None,
             tooltip: true,
+            key_hint: true,
             size: layout::MIN_HIT_TARGET,
             icon_color: color::text_secondary(),
             fill: None,
@@ -98,6 +103,12 @@ impl IconButton {
 
     pub fn circle(mut self) -> Self {
         self.circle = true;
+        self
+    }
+
+    /// No key in the tooltip, no badge and no tip: the key does not work where this button is.
+    pub fn no_key_hint(mut self) -> Self {
+        self.key_hint = false;
         self
     }
 
@@ -197,6 +208,16 @@ impl RenderOnce for IconButton {
         };
 
         let handlers = self.on_click.filter(|_| enabled);
+        let key_hint = self.key_hint;
+        let tip: SharedString = if key_hint {
+            shortcuts::tip_text(&self.label, Scope::Shell, cx)
+        } else {
+            self.label.clone()
+        };
+        let badge = key_hint
+            .then(|| shortcuts::badge_for(&self.label, cx))
+            .flatten();
+        let used_label = self.label.clone();
         let hover_state = state.clone();
         let down_state = state.clone();
         let up_state = state.clone();
@@ -251,14 +272,34 @@ impl RenderOnce for IconButton {
                         }
                     }
                     handler(window, cx);
+                    if key_hint && matches!(event, ClickEvent::Mouse(_)) {
+                        shortcuts::note_mouse_use_label(&used_label, Scope::Shell, cx);
+                    }
                 })
             })
-            .when(self.tooltip, {
-                let label = self.label.clone();
-                move |d| d.tooltip(move |_, cx| Tooltip::view(label.clone(), cx))
+            .when(self.tooltip, move |d| {
+                d.tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
             })
             .child(div().absolute().size_full().rounded(px(radius_px)).bg(tint))
             .child(glyph)
+            .children(badge.map(|key| key_badge(key, cx)))
             .when(ring, |d| d.child(focus_ring(self.ring, radius_px)))
     }
+}
+
+/// A key badge: the key as a small bg.raised pill on the button's top-right corner, shown while
+/// Ctrl is held (see `shortcuts::badge_for`).
+pub fn key_badge(key: SharedString, cx: &App) -> impl IntoElement {
+    crate::style::text_style(div(), apollo_theme::tokens::typography::CAPTION, cx)
+        .debug_selector(|| "key-badge".into())
+        .absolute()
+        .top(px(-2.0))
+        .right(px(-2.0))
+        .px(px(apollo_theme::tokens::spacing::S1))
+        .rounded(px(radius::SMALL))
+        .bg(color::bg_overlay())
+        .border_1()
+        .border_color(color::border_subtle())
+        .text_color(color::text_primary())
+        .child(key)
 }
