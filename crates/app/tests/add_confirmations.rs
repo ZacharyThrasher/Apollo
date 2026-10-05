@@ -251,7 +251,7 @@ fn several_songs_set_aside_together_are_one_undo_step(cx: &mut TestAppContext) {
     vcx.update(|_, cx| {
         apollo_app::crate_list::add_tracks(&page.player, vec![(t("a"), None), (t("b"), None), (t("a"), None)], cx)
     });
-    assert_eq!(pill(&page, vcx).as_deref(), Some(format!("Added 2 songs to Crate{UNDO}").as_str()));
+    assert_eq!(pill(&page, vcx).as_deref(), Some(format!("Added 2 \u{b7} 1 already in Crate{UNDO}").as_str()));
     assert_eq!(page.crate_model.read_with(vcx, |m, _| m.len()), 2);
     vcx.simulate_keystrokes("ctrl-z");
     assert_eq!(page.crate_model.read_with(vcx, |m, _| m.len()), 0, "one step took both");

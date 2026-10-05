@@ -350,7 +350,7 @@ fn a_playlist_pages_more_menu_adds_every_loaded_song_in_one_undoable_step(cx: &m
     assert_eq!(crate_ids(&page, vcx), ids, "in page order");
     assert_eq!(
         pill(&page, vcx).as_deref(),
-        Some(format!("Added {} songs to Crate", ids.len()).as_str())
+        Some(format!("Added {} songs to Crate{UNDO}", ids.len()).as_str())
     );
     assert_eq!(page.shell.read_with(vcx, |s, _| s.route()), Route::Library, "no page change");
 
@@ -547,7 +547,7 @@ fn explores_top_songs_has_a_more_menu_with_add_all(cx: &mut TestAppContext) {
     assert_eq!(crate_ids(&page, vcx), chart);
     assert_eq!(
         pill(&page, vcx).as_deref(),
-        Some(format!("Added {} songs to Crate", chart.len()).as_str())
+        Some(format!("Added {} songs to Crate{UNDO}", chart.len()).as_str())
     );
 }
 
@@ -563,7 +563,7 @@ fn the_queues_more_menu_adds_the_whole_queue_as_add_queue_to_crate(cx: &mut Test
     let mut expected = vec![PLAYING.to_owned()];
     expected.extend(QUEUED.iter().map(|s| (*s).to_owned()));
     assert_eq!(crate_ids(&page, vcx), expected);
-    assert_eq!(pill(&page, vcx).as_deref(), Some("Added 3 songs to Crate"));
+    assert_eq!(pill(&page, vcx).as_deref(), Some("Added 3 songs to Crate \u{b7} Ctrl+Z to undo"));
     undo(&page, vcx);
     assert!(crate_ids(&page, vcx).is_empty(), "one Ctrl+Z for the whole queue");
 }
