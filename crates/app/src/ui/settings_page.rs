@@ -13,7 +13,8 @@ use crate::autostart;
 use crate::player::PlayerModel;
 use crate::search::{HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES};
 use crate::settings::{
-    BoolSetting, SettingsModel, CLOSE_TO_TRAY, CONFIRM_ADDS, CRATE_FILE_AND_FORGET, CRATE_MARK_FILED, DISCORD_PRESENCE,
+    BoolSetting, SettingsModel, AUTO_ADVANCE, CLOSE_TO_TRAY, CONFIRM_ADDS, CRATE_FILE_AND_FORGET,
+    CRATE_MARK_FILED, DISCORD_PRESENCE,
     GLOBAL_HOTKEYS, HUD_AUTO_HIDE,
     INSTANT_PLAYLISTS, KEY_BADGES, SHOW_SHORTCUT_HINTS,
     MINI_COLLAPSE_ON_BLUR, MINI_DIM, MINI_FADE_CONTROLS, MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP,
@@ -142,6 +143,14 @@ impl Render for SettingsPage {
                 "A adds to the target playlist",
                 &TARGET_KEY,
                 &h[20],
+                accent,
+                cx,
+            ))
+            .row(self.bool_row(
+                "setting-auto-advance",
+                "Move to the next song after C, A or K",
+                &AUTO_ADVANCE,
+                &h[25],
                 accent,
                 cx,
             ))

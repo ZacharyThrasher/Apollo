@@ -35,6 +35,7 @@
 
 use std::ops::Range;
 use std::rc::Rc;
+use std::time::Duration;
 
 use apollo_store::CrateRow;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
@@ -255,6 +256,44 @@ fn count_text(n: usize) -> SharedString {
     }
 }
 
+/// How long songs run, as the header says it: `m:ss` under an hour, else "2 h 51 min" (rounded
+/// to the minute, a whole hour as "2 h").
+pub fn length_text(total: Duration) -> String {
+    let secs = total.as_secs();
+    if secs < 3600 {
+        return format!("{}:{:02}", secs / 60, secs % 60);
+    }
+    let minutes = (secs + 30) / 60;
+    match (minutes / 60, minutes % 60) {
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
+    }
+}
+
+/// The header's second line: "42 songs · 2 h 51 min", with " + 2 unknown" for songs that carry no
+/// length. With no length known at all (or no songs) it is just `label`.
+pub fn summary_text(label: &str, lengths: impl IntoIterator<Item = Option<Duration>>) -> String {
+    let (mut known, mut unknown) = (Duration::ZERO, 0usize);
+    let mut any = false;
+    for length in lengths {
+        match length {
+            Some(d) => {
+                known += d;
+                any = true;
+            }
+            None => unknown += 1,
+        }
+    }
+    if !any {
+        return label.to_owned();
+    }
+    let mut text = format!("{label} \u{b7} {}", length_text(known));
+    if unknown > 0 {
+        text.push_str(&format!(" + {unknown} unknown"));
+    }
+    text
+}
+
 pub struct CratePage {
     crate_: Entity<CrateModel>,
     player: Entity<PlayerModel>,
@@ -283,6 +322,9 @@ pub struct CratePage {
     layout: Layout,
     /// The Queue · Crate control, drawn above the docked header.
     dock_tabs: Option<(DockFocus, DockPick)>,
+    /// Esc in the docked list with nothing picked: focus goes back to where it was before the
+    /// jump into the dock (the shell's).
+    on_leave: Option<Rc<Handler>>,
 }
 
 impl CratePage {
@@ -366,6 +408,7 @@ impl CratePage {
             on_search: Rc::new(Box::new(on_search)),
             layout,
             dock_tabs: None,
+            on_leave: None,
         }
     }
 
@@ -374,8 +417,69 @@ impl CratePage {
         self.dock_tabs = Some((focus, on_pick));
     }
 
+    /// What Esc does in the docked list when nothing is picked.
+    pub fn set_on_leave(&mut self, on_leave: Rc<Handler>) {
+        self.on_leave = Some(on_leave);
+    }
+
     fn docked(&self) -> bool {
         self.layout == Layout::Dock
+    }
+
+    /// Ctrl+Shift+C: the keyboard lands in the list, on the row it was last on, else the first.
+    /// Whether there was a list to land on (an empty crate shows only its hint).
+    pub fn enter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let ids = self.ids(cx);
+        if ids.is_empty() {
+            return false;
+        }
+        let at = self
+            .cursor
+            .as_ref()
+            .and_then(|c| ids.iter().position(|id| id == c))
+            .unwrap_or(0);
+        self.cursor = Some(ids[at].clone());
+        self.scroll.scroll_to_item(at, ScrollStrategy::Nearest);
+        window.focus(&self.focus.list, cx);
+        cx.notify();
+        true
+    }
+
+    /// Whether the keyboard is on the list or on one of the header's controls.
+    pub fn has_focus(&self, window: &Window) -> bool {
+        let f = &self.focus;
+        [&f.list, &f.save, &f.add_to, &f.clear]
+            .iter()
+            .any(|h| h.is_focused(window))
+    }
+
+    /// The header line: "42 songs · 2 h 51 min", or "8 picked · 31:20" while two or more are
+    /// picked.
+    pub fn summary(&self, cx: &App) -> SharedString {
+        let rows = self.shown_rows(cx);
+        // Songs Hide filed leaves out are said, not silently gone.
+        let hidden = self.crate_.read(cx).len().saturating_sub(rows.len());
+        if self.selection.is_bulk() {
+            let picked: Vec<_> = rows
+                .iter()
+                .filter(|r| self.selection.contains(&r.track.video_id.as_str().to_owned()))
+                .collect();
+            if picked.len() >= 2 {
+                return summary_text(
+                    &format!("{} picked", picked.len()),
+                    picked.iter().map(|r| r.track.duration),
+                )
+                .into();
+            }
+        }
+        let mut text = summary_text(
+            &count_text(rows.len()),
+            rows.iter().map(|r| r.track.duration),
+        );
+        if hidden > 0 {
+            text.push_str(&format!(" \u{b7} {hidden} filed hidden"));
+        }
+        text.into()
     }
 
     pub fn cursor(&self) -> Option<&str> {
@@ -904,10 +1008,19 @@ impl CratePage {
     }
 
     /// Esc: picked songs go first; with none picked Esc does what it did before.
-    fn clear_picks(&mut self, cx: &mut Context<Self>) {
+    fn clear_picks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // While skimming, Esc is the skim's: it puts back what was playing.
-        if self.selection.is_empty() || self.player.read(cx).skimming() {
+        if self.player.read(cx).skimming() {
             cx.propagate();
+            return;
+        }
+        if self.selection.is_empty() {
+            // In the docked list Esc goes back to where the jump into it came from.
+            match self.on_leave.clone().filter(|_| self.docked()) {
+                // Deferred: the shell looks at this very list while it finds somewhere to land.
+                Some(leave) => window.defer(cx, move |window, cx| leave(window, cx)),
+                None => cx.propagate(),
+            }
             return;
         }
         self.selection.clear();
@@ -1002,7 +1115,29 @@ impl CratePage {
                 track.title.clone(),
             )]
         };
+        // With the key acting on one song and a target set it goes straight in, so the cursor
+        // steps on; with none the picker opens and the cursor stays.
+        let direct = !songs.is_empty()
+            && !self.selection.is_bulk()
+            && crate::target_playlist::has_target(cx);
         crate::target_playlist::add_songs(songs, None, window, cx);
+        if direct {
+            self.advance(cx);
+        }
+    }
+
+    /// After A acted on the cursor row: the cursor steps to the next row (Settings > Playlists),
+    /// the last row staying put.
+    fn advance(&mut self, cx: &mut Context<Self>) {
+        let ids = self.ids(cx);
+        let Some(at) = self.cursor_index(cx) else {
+            return;
+        };
+        if let Some(next) = crate::auto_advance::next_row(at, ids.len(), cx) {
+            self.cursor = Some(ids[next].clone());
+            self.scroll.scroll_to_item(next, ScrollStrategy::Nearest);
+            cx.notify();
+        }
     }
 
     // ---- rows --------------------------------------------------------------------------
@@ -1420,10 +1555,11 @@ impl CratePage {
             .child(
                 style::text_style(div(), typography::BODY, cx)
                     .id("crate-count")
+                    .debug_selector(|| "crate-count".into())
                     // A non-breaking space keeps the line's height while the crate is empty.
-                    .text_color(color::text_tertiary())
+                    .text_color(color::text_secondary())
                     .child(if self.total > 0 {
-                        self.count_line(count)
+                        self.summary(cx)
                     } else {
                         "\u{a0}".into()
                     }),
@@ -1485,15 +1621,6 @@ impl CratePage {
                     })
                 }),
         ))
-    }
-
-    /// "12 songs", with "· 4 filed hidden" while Hide filed leaves some out.
-    fn count_line(&self, shown: usize) -> SharedString {
-        if shown < self.total {
-            format!("{} \u{b7} {} filed hidden", count_text(self.total), self.total - shown).into()
-        } else {
-            count_text(self.total)
-        }
     }
 
     /// The docked header's second row; none when it would be empty.
@@ -1579,6 +1706,21 @@ impl CratePage {
             .children(tabs)
             .child(actions)
             .children(extras)
+            .child(
+                style::text_style(div(), typography::BODY, cx)
+                    .id("dock-count")
+                    .debug_selector(|| "dock-count".into())
+                    .px(px(spacing::S3))
+                    .pb(px(spacing::S2))
+                    .truncate()
+                    .text_color(color::text_secondary())
+                    // A non-breaking space keeps the line's height while the crate is empty.
+                    .child(if self.total > 0 {
+                        self.summary(cx)
+                    } else {
+                        "\u{a0}".into()
+                    }),
+            )
             .into_any_element()
     }
 
@@ -1742,7 +1884,7 @@ impl Render for CratePage {
                 .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.extend(-1, cx)))
                 .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.extend(1, cx)))
                 .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
-                .on_action(cx.listener(|this, _: &ClearPicks, _, cx| this.clear_picks(cx)))
+                .on_action(cx.listener(|this, _: &ClearPicks, window, cx| this.clear_picks(window, cx)))
                 .on_action(cx.listener(|this, _: &SkimCursor, _, cx| this.skim_cursor(cx)))
                 .on_action(cx.listener(|this, _: &PlayCursor, _, cx| this.play_cursor(cx)))
                 .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
@@ -1812,6 +1954,33 @@ mod tests {
         assert_eq!(cursor_after_removal(&ids, "c").as_deref(), Some("b"));
         assert_eq!(cursor_after_removal(&["a".to_owned()], "a"), None);
         assert_eq!(cursor_after_removal(&ids, "z"), None);
+    }
+
+    #[test]
+    fn lengths_read_as_minutes_then_hours() {
+        let secs = Duration::from_secs;
+        assert_eq!(length_text(secs(0)), "0:00");
+        assert_eq!(length_text(secs(31 * 60 + 20)), "31:20");
+        assert_eq!(length_text(secs(59 * 60 + 59)), "59:59");
+        assert_eq!(length_text(secs(3600)), "1 h");
+        assert_eq!(length_text(secs(2 * 3600 + 51 * 60 + 10)), "2 h 51 min");
+        assert_eq!(length_text(secs(2 * 3600 + 5 * 60)), "2 h 5 min");
+        // Rounded to the minute, carrying into the hour.
+        assert_eq!(length_text(secs(3600 + 59 * 60 + 40)), "2 h");
+    }
+
+    #[test]
+    fn the_summary_adds_the_known_lengths_and_names_the_unknown() {
+        let m = |m: u64| Some(Duration::from_secs(m * 60));
+        assert_eq!(summary_text("3 songs", [m(10), m(20), m(1)]), "3 songs \u{b7} 31:00");
+        assert_eq!(
+            summary_text("42 songs", (0..42).map(|_| m(4)).chain([None, None])),
+            "42 songs \u{b7} 2 h 48 min + 2 unknown"
+        );
+        assert_eq!(summary_text("8 picked", [m(31), None]), "8 picked \u{b7} 31:00 + 1 unknown");
+        // Nothing known: just the label.
+        assert_eq!(summary_text("2 songs", [None, None]), "2 songs");
+        assert_eq!(summary_text("1 song", []), "1 song");
     }
 
     #[test]

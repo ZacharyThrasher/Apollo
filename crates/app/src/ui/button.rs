@@ -49,6 +49,8 @@ pub struct IconButton {
     tab_stop: bool,
     spin: bool,
     toggled: Option<bool>,
+    /// A small number right of the icon, inside the button (the Crate button's count).
+    count: Option<SharedString>,
     on_click: Option<Handler>,
 }
 
@@ -77,6 +79,7 @@ impl IconButton {
             tab_stop: true,
             spin: false,
             toggled: None,
+            count: None,
             on_click: None,
         }
     }
@@ -134,6 +137,13 @@ impl IconButton {
     /// Marks a toggle button (shuffle, queue) so assistive tech reads its state.
     pub fn toggled(mut self, on: bool) -> Self {
         self.toggled = Some(on);
+        self
+    }
+
+    /// A number as an 11px caption in text.secondary right of the icon, inside the button, which
+    /// grows to hold it. No bubble, no accent.
+    pub fn count(mut self, count: Option<SharedString>) -> Self {
+        self.count = count;
         self
     }
 
@@ -227,6 +237,7 @@ impl RenderOnce for IconButton {
             .then(|| shortcuts::badge_for(&self.label, cx))
             .flatten();
         let used_label = self.label.clone();
+        let count = self.count.clone();
         let hover_state = state.clone();
         let down_state = state.clone();
         let up_state = state.clone();
@@ -237,7 +248,10 @@ impl RenderOnce for IconButton {
             .flex_none()
             .items_center()
             .justify_center()
-            .size(px(self.size))
+            .h(px(self.size))
+            .min_w(px(self.size))
+            .when(count.is_none(), |d| d.w(px(self.size)))
+            .when(count.is_some(), |d| d.gap(px(2.0)).px(px(6.0)))
             .rounded(px(radius_px))
             .when_some(self.fill, |d, c| d.bg(c))
             .track_focus(&self.focus.clone().tab_stop(enabled && self.tab_stop))
@@ -291,6 +305,17 @@ impl RenderOnce for IconButton {
             })
             .child(div().absolute().size_full().rounded(px(radius_px)).bg(tint))
             .child(glyph)
+            .children(count.map(|text| {
+                crate::style::tabular(crate::style::text_style(
+                    div(),
+                    apollo_theme::tokens::typography::CAPTION,
+                    cx,
+                ))
+                .debug_selector(|| "button-count".into())
+                    .flex_none()
+                    .text_color(color::text_secondary())
+                    .child(text)
+            }))
             .children(badge.map(|key| key_badge(key, cx)))
             .when(ring, |d| d.child(focus_ring(self.ring, radius_px)))
     }

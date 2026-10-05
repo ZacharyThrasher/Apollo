@@ -338,6 +338,20 @@ impl PlayerModel {
         self.prefetch_upcoming();
     }
 
+    /// K while skimming, with auto-advance on: on to the next song's window. At the last song it
+    /// stays (the skim is not ended by a key that only sets a song aside). Whether it moved.
+    pub fn skim_advance(&mut self, cx: &mut Context<Self>) -> bool {
+        let has_next = self.skim.is_some()
+            && self
+                .driver
+                .as_ref()
+                .is_some_and(|d| d.coordinator().queue().peek_next().is_some());
+        if has_next {
+            self.skim_next(cx);
+        }
+        has_next
+    }
+
     /// Previous while skimming: the song before, from its window start; at the first song, its
     /// own window again.
     pub(super) fn skim_previous(&mut self, cx: &mut Context<Self>) {
