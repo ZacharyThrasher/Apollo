@@ -15,7 +15,9 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::Instant;
 
-use apollo_domain::library::{Collection, CollectionKind};
+use apollo_domain::library::{
+    clean_playlist_title, Collection, CollectionKind, MAX_PLAYLIST_TITLE,
+};
 use apollo_domain::listing::LoadFailure;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
@@ -49,7 +51,7 @@ use crate::ui::selection::{self, Click, Selection};
 use crate::ui::track_menu::{self, Command, Subject, TrackSubject};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
-use crate::ui::text_field::{TextField, TextFieldEvent};
+use crate::ui::text_field::{self, TextField, TextFieldEvent};
 use crate::ui::tooltip::Tooltip;
 use crate::library::filter::Visible;
 
@@ -233,8 +235,18 @@ impl PageScroll {
     }
 }
 
+/// A playlist's title being renamed in place: its field replaces the title on the page.
+struct Rename {
+    /// Bare id of the playlist.
+    key: String,
+    field: Entity<TextField>,
+    /// Enter and losing focus end it (the field's events, and the field's focus leaving).
+    _subscriptions: [gpui::Subscription; 2],
+}
+
 pub struct LibraryView {
     model: Entity<LibraryModel>,
+    edits: Entity<LibraryEdits>,
     player: Entity<PlayerModel>,
     writes: Entity<LibraryWrites>,
     picker: Entity<PlaylistPicker>,
@@ -283,6 +295,8 @@ pub struct LibraryView {
     /// A playlist was deleted: if its page is open it closes on the next frame (events carry no
     /// window).
     deleted: Option<String>,
+    /// The title on the page on screen is being edited.
+    rename: Option<Rename>,
 }
 
 /// The song row being dragged to a new place in an editable playlist.
@@ -365,6 +379,7 @@ impl LibraryView {
             bio: stop(cx, 10),
         };
         let model = cx.new(|cx| LibraryModel::new(player.clone(), writes.clone(), edits.clone(), cx));
+        let edits_handle = edits.clone();
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
         let more = cx.new(|cx| MoreLikeModel::new(player.clone(), model.clone(), writes.clone(), cx));
         cx.observe(&more, |_, _, cx| cx.notify()).detach();
@@ -383,6 +398,8 @@ impl LibraryView {
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         Self {
             model,
+            edits: edits_handle,
+            rename: None,
             player,
             writes,
             picker,
@@ -416,6 +433,7 @@ impl LibraryView {
 
     /// Back to a blank overview (the account changed: nothing of the old one may show).
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.rename = None;
         self.model.update(cx, |m, cx| m.reset(cx));
         self.selected = 0;
         self.selected_below.clear();
@@ -505,6 +523,100 @@ impl LibraryView {
         self.pages.clear();
         self.hover.clear();
         window.focus(&self.focus.list, cx);
+        cx.notify();
+    }
+
+    // ---- renaming in place ---------------------------------------------------------------
+
+    /// Swap the title of the playlist page open now for a field holding it, the name selected so
+    /// typing replaces it. Only a playlist of the account's own, and only while its page is the
+    /// one on screen. Enter or leaving the field saves the name (unchanged or empty sends nothing),
+    /// Esc keeps the old one.
+    pub fn begin_rename(
+        &mut self,
+        collection: &Collection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = collection.library_key().to_owned();
+        if self.rename.as_ref().is_some_and(|r| r.key == key) {
+            return;
+        }
+        let Some(title) = self
+            .model
+            .read(cx)
+            .detail()
+            .filter(|d| d.collection.library_key() == key)
+            .map(|d| d.collection.title.clone())
+        else {
+            return;
+        };
+        if !self.edits.read(cx).is_editable(collection) {
+            return;
+        }
+        let focus = cx.focus_handle();
+        let clear = cx.focus_handle();
+        let field = cx.new(|_| {
+            TextField::new("Playlist name", focus.clone(), clear).title(MAX_PLAYLIST_TITLE)
+        });
+        field.update(cx, |f, cx| {
+            f.set_text(&title, cx);
+            f.select_everything(cx);
+        });
+        let on_field = cx.subscribe_in(&field, window, |this, _, event, window, cx| {
+            if matches!(event, TextFieldEvent::Submit) {
+                this.finish_rename(true, true, window, cx);
+            } else {
+                cx.notify();
+            }
+        });
+        let on_blur = cx.on_blur(&focus, window, |this, window, cx| {
+            this.finish_rename(true, false, window, cx)
+        });
+        self.rename = Some(Rename {
+            key,
+            field: field.clone(),
+            _subscriptions: [on_field, on_blur],
+        });
+        text_field::focus(&field, window, cx);
+        cx.notify();
+    }
+
+    /// Esc: the title stays as it was.
+    pub fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_rename(false, true, window, cx);
+    }
+
+    /// End the rename: `save` sends the new name if there is one and it differs, `refocus` hands
+    /// keyboard focus back to the page's list (not when focus has moved on by itself).
+    fn finish_rename(
+        &mut self,
+        save: bool,
+        refocus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(rename) = self.rename.take() else {
+            return;
+        };
+        if refocus {
+            window.focus(&self.focus.list, cx);
+        }
+        if save {
+            let typed = clean_playlist_title(rename.field.read(cx).text());
+            let open = self
+                .model
+                .read(cx)
+                .detail()
+                .filter(|d| d.collection.library_key() == rename.key)
+                .map(|d| d.collection.clone());
+            if let (Some(title), Some(collection)) = (typed, open) {
+                if title != collection.title {
+                    self.edits
+                        .update(cx, |e, cx| e.rename(collection, title, cx));
+                }
+            }
+        }
         cx.notify();
     }
 
@@ -1734,6 +1846,50 @@ impl LibraryView {
         )
     }
 
+    /// The page's title: a field while it is being renamed, a click target to start that on a
+    /// playlist of the account's own, plain text otherwise.
+    fn title_element(&mut self, collection: &Collection, cx: &mut Context<Self>) -> AnyElement {
+        let key = collection.library_key();
+        // A rename belongs to the page it began on.
+        if self.rename.as_ref().is_some_and(|r| r.key != key) {
+            self.rename = None;
+        }
+        if let Some(rename) = &self.rename {
+            return div()
+                .id("detail-title-field")
+                .debug_selector(|| "detail-title-field".into())
+                .min_w_0()
+                // The field hands Escape on: the name stays as it was.
+                .on_action(cx.listener(|this, _: &text_field::Escape, window, cx| {
+                    this.cancel_rename(window, cx)
+                }))
+                .child(rename.field.clone())
+                .into_any_element();
+        }
+        let line = Self::line(
+            "detail-title",
+            collection.title.clone().into(),
+            typography::PAGE_TITLE,
+            color::text_primary(),
+            false,
+            cx,
+        );
+        if !self.edits.read(cx).is_editable(collection) {
+            return line;
+        }
+        let collection = collection.clone();
+        div()
+            .id("detail-title-rename")
+            .debug_selector(|| "detail-title-rename".into())
+            .min_w_0()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.begin_rename(&collection, window, cx)
+            }))
+            .child(line)
+            .into_any_element()
+    }
+
     fn render_detail(
         &mut self,
         accent: Accent,
@@ -1782,6 +1938,7 @@ impl LibraryView {
             .then(|| track_count_text(collection.subtitle.as_deref(), items))
             .flatten();
         let blurb = self.description_line(&collection, blurb, editable, accent, window, cx);
+        let title = self.title_element(&collection, cx);
         let buttons = self.play_buttons(can_play || loading, pending, "detail", accent, cx);
 
         let header = div()
@@ -1811,14 +1968,7 @@ impl LibraryView {
                     .flex_1()
                     .min_w_0()
                     .gap(px(spacing::S1))
-                    .child(Self::line(
-                        "detail-title",
-                        collection.title.clone().into(),
-                        typography::PAGE_TITLE,
-                        color::text_primary(),
-                        false,
-                        cx,
-                    ))
+                    .child(title)
                     .children(collection.subtitle.clone().map(|s| {
                         Self::line(
                             "detail-subtitle",
