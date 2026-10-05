@@ -269,6 +269,17 @@ fn an_undone_crate_is_what_is_stored(cx: &mut TestAppContext) {
         fn remove(&self, _: &str, id: &str) {
             self.0.lock().unwrap().retain(|r| r.track.video_id.as_str() != id);
         }
+        fn swap(&self, _: &str, old: &str, row: &CrateRow) {
+            if let Some(r) = self
+                .0
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|r| r.track.video_id.as_str() == old)
+            {
+                *r = row.clone();
+            }
+        }
         fn clear(&self, _: &str) {
             self.0.lock().unwrap().clear();
         }

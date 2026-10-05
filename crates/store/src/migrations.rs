@@ -183,4 +183,12 @@ Migration {
                    OR (newer.added_ms = crate_items.added_ms AND newer.rowid > crate_items.rowid))
         );
     ",
+}, Migration {
+    version: 10,
+    sql: "
+        -- Whether the service marks a Crate song explicit (the E badge), as far as it is known.
+        -- 0 is 'not known to be': a song added from a place that does not say stays 0 until a
+        -- swap to explicit finds out.
+        ALTER TABLE crate_items ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0;
+    ",
 }];

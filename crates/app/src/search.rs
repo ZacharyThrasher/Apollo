@@ -890,6 +890,10 @@ impl Pane {
 
     /// `results` is `raw` less the music videos while the setting asks for that.
     fn apply_filter(&mut self, hide_videos: bool) {
+        // What the results show of each song's "E" is what the Crate knows when it is added.
+        for song in self.raw.iter().flat_map(|raw| raw.songs.iter()) {
+            crate::explicit_marks::note(song.track.video_id.as_str(), song.explicit);
+        }
         self.results = self.raw.as_ref().map(|raw| {
             if hide_videos && !raw.video_ids.is_empty() {
                 Arc::new(raw.without_videos())
