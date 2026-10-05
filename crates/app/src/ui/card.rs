@@ -24,13 +24,20 @@ use crate::ui::tooltip::Tooltip;
 use crate::ui::track_menu::{self, Subject};
 use crate::url_thumbs::Thumb;
 
-actions!(card, [OpenCard]);
+actions!(card, [OpenCard, CrateSong]);
 
 /// Key context of a card.
 pub const KEY_CONTEXT: &str = "Card";
 
+/// Key contexts of a card that stands for one song (Home, Explore and Related shelves): C sets
+/// that song aside, the key the Crate has everywhere else.
+pub const SONG_KEY_CONTEXT: &str = "Card SongCard";
+
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("enter", OpenCard, Some(KEY_CONTEXT))]);
+    cx.bind_keys([
+        KeyBinding::new("enter", OpenCard, Some(KEY_CONTEXT)),
+        KeyBinding::new("c", CrateSong, Some("SongCard")),
+    ]);
 }
 
 /// The artwork square.

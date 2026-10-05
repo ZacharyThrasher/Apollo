@@ -538,7 +538,7 @@ impl CrateAddModel {
             .into_iter()
             .map(|s| NewSong { track: s.track, thumbnail: s.thumbnail, explicit: s.explicit })
             .collect();
-        let added = self.crate_.update(cx, |m, cx| m.add_many(new, cx));
+        let added = self.crate_.update(cx, |m, cx| m.add_found(new, cx));
         if added.is_empty() {
             if asked > 0 {
                 confirm::already_crated(cx);
