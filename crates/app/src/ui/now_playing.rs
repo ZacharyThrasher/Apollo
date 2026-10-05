@@ -22,6 +22,8 @@ use crate::ui::choice_menu::{self, Choice};
 use crate::ui::lyrics_pane::LyricsPane;
 use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus, PaneTabs};
 use crate::ui::player_bar::text_line;
+use crate::ui::search_page::OpenTarget;
+use crate::ui::track_links::track_links;
 use crate::ui::playlist_picker::PlaylistPicker;
 use crate::ui::related_pane::RelatedPane;
 use crate::ui::row_actions::{heart_icon, heart_label};
@@ -87,9 +89,15 @@ pub struct NowPlaying {
     focus: TransportFocus,
     progress: Entity<SliderState>,
     on_close: Rc<Handler>,
+    /// Opens the artist and album pages from the names under the title.
+    on_open: Option<OpenTarget>,
 }
 
 impl NowPlaying {
+    pub fn set_on_open(&mut self, on_open: OpenTarget) {
+        self.on_open = Some(on_open);
+    }
+
     pub fn new(
         player: Entity<PlayerModel>,
         writes: Entity<LibraryWrites>,
@@ -132,6 +140,7 @@ impl NowPlaying {
             related,
             tabs,
             on_pick,
+            on_open: None,
             progress,
             on_close: Rc::new(Box::new(on_close)),
         }
@@ -280,6 +289,9 @@ impl Render for NowPlaying {
                 .child(div().debug_selector(|| "np-speed".into()).child(speed_button))
         });
 
+        // The names are links when any of them has a page to open.
+        let linked = v.artists.iter().any(|a| a.id.is_some())
+            || v.album.as_ref().is_some_and(|a| a.id.is_some());
         let text = div()
             .debug_selector(|| "np-text".into())
             .flex()
@@ -306,13 +318,25 @@ impl Render for NowPlaying {
                 div()
                     .mt(px(spacing::S2))
                     .line_height(gpui::relative(ARTIST_LINE_HEIGHT))
-                    .child(text_line(
-                        "np-artist",
-                        v.subtitle.clone(),
-                        typography::NOW_PLAYING_ARTIST,
-                        color::text_secondary(),
-                        cx,
-                    )),
+                    .child(match &self.on_open {
+                        Some(open) if linked => track_links(
+                            "np-artist",
+                            &v.artists,
+                            v.album.as_ref(),
+                            typography::NOW_PLAYING_ARTIST,
+                            open,
+                            cx,
+                        )
+                        .into_any_element(),
+                        _ => text_line(
+                            "np-artist",
+                            v.subtitle.clone(),
+                            typography::NOW_PLAYING_ARTIST,
+                            color::text_secondary(),
+                            cx,
+                        )
+                        .into_any_element(),
+                    }),
             );
 
         let controls = div()
