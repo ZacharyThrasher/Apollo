@@ -25,7 +25,7 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | P | Add to playlist: open the picker for the playing song (in the queue, Library, Search and Crate lists: the song under the cursor). Settings > Playback > "P opens the playlist picker" switches it off |
 | A | Add to the target playlist: the playing song (in the queue, Library, Search and Crate lists: the song under the cursor; with 2 or more picked, all of them). With no target set the picker opens to choose one. Settings > Playlists > "A adds to the target playlist" switches it off. See "The target playlist" |
 | Ctrl+Shift+C | Show / hide the docked Crate on the right of the window (the Crate button in the player bar does the same). See "The docked Crate" |
-| Ctrl+Z | Undo the last queue change or playlist edit, whichever came last (see "Undo") |
+| Ctrl+Z | Undo the last queue change, playlist edit or Crate change, whichever came last (see "Undo") |
 | Ctrl+Shift+Z or Ctrl+Y | Redo a queue change (playlist edits have no redo) |
 | Alt+Left / Alt+Right | Back / Forward through the places you have been (see "Back and Forward"). Work in text fields too |
 | Backspace | Back, except while a text field (Search, a filter, a rename) has the keys, and in the queue and the Crate, where it removes the row |
@@ -194,11 +194,36 @@ Several songs removed or moved at once are one step. After an undo the pill read
 3 songs to Gym Mix" for 4 seconds; a failed undo shows the usual error ("Couldn't undo that"). An
 add whose reply from YouTube Music was lost cannot be undone exactly (which rows it made is not
 known), so Ctrl+Z says so and leaves it. An add that has not been answered yet answers "Try again
-in a moment". The Crate's own drag moves are not part of this history.
+in a moment".
+
+### Undo covers the Crate too
+
+The Crate's own changes are steps in the same line of time (thirty are kept for the session, in
+memory only; a restart or a different account starts empty):
+
+| Change | Ctrl+Z does |
+|---|---|
+| A song set aside (C, Add to Crate, a drop on the dock) | Takes it out again |
+| Remove, or Delete with several picked | Puts the songs back where they were (several at once are one step) |
+| Clear | Puts every song back. Clear no longer asks first: Ctrl+Z is the safety net |
+| A move (drag, Alt+Up / Alt+Down, a drop in the dock) | Puts the order back |
+| A song filed to a playlist, with "Take songs out of the Crate once filed" on | Puts it back in the Crate (the playlist add is its own step, taken back by the next Ctrl+Z) |
+
+The pill reads "Undid: removed 3 songs from the Crate" for 4 seconds. Ctrl+Z takes the newest of
+the queue's, the playlists' and the Crate's steps, so a Crate change made after a queue change is
+undone first. There is no redo for the Crate.
+
+### File and forget
+
+Settings > Playlists > "Take songs out of the Crate once filed" (off by default, because a song
+can belong in two playlists): once YouTube Music confirms a song is in a playlist, it leaves the
+Crate. That covers A, the P picker (including its Create row and several playlists marked at
+once: the songs leave when the picker closes), the Crate's "Add all to…" and a picked-songs add.
+A failed or lost add takes nothing out. "Save as playlist…" keeps its own "Clear Crate" check.
 
 An add that Ctrl+Z can take back says so in its confirmation: "Added to Road trip · Ctrl+Z to
-undo" (queue adds and playlist adds, including a playlist made from the queue or the Crate), for
-2.5 seconds, while **Show shortcut hints** is on. Crate adds, likes and library saves have no undo
+undo" (queue adds, Crate adds and playlist adds, including a playlist made from the queue or the
+Crate), for 2.5 seconds, while **Show shortcut hints** is on. Likes and library saves have no undo
 and no hint. Settings > Playlists > **Confirm when adding** switches the confirmation off.
 
 Media keys are the OS's (SMTC) and are untouched.

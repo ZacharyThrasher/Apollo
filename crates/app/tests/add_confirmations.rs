@@ -194,11 +194,11 @@ fn a_newer_add_replaces_the_pill_and_it_lasts_two_and_a_half_seconds(cx: &mut Te
     vcx.executor().advance_clock(Duration::from_millis(2_000));
     vcx.run_until_parked();
     vcx.simulate_keystrokes("c");
-    assert_eq!(pill(&page, vcx).as_deref(), Some("Added to Crate"), "the newest add is what shows");
+    assert_eq!(pill(&page, vcx).as_deref(), Some(format!("Added to Crate{UNDO}").as_str()), "the newest add is what shows");
     // The first pill's own timer ran out at 2.5 s, but it was replaced: the new one still shows.
     vcx.executor().advance_clock(Duration::from_millis(700));
     vcx.run_until_parked();
-    assert_eq!(pill(&page, vcx).as_deref(), Some("Added to Crate"));
+    assert_eq!(pill(&page, vcx).as_deref(), Some(format!("Added to Crate{UNDO}").as_str()));
     vcx.executor().advance_clock(Duration::from_millis(1_900));
     vcx.run_until_parked();
     assert_eq!(pill(&page, vcx), None);
@@ -220,7 +220,7 @@ fn ctrl_z_does_take_back_a_queue_add_the_pill_names(cx: &mut TestAppContext) {
 fn c_says_the_song_is_in_the_crate_and_again_that_it_already_was(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     vcx.simulate_keystrokes("c");
-    assert_eq!(pill(&page, vcx).as_deref(), Some("Added to Crate"), "the Crate has no undo");
+    assert_eq!(pill(&page, vcx).as_deref(), Some(format!("Added to Crate{UNDO}").as_str()), "Ctrl+Z takes it back");
     settle(vcx);
     vcx.simulate_keystrokes("c");
     assert_eq!(pill(&page, vcx).as_deref(), Some("Already in Crate"));
@@ -237,12 +237,24 @@ fn a_dragged_in_song_says_so_but_a_song_moved_within_the_crate_does_not(cx: &mut
     page.crate_model.update(vcx, |m, cx| {
         m.insert_at(vec![(t("x"), None), (t("y"), None)], 1, cx);
     });
-    assert_eq!(pill(&page, vcx).as_deref(), Some("Added 2 songs to Crate"));
+    assert_eq!(pill(&page, vcx).as_deref(), Some(format!("Added 2 songs to Crate{UNDO}").as_str()));
     settle(vcx);
     page.crate_model.update(vcx, |m, cx| {
         m.insert_at(vec![(t("b"), None)], 0, cx);
     });
     assert_eq!(pill(&page, vcx), None, "b only moved");
+}
+
+#[gpui::test]
+fn several_songs_set_aside_together_are_one_undo_step(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    vcx.update(|_, cx| {
+        apollo_app::crate_list::add_tracks(&page.player, vec![(t("a"), None), (t("b"), None), (t("a"), None)], cx)
+    });
+    assert_eq!(pill(&page, vcx).as_deref(), Some(format!("Added 2 songs to Crate{UNDO}").as_str()));
+    assert_eq!(page.crate_model.read_with(vcx, |m, _| m.len()), 2);
+    vcx.simulate_keystrokes("ctrl-z");
+    assert_eq!(page.crate_model.read_with(vcx, |m, _| m.len()), 0, "one step took both");
 }
 
 // ---- playlists --------------------------------------------------------------------------------

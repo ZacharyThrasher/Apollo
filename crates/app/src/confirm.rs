@@ -275,7 +275,7 @@ pub fn crated(videos: Vec<String>, scroll: bool, cx: &mut App) {
     }
     confirm(
         added_text(videos.len(), "Crate"),
-        false,
+        true,
         Some((Place::Crate, videos, scroll)),
         cx,
     );

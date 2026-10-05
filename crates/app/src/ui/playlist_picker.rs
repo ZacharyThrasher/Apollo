@@ -45,6 +45,7 @@ use gpui::{
 };
 
 use crate::assets::Icon;
+use crate::crate_list;
 use crate::library::edits::{Edit, EditEvent, LibraryEdits};
 use crate::library::model::Load;
 use crate::library::source::PROBE_VIDEO;
@@ -339,6 +340,9 @@ pub struct PlaylistPicker {
     awaiting_create: Option<String>,
     /// The playlist awaited is to become the target when it exists.
     awaiting_target: bool,
+    /// The songs the awaited playlist is made with; they are filed (leave the Crate, if that is
+    /// on) once it exists.
+    awaiting_filed: Vec<String>,
 }
 
 /// The shell's picker, reachable from any screen.
@@ -416,6 +420,7 @@ impl PlaylistPicker {
             next_request: 1,
             awaiting_create: None,
             awaiting_target: false,
+            awaiting_filed: Vec::new(),
         }
     }
 
@@ -612,6 +617,13 @@ impl PlaylistPicker {
                 },
             ));
         }
+        if !target_mode {
+            // Songs filed through this panel leave the Crate (if that is on) once it closes.
+            let videos: Vec<String> = songs.iter().map(|s| s.video_id.clone()).collect();
+            if let Some(model) = crate_list::handle(cx) {
+                model.update(cx, |m, _| m.hold(&videos));
+            }
+        }
         self.open = Some(Open {
             songs,
             target_mode,
@@ -633,7 +645,15 @@ impl PlaylistPicker {
     /// Close without touching focus: the account changed under the panel.
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         if self.open.take().is_some() {
+            self.release_crate(cx);
             cx.notify();
+        }
+    }
+
+    /// The panel is gone: songs filed through it leave the Crate now.
+    fn release_crate(&self, cx: &mut Context<Self>) {
+        if let Some(model) = crate_list::handle(cx) {
+            model.update(cx, |m, cx| m.release(cx));
         }
     }
 
@@ -645,6 +665,7 @@ impl PlaylistPicker {
             Some(handle) => window.focus(&handle, cx),
             None => window.focus(&self.focus, cx),
         }
+        self.release_crate(cx);
         cx.notify();
     }
 
@@ -881,6 +902,7 @@ impl PlaylistPicker {
         self.remember(&ids, cx);
         if let Some(name) = plan.create {
             self.awaiting_create = Some(name.clone());
+            self.awaiting_filed = videos.clone();
             self.edits
                 .update(cx, |e, cx| e.create_songs(Edit::Create, name, videos, cx));
         }
@@ -967,6 +989,10 @@ impl PlaylistPicker {
                 if self.awaiting_create.as_deref() == Some(collection.title.as_str()) =>
             {
                 self.awaiting_create = None;
+                let filed = std::mem::take(&mut self.awaiting_filed);
+                if let (false, Some(model)) = (filed.is_empty(), crate_list::handle(cx)) {
+                    model.update(cx, |m, cx| m.filed(&filed, cx));
+                }
                 let id = bare_playlist_id(collection.id.as_str()).to_owned();
                 self.remember(std::slice::from_ref(&id), cx);
                 if std::mem::take(&mut self.awaiting_target) {
@@ -992,6 +1018,7 @@ impl PlaylistPicker {
             }
             EditEvent::Failed(Edit::Create) => {
                 self.awaiting_create = None;
+                self.awaiting_filed.clear();
                 self.awaiting_target = false;
             }
             _ => {}
