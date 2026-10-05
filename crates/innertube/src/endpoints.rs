@@ -29,6 +29,11 @@ pub const FILTER_COMMUNITY_PLAYLIST: &str = "EgeKAQQoAEABagoQAxAEEAoQCRAF";
 /// YouTube Music's own ("featured") playlists, the service's "Playlists" tab.
 pub const FILTER_FEATURED_PLAYLIST: &str = "EgeKAQQoADgBagwQAxAKEAkQBRAE";
 
+/// The `browse` `params` of the Library grids' own "Recently added" sort (field 99 wrapping
+/// `{1: 0, 2: 1}`; "A to Z" is `ggMGKgQIARAA`). Reading only: asking for an order writes nothing to
+/// the account.
+const LIBRARY_RECENTLY_ADDED: &str = "ggMGKgQIABAB";
+
 impl InnerTube {
     /// Raw `search` POST. `params` = a filter (None = the mixed, unfiltered search). context/08.
     ///
@@ -391,7 +396,17 @@ impl InnerTube {
         client: &YouTubeClient,
         browse_id: &str,
     ) -> Result<Vec<BrowseItem>, Error> {
-        let value = self.browse(client, Some(browse_id), None).await?;
+        self.library_grid_ordered(client, browse_id, None).await
+    }
+
+    /// [`Self::library_grid`] with the order asked for (`params` from the grid's own sort menu).
+    async fn library_grid_ordered(
+        &self,
+        client: &YouTubeClient,
+        browse_id: &str,
+        params: Option<&str>,
+    ) -> Result<Vec<BrowseItem>, Error> {
+        let value = self.browse(client, Some(browse_id), params).await?;
         // A card the grid hands out twice is fatal on the UI side: every library list is keyed by
         // browseId, and one repeat blanks the whole list (the sidebar, the Library page, the
         // add-to-playlist picker) with an each_key_duplicate. Only libraries past the first page
@@ -529,7 +544,17 @@ impl InnerTube {
         &self,
         client: &YouTubeClient,
     ) -> Result<Vec<BrowseItem>, Error> {
-        self.library_grid(client, "FEmusic_liked_playlists").await
+        // Left alone, this grid comes back A to Z (a library of 55 playlists did, in the order
+        // the app cached it), so "Recently added" had nothing to show. Ask for the order. A
+        // reply that is an error or empty is not trusted: the plain grid is read instead, so
+        // asking can never cost the list.
+        let asked = self
+            .library_grid_ordered(client, "FEmusic_liked_playlists", Some(LIBRARY_RECENTLY_ADDED))
+            .await;
+        match asked {
+            Ok(items) if !items.is_empty() => Ok(items),
+            _ => self.library_grid(client, "FEmusic_liked_playlists").await,
+        }
     }
 
     /// Saved albums grid (`FEmusic_liked_albums`). context/08. Needs login.
@@ -1258,6 +1283,21 @@ fn add_many_to_playlist_body(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_recently_added_params_read_as_order_0_kind_1_under_field_99() {
+        const ALPHABET: &[u8] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut bytes = Vec::new();
+        for chunk in super::LIBRARY_RECENTLY_ADDED.as_bytes().chunks(4) {
+            let n = chunk.iter().fold(0u32, |acc, c| {
+                acc << 6 | ALPHABET.iter().position(|a| a == c).unwrap() as u32
+            });
+            bytes.extend([(n >> 16) as u8, (n >> 8) as u8, n as u8]);
+        }
+        // field 99 (0x1a2 -> 82 03), length 6: { field 5 (2a), length 4: { 08 00, 10 01 } }
+        assert_eq!(bytes, [0x82, 0x03, 0x06, 0x2a, 0x04, 0x08, 0x00, 0x10, 0x01]);
+    }
+
     use serde_json::json;
 
     use super::*;
