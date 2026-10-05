@@ -406,14 +406,14 @@ fn the_search_page_renders_every_state_without_panicking(cx: &mut TestAppContext
 
 #[test]
 fn the_minimum_window_fits_both_side_blocks_and_the_centre() {
-    // 240 + 320 + 240 plus the bar padding and the gaps between the columns.
-    assert_eq!(apollo_app::ui::player_bar::MIN_BAR_WIDTH, 864.0);
+    // 280 + 320 + 280 plus the bar padding and the gaps between the columns.
+    assert_eq!(apollo_app::ui::player_bar::MIN_BAR_WIDTH, 944.0);
 }
 
 #[gpui::test]
 fn the_player_bar_columns_fit_the_window_and_the_transport_stays_centred(cx: &mut TestAppContext) {
     let (_player, _shell, vcx) = setup(cx);
-    for width in [864.0_f32, 1100.0, 1600.0] {
+    for width in [944.0_f32, 1100.0, 1600.0] {
         vcx.simulate_resize(gpui::size(gpui::px(width), gpui::px(720.0)));
         vcx.run_until_parked();
         let (left, centre, right) = (
@@ -743,7 +743,7 @@ fn the_player_bar_block_is_inert_without_a_track(cx: &mut TestAppContext) {
 #[gpui::test]
 fn at_the_minimum_window_now_playing_and_the_queue_do_not_overlap(cx: &mut TestAppContext) {
     let (_player, shell, vcx) = setup_with_queue(cx);
-    vcx.simulate_resize(gpui::size(gpui::px(864.0), gpui::px(480.0)));
+    vcx.simulate_resize(gpui::size(gpui::px(944.0), gpui::px(480.0)));
     shell.update(vcx, |s, cx| s.set_now_playing(true, cx));
     vcx.run_until_parked();
     let art = bounds(vcx, "now-playing-art");
@@ -758,7 +758,7 @@ fn at_the_minimum_window_now_playing_and_the_queue_do_not_overlap(cx: &mut TestA
 fn now_playing_shows_its_progress_row_and_transport_without_scrolling(cx: &mut TestAppContext) {
     let (_player, shell, vcx) = setup(cx);
     shell.update(vcx, |s, cx| s.set_now_playing(true, cx));
-    for (w, h) in [(864.0_f32, 480.0_f32), (864.0, 560.0), (1100.0, 720.0), (1400.0, 900.0)] {
+    for (w, h) in [(944.0_f32, 480.0_f32), (864.0, 560.0), (1100.0, 720.0), (1400.0, 900.0)] {
         vcx.simulate_resize(gpui::size(gpui::px(w), gpui::px(h)));
         vcx.run_until_parked();
         let (art, controls) = (bounds(vcx, "now-playing-art"), bounds(vcx, "np-controls"));

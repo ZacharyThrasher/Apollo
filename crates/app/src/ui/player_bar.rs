@@ -29,8 +29,8 @@ const TARGET_PILL_HEIGHT: f32 = 20.0;
 const TARGET_GLYPH: f32 = 12.0;
 /// Where the target pill records its bounds, so the picker it opens hangs from it.
 pub const TARGET_ANCHOR: &str = "bar-target-anchor";
-/// The slider narrows to this when the right block is at its minimum width and holds four
-/// buttons beside it (mini player, lyrics, queue, heart and mute at 32px, with their gaps).
+/// The slider narrows to this when the right block is at its minimum width and holds five
+/// buttons beside it (mini player, lyrics, queue, Crate, heart and mute at 32px, with their gaps).
 const VOLUME_MIN_WIDTH: f32 = 40.0;
 /// The centre column takes what the side blocks leave, between these bounds. (A fixed 40% plus
 /// two 30% sides plus the gaps overflowed the bar by the gaps' width.)
@@ -50,6 +50,8 @@ pub struct BarFocus {
     pub repeat: FocusHandle,
     pub mute: FocusHandle,
     pub queue: FocusHandle,
+    /// The Crate button, beside the queue's.
+    pub crate_dock: FocusHandle,
     pub lyrics: FocusHandle,
     pub mini: FocusHandle,
     pub like: FocusHandle,
@@ -85,6 +87,9 @@ pub struct PlayerBar {
     pub volume: Entity<SliderState>,
     pub queue_open: bool,
     pub on_queue_toggle: Rc<Handler>,
+    /// The docked Crate is open.
+    pub crate_open: bool,
+    pub on_crate_toggle: Rc<Handler>,
     /// Lyrics are on screen (Now Playing is open with lyrics chosen).
     pub lyrics_open: bool,
     pub on_lyrics_toggle: Rc<Handler>,
@@ -469,6 +474,27 @@ impl RenderOnce for PlayerBar {
                     let f = self.on_queue_toggle.clone();
                     move |w, cx| f(w, cx)
                 }),
+            )
+            .child(
+                div().debug_selector(|| "bar-crate".into()).child(
+                    button(
+                        "crate-panel",
+                        &self.focus.crate_dock,
+                        if self.crate_open {
+                            Icon::BoxFilled
+                        } else {
+                            Icon::BoxRegular
+                        },
+                        "Crate panel",
+                        true,
+                    )
+                    .icon_color(transport::on_off(self.crate_open))
+                    .toggled(self.crate_open)
+                    .on_click({
+                        let f = self.on_crate_toggle.clone();
+                        move |w, cx| f(w, cx)
+                    }),
+                ),
             );
 
         div()

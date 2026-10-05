@@ -176,7 +176,7 @@ pub mod layout {
     pub const PLAYER_BAR_ART: f32 = 56.0;
     /// Player bar left block: 30% of the window, clamped.
     pub const PLAYER_BAR_SIDE_FRACTION: f32 = 0.3;
-    pub const PLAYER_BAR_SIDE_MIN: f32 = 240.0;
+    pub const PLAYER_BAR_SIDE_MIN: f32 = 280.0;
     pub const PLAYER_BAR_SIDE_MAX: f32 = 360.0;
     pub const PLAY_BUTTON: f32 = 40.0;
     pub const QUEUE_PANEL_WIDTH: f32 = 320.0;

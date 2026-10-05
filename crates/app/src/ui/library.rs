@@ -50,6 +50,7 @@ use crate::ui::row_actions::{heart_action, more_slot, playlist_action, ACTION_SI
 use crate::ui::selection::{self, Click, Selection};
 use crate::ui::track_menu::{self, Command, Subject, TrackSubject};
 use crate::ui::skeleton;
+use crate::ui::song_drag::{self, SongDrag};
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{self, TextField, TextFieldEvent};
 use crate::ui::tooltip::Tooltip;
@@ -301,10 +302,12 @@ pub struct LibraryView {
 
 /// The song row being dragged to a new place in an editable playlist.
 #[derive(Clone)]
-struct DraggedRow {
+pub(crate) struct DraggedRow {
     from: usize,
     title: SharedString,
     artist: SharedString,
+    /// The song, for the docked Crate to take.
+    pub(crate) song: Option<SongDrag>,
 }
 
 struct DragGhost(DraggedRow);
@@ -2182,6 +2185,7 @@ impl LibraryView {
             ),
             _ => Subject::track(row.track.clone(), row.thumbnail.clone()),
         };
+        let song_subject = subject.clone();
         let draggable = editable.is_some()
             && !filtering
             && self
@@ -2193,6 +2197,7 @@ impl LibraryView {
             from: real,
             title: row.track.title.clone().into(),
             artist: artists.clone(),
+            song: SongDrag::of(&song_subject),
         };
         let actions = self.row_actions(
             ix,
@@ -2327,6 +2332,9 @@ impl LibraryView {
                     this.drop_row(dragged.from, ix, cx)
                 }))
         })
+        // The other rows drag their songs (every picked one, from a picked row) to the docked
+        // Crate; a row of a playlist of your own does so through its reorder payload.
+        .when(!draggable, |d| song_drag::draggable(d, &song_subject))
         .into_any_element()
     }
 

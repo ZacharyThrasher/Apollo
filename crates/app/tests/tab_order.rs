@@ -155,7 +155,7 @@ const NAV: [&str; 7] = [
     "nav-settings",
 ];
 /// The player bar, left to right. The seek slider is a stop only while a track has a length.
-const BAR: [&str; 12] = [
+const BAR: [&str; 13] = [
     "bar-now-playing",
     "bar-shuffle",
     "bar-previous",
@@ -168,8 +168,9 @@ const BAR: [&str; 12] = [
     "bar-mini",
     "bar-lyrics",
     "bar-queue",
+    "bar-crate",
 ];
-const BAR_PLAYING: [&str; 13] = [
+const BAR_PLAYING: [&str; 14] = [
     "bar-now-playing",
     "bar-shuffle",
     "bar-previous",
@@ -183,6 +184,7 @@ const BAR_PLAYING: [&str; 13] = [
     "bar-mini",
     "bar-lyrics",
     "bar-queue",
+    "bar-crate",
 ];
 
 /// Nav first, bar last, the page and panels between them; and Shift+Tab is the exact reverse.

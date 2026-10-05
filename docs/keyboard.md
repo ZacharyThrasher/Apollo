@@ -25,10 +25,32 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | C | Set the playing song aside in the Crate (in the queue, Library and Search lists: the song under the cursor) |
 | P | Add to playlist: open the picker for the playing song (in the queue, Library, Search and Crate lists: the song under the cursor). Settings > Playback > "P opens the playlist picker" switches it off |
 | A | Add to the target playlist: the playing song (in the queue, Library, Search and Crate lists: the song under the cursor; with 2 or more picked, all of them). With no target set the picker opens to choose one. Settings > Playlists > "A adds to the target playlist" switches it off. See "The target playlist" |
+| Ctrl+Shift+C | Show / hide the docked Crate on the right of the window (the Crate button in the player bar does the same). See "The docked Crate" |
 | Ctrl+Z | Undo the last queue change or playlist edit, whichever came last (see "Undo") |
 | Ctrl+Shift+Z or Ctrl+Y | Redo a queue change (playlist edits have no redo) |
 | Esc | Close Now Playing |
 | F11 | Fullscreen while Now Playing is open (leaves fullscreen when Now Playing closes) |
+
+## The docked Crate
+
+The Crate button in the player bar (or **Ctrl+Shift+C**) opens the Crate as a 320px panel on the
+right of the main window, in the queue panel's place: the two share that slot, one at a time, and
+the **Queue · Crate** tabs at the top of either swap them (opening the queue closes the Crate and
+the other way round). It stays open while you move between pages, and open or closed is
+remembered for the next run. It steps aside for Now Playing, which fills the window, and for the
+Crate page itself (the same list); below 1100px of window width it overlays the page's right edge
+instead of squeezing it.
+
+The list is the Crate page's, in the same order and with the same keys (a click on a row or Tab
+puts the cursor in it): Up/Down, Enter plays from there, L, P, A, Delete, Alt+Up/Down and
+multi-select all work, and More opens the usual song menu. The header has **Save as playlist…**
+and **Add all to…**.
+
+**Dragging songs in:** pick up a song (or, from a picked row, every picked song) in Search, a
+playlist, an album or the Songs tab and let go on the panel. A thin line shows where it lands;
+below the last row, or on the empty panel, is the bottom / the start. A song the Crate already
+holds moves to that place instead of being added twice. C still adds at the bottom. Rows of the
+panel drag to rearrange it, as on the page.
 
 ## Picking several songs
 
