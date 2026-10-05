@@ -270,7 +270,7 @@ fn k_sets_the_song_aside_and_the_skim_goes_on(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("k");
     assert_eq!(
         crate_ids(&page, vcx),
-        vec!["skim0000002".to_owned(), "skim0000001".to_owned()]
+        vec!["skim0000001".to_owned(), "skim0000002".to_owned()]
     );
 }
 

@@ -406,16 +406,16 @@ fn crate_ids(rows: &[crate::CrateRow]) -> Vec<&str> {
 }
 
 #[test]
-fn the_crate_round_trips_newest_first() {
+fn the_crate_round_trips_with_new_songs_at_the_bottom() {
     let mut store = Store::open_in_memory().unwrap();
     assert!(store.crate_load("acct").unwrap().is_empty());
     store.crate_add("acct", &crate_row("a", 10)).unwrap();
     store.crate_add("acct", &crate_row("b", 20)).unwrap();
-    // The same millisecond: the later insert is the newer.
+    // The same millisecond: the later insert still goes below.
     store.crate_add("acct", &crate_row("c", 20)).unwrap();
     let rows = store.crate_load("acct").unwrap();
-    assert_eq!(crate_ids(&rows), ["c", "b", "a"]);
-    assert_eq!(rows[2], crate_row("a", 10), "tracks come back whole");
+    assert_eq!(crate_ids(&rows), ["a", "b", "c"]);
+    assert_eq!(rows[0], crate_row("a", 10), "tracks come back whole");
 }
 
 #[test]
@@ -425,8 +425,72 @@ fn adding_a_song_twice_keeps_one_copy_where_it_was() {
     store.crate_add("acct", &crate_row("b", 20)).unwrap();
     store.crate_add("acct", &crate_row("a", 30)).unwrap();
     let rows = store.crate_load("acct").unwrap();
-    assert_eq!(crate_ids(&rows), ["b", "a"]);
-    assert_eq!(rows[1].added_ms, 10);
+    assert_eq!(crate_ids(&rows), ["a", "b"]);
+    assert_eq!(rows[0].added_ms, 10);
+}
+
+#[test]
+fn reordering_the_crate_is_kept_and_new_songs_still_go_below() {
+    let mut store = Store::open_in_memory().unwrap();
+    for (i, id) in ["a", "b", "c"].iter().enumerate() {
+        store.crate_add("acct", &crate_row(id, i as i64)).unwrap();
+    }
+    let order = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    store.crate_reorder("acct", &order(&["c", "a", "b"])).unwrap();
+    assert_eq!(crate_ids(&store.crate_load("acct").unwrap()), ["c", "a", "b"]);
+    store.crate_add("acct", &crate_row("d", 9)).unwrap();
+    assert_eq!(
+        crate_ids(&store.crate_load("acct").unwrap()),
+        ["c", "a", "b", "d"]
+    );
+    // A removal leaves a gap that changes nothing; a song the new order forgot keeps its place
+    // in the list rather than vanishing.
+    store.crate_remove("acct", "a").unwrap();
+    store.crate_reorder("acct", &order(&["b", "c"])).unwrap();
+    assert_eq!(crate_ids(&store.crate_load("acct").unwrap()), ["b", "c", "d"]);
+    // Another account is untouched.
+    store.crate_add("other", &crate_row("z", 1)).unwrap();
+    store.crate_reorder("acct", &order(&["z"])).unwrap();
+    assert_eq!(crate_ids(&store.crate_load("other").unwrap()), ["z"]);
+}
+
+#[test]
+fn migration_9_keeps_the_order_the_crate_page_showed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("apollo.sqlite");
+    {
+        // The schema as it was before the crate could be arranged: newest first by time.
+        let store = Store::open_with(&path, &MIGRATIONS[..8]).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 8);
+        for (acct, id, ms) in [
+            ("acct", "old", 10),
+            ("acct", "new", 30),
+            ("acct", "mid", 20),
+            ("acct", "tie", 20),
+            ("other", "x", 5),
+        ] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO crate_items (account_key, video_id, title, added_ms)
+                     VALUES (?1, ?2, ?2, ?3)",
+                    rusqlite::params![acct, id, ms],
+                )
+                .unwrap();
+        }
+    }
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), MIGRATIONS.last().unwrap().version);
+    // Newest on top, the later insert of a tie above the earlier, as the page showed.
+    assert_eq!(
+        crate_ids(&store.crate_load("acct").unwrap()),
+        ["new", "tie", "mid", "old"]
+    );
+    store.crate_add("acct", &crate_row("fresh", 99)).unwrap();
+    assert_eq!(
+        crate_ids(&store.crate_load("acct").unwrap()).last(),
+        Some(&"fresh")
+    );
 }
 
 #[test]
@@ -436,7 +500,7 @@ fn removing_and_clearing_the_crate() {
         store.crate_add("acct", &crate_row(id, i as i64)).unwrap();
     }
     store.crate_remove("acct", "b").unwrap();
-    assert_eq!(crate_ids(&store.crate_load("acct").unwrap()), ["c", "a"]);
+    assert_eq!(crate_ids(&store.crate_load("acct").unwrap()), ["a", "c"]);
     store.crate_clear("acct").unwrap();
     assert!(store.crate_load("acct").unwrap().is_empty());
     // The artists went with their songs.
