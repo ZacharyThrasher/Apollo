@@ -341,6 +341,56 @@ fn the_mini_player_opens_where_it_was_left_and_a_vanished_monitor_sends_it_home(
 }
 
 #[gpui::test]
+fn a_stretched_or_maximized_record_still_opens_the_mini_player_small_and_is_put_right(
+    cx: &mut TestAppContext,
+) {
+    // What a full-screen mini player left behind: the whole work area, maximized.
+    let store = MemoryStore::with(&[(KEY_MINI, "0,0,1535,1100,1")]);
+    let _world = setup(cx, Some(store.clone()));
+    let (handle, _vcx) = open_mini(cx);
+    let bounds = handle
+        .update(cx, |_, window, _| window.bounds())
+        .unwrap();
+    assert_eq!(
+        (f32::from(bounds.size.width), f32::from(bounds.size.height)),
+        (mini_player::WIDTH, mini_player::HEIGHT)
+    );
+    assert!(!handle.update(cx, |_, window, _| window.is_maximized()).unwrap());
+    // The bad row is replaced on this launch, not on the next move.
+    let row = store.get(KEY_MINI).expect("a row");
+    let healed = SavedWindow::decode(&row).expect("a valid record");
+    assert_eq!((healed.rect.w, healed.rect.h), (360.0, 96.0));
+    assert!(!healed.maximized);
+}
+
+#[gpui::test]
+fn a_mini_player_that_gets_stretched_shrinks_back_and_never_records_it(
+    cx: &mut TestAppContext,
+) {
+    let store = MemoryStore::with(&[]);
+    let _world = setup(cx, Some(store.clone()));
+    let (handle, vcx) = open_mini(cx);
+    vcx.simulate_resize(size(px(1535.0), px(1100.0)));
+    // Long enough for the poll to see it and for any save delay to run out.
+    for _ in 0..40 {
+        vcx.executor().advance_clock(mini_player::POLL);
+        vcx.run_until_parked();
+    }
+    let bounds = handle
+        .update(cx, |_, window, _| window.bounds())
+        .unwrap();
+    assert_eq!(
+        (f32::from(bounds.size.width), f32::from(bounds.size.height)),
+        (mini_player::WIDTH, mini_player::HEIGHT)
+    );
+    for text in store.writes_of(KEY_MINI) {
+        let saved = SavedWindow::decode(&text).expect("a valid record");
+        assert_eq!((saved.rect.w, saved.rect.h), (360.0, 96.0), "{text}");
+        assert!(!saved.maximized);
+    }
+}
+
+#[gpui::test]
 fn a_window_that_stops_moving_is_written_down_once(cx: &mut TestAppContext) {
     cx.update(Fonts::install);
     let store = MemoryStore::with(&[]);
@@ -350,7 +400,7 @@ fn a_window_that_stops_moving_is_written_down_once(cx: &mut TestAppContext) {
     };
     let backend: Arc<dyn SettingsBackend> = store.clone();
     shell.update_in(vcx, |s, window, cx| {
-        let sub = window_state::remember(window, cx, Some(backend), KEY_MAIN, true);
+        let sub = window_state::remember(window, cx, Some(backend), KEY_MAIN, None);
         s.keep(sub);
     });
     // A drag-resize is a stream of sizes; only where it ends up is kept.
