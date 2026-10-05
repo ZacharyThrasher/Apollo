@@ -421,7 +421,7 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                 {
                     let mut group = vec![item(Command::StartRadio, Icon::Radio, "Start radio")];
                     if facts.dig {
-                        group.push(item(Command::Dig, Icon::SearchRegular, "Dig from here"));
+                        group.push(item(Command::Dig, Icon::Radio, "Dig from here"));
                     }
                     group.push(item(
                         Command::AddToPlaylist,
