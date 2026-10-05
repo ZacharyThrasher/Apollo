@@ -16,7 +16,7 @@ use crate::crate_list::{CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
-    AddCurrentToPlaylist, CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward,
+    AddCurrentToPlaylist, AddCurrentToTarget, CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward,
     ShowShortcuts, SkimCancel, SkimCrate, SkimKeep, ToggleFullscreen, ToggleLyrics, ToggleMute,
     UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
@@ -49,6 +49,7 @@ use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::blocked_dialog::{self, BlockedDialog, BlockedDialogHandle};
 use crate::ui::cheat_sheet::{self, CheatSheet, CheatSheetHandle};
 use crate::ui::playlist_dialog::{self, DialogHandle, PlaylistDialog};
+use crate::target_playlist::{TargetHandle, TargetModel};
 use crate::ui::playlist_picker::{self, PickerHandle, PickerSong, PlaylistPicker};
 use crate::ui::queue_panel::QueuePanel;
 use crate::ui::related_pane::RelatedPane;
@@ -180,6 +181,7 @@ pub struct Shell {
     crate_model: Entity<CrateModel>,
     /// The artists the owner said not to play from radio, autoplay and the personal shelves.
     block_model: Entity<BlockModel>,
+    target_model: Entity<TargetModel>,
     crate_page: Entity<CratePage>,
     /// "Queue restored", after Ctrl+Z / Ctrl+Shift+Z.
     pill: Option<PillShown>,
@@ -274,6 +276,8 @@ impl Shell {
             mini: stop(cx, 29),
             lyrics: stop(cx, 29),
             queue: stop(cx, 29),
+            // Under the artist, in the block of the Now Playing button.
+            target: stop(cx, 19),
         };
         let progress = cx.new(|_| SliderState::default());
         let volume = cx.new(|_| SliderState::default());
@@ -293,6 +297,10 @@ impl Shell {
         let crate_model = cx.new(|_| CrateModel::new());
         cx.observe(&crate_model, |_, _, cx| cx.notify()).detach();
         cx.set_global(CrateHandle(crate_model.clone()));
+        let target_model =
+            cx.new(|cx| TargetModel::new(settings.clone(), writes.clone(), &edits, cx));
+        cx.observe(&target_model, |_, _, cx| cx.notify()).detach();
+        cx.set_global(TargetHandle(target_model.clone()));
         let block_model = cx.new(|_| BlockModel::new());
         cx.set_global(BlockHandle(block_model.clone()));
         let blocked_dialog =
@@ -615,6 +623,7 @@ impl Shell {
             search_account_live: false,
             crate_model,
             block_model,
+            target_model,
             crate_page,
             pill: None,
             pill_seq: 0,
@@ -684,6 +693,8 @@ impl Shell {
         // The Crate belongs to the chosen account (a moment without one keeps what shows).
         if let Some(key) = self.account_key(cx) {
             self.crate_model
+                .update(cx, |m, cx| m.set_account(Some(key.clone()), cx));
+            self.target_model
                 .update(cx, |m, cx| m.set_account(Some(key.clone()), cx));
             self.block_model
                 .update(cx, |m, cx| m.set_account(Some(key), cx));
@@ -1107,6 +1118,32 @@ impl Shell {
             window,
             cx,
         );
+    }
+
+    /// The A key: add the playing song to the target playlist (the picker opens to choose one
+    /// when there is none). The keys on a list's own cursor row are the list's.
+    fn add_current_to_target(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let track = self
+            .player
+            .read(cx)
+            .coordinator()
+            .and_then(|c| c.queue().current().map(|e| e.track.clone()));
+        let Some(track) = track else {
+            return;
+        };
+        let anchor = self
+            .now_playing_open
+            .then_some(crate::ui::now_playing::PLAYLIST_ANCHOR);
+        crate::target_playlist::add_songs(
+            vec![PickerSong::new(track.video_id.as_str(), track.title.clone())],
+            anchor,
+            window,
+            cx,
+        );
+    }
+
+    pub fn target_model(&self) -> &Entity<TargetModel> {
+        &self.target_model
     }
 
     pub fn crate_model(&self) -> &Entity<CrateModel> {
@@ -1623,6 +1660,15 @@ impl Render for Shell {
                     }
                 }
             })),
+            target: crate::target_playlist::pill_label(cx),
+            on_target: Rc::new(Box::new(|window, cx| {
+                playlist_picker::open_target(
+                    Vec::new(),
+                    Some(crate::ui::player_bar::TARGET_ANCHOR),
+                    window,
+                    cx,
+                );
+            })),
         };
 
         // A failed library write leaves a short error above the player bar.
@@ -1728,6 +1774,9 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &CrateCurrent, _, cx| this.crate_current(cx)))
             .on_action(cx.listener(|this, _: &AddCurrentToPlaylist, window, cx| {
                 this.add_current_to_playlist(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &AddCurrentToTarget, window, cx| {
+                this.add_current_to_target(window, cx)
             }))
             // Skim: K sets the song aside and the skim goes on, Enter keeps the song, Esc goes
             // back to what was playing. The keys only exist while the shell is "Skimming".

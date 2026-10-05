@@ -17,7 +17,7 @@ use crate::settings::{
     KEY_BADGES, SHOW_SHORTCUT_HINTS,
     MINI_COLLAPSE_ON_BLUR, MINI_DIM, MINI_FADE_CONTROLS, MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP,
     MINI_SHOW_LYRICS, MINI_SHOW_VOLUME, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES,
-    START_MINIMIZED_TO_TRAY,
+    START_MINIMIZED_TO_TRAY, TARGET_KEY, TARGET_PILL,
 };
 use crate::ui::account_page::{self, AccountPage};
 use crate::ui::audio_page::AudioPage;
@@ -107,7 +107,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(20, cx);
+        let h = self.handles(22, cx);
 
         let home_section = SettingsSection::new("Home")
             .row(self.bool_row(
@@ -127,14 +127,31 @@ impl Render for SettingsPage {
                 cx,
             ));
 
-        let playlists_section = SettingsSection::new("Playlists").row(self.bool_row(
-            "setting-more-like-this",
-            "Show More like this on playlists",
-            &MORE_LIKE_THIS,
-            &h[17],
-            accent,
-            cx,
-        ));
+        let playlists_section = SettingsSection::new("Playlists")
+            .row(self.bool_row(
+                "setting-more-like-this",
+                "Show More like this on playlists",
+                &MORE_LIKE_THIS,
+                &h[17],
+                accent,
+                cx,
+            ))
+            .row(self.bool_row(
+                "setting-target-key",
+                "A adds to the target playlist",
+                &TARGET_KEY,
+                &h[20],
+                accent,
+                cx,
+            ))
+            .row(self.bool_row(
+                "setting-target-pill",
+                "Show target playlist in player bar",
+                &TARGET_PILL,
+                &h[21],
+                accent,
+                cx,
+            ));
 
         let search_section = SettingsSection::new("Search")
             .row(self.bool_row(

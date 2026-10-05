@@ -32,6 +32,7 @@ use crate::library::writes::LibraryWrites;
 use crate::player::PlayerModel;
 use crate::shortcuts::{self, Scope};
 use crate::style::{self, color};
+use crate::target_playlist::TargetHandle;
 use crate::ui::anchor;
 use crate::ui::playlist_dialog::{self, Mode};
 use crate::ui::playlist_picker::{PlaylistPicker, PANEL_WIDTH};
@@ -222,6 +223,9 @@ pub enum Command {
     /// Opens the Edit playlist dialog (name, description, privacy).
     EditPlaylist,
     DeletePlaylist,
+    /// Make a playlist of the account's own the target that A adds to (or stop it being one).
+    SetTarget,
+    ClearTarget,
     RemoveFromPlaylist,
     /// Save the queue as a new playlist.
     SaveQueue,
@@ -281,6 +285,8 @@ pub struct Facts {
     pub song_saved: Option<bool>,
     /// Whether the artist the block item acts on is blocked now (its item then lets them back).
     pub artist_blocked: bool,
+    /// The playlist is the target playlist now (its item then clears the target).
+    pub is_target: bool,
 }
 
 /// The menu's items in groups (a separator sits between groups). `liked` is the song's heart.
@@ -318,6 +324,11 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             }
             out.push(vec![item(Command::CopyLink, Icon::Link, "Copy link")]);
             if facts.own_playlist {
+                out.push(vec![if facts.is_target {
+                    item(Command::ClearTarget, Icon::Dismiss, "Clear target")
+                } else {
+                    item(Command::SetTarget, Icon::PlaylistAdd, "Set as target")
+                }]);
                 out.push(vec![
                     item(Command::EditPlaylist, Icon::Edit, "Edit playlist\u{2026}"),
                     item(Command::DeletePlaylist, Icon::Delete, "Delete playlist\u{2026}"),
@@ -760,6 +771,10 @@ impl TrackMenu {
                     false,
                     Facts {
                         own_playlist: edits.is_editable(c),
+                        is_target: cx
+                            .try_global::<TargetHandle>()
+                            .and_then(|h| h.0.read(cx).target(cx))
+                            .is_some_and(|t| t.id == c.library_key()),
                         saved: edits.saved_state(c),
                         ..Facts::default()
                     },
@@ -1100,6 +1115,16 @@ impl TrackMenu {
             }
             (Command::DeletePlaylist, Subject::Collection(c)) => {
                 playlist_dialog::open(Mode::Delete(c), window, cx);
+            }
+            (Command::SetTarget, Subject::Collection(c)) => {
+                if let Some(handle) = cx.try_global::<TargetHandle>().map(|h| h.0.clone()) {
+                    handle.update(cx, |m, cx| m.set(c.library_key(), &c.title, cx));
+                }
+            }
+            (Command::ClearTarget, Subject::Collection(_)) => {
+                if let Some(handle) = cx.try_global::<TargetHandle>().map(|h| h.0.clone()) {
+                    handle.update(cx, |m, cx| m.clear(cx));
+                }
             }
             _ => {}
         }
@@ -1538,6 +1563,7 @@ mod tests {
                 vec![Play, Shuffle],
                 vec![AddToQueue, StartRadio],
                 vec![CopyLink],
+                vec![SetTarget],
                 vec![EditPlaylist, DeletePlaylist],
             ]
         );

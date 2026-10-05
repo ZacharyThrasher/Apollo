@@ -49,6 +49,7 @@ actions!(
         RemoveCursor,
         LikeCursor,
         PlaylistCursor,
+        TargetCursor,
         MoveCursorUp,
         MoveCursorDown
     ]
@@ -66,6 +67,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("a", TargetCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", MoveCursorDown, Some(KEY_CONTEXT)),
     ]);
@@ -503,6 +505,21 @@ impl CratePage {
         crate::ui::playlist_picker::open_songs(vec![song], None, window, cx);
     }
 
+    /// The A key: the song under the cursor to the target playlist.
+    fn target_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.cursor_index(cx) else {
+            return;
+        };
+        let Some(track) = self.crate_.read(cx).items().get(ix).map(|r| r.track.clone()) else {
+            return;
+        };
+        let song = crate::ui::playlist_picker::PickerSong::new(
+            track.video_id.as_str(),
+            track.title.clone(),
+        );
+        crate::target_playlist::add_songs(vec![song], None, window, cx);
+    }
+
     // ---- rows --------------------------------------------------------------------------
 
     fn rows(
@@ -913,6 +930,9 @@ impl Render for CratePage {
                 .on_action(cx.listener(|this, _: &LikeCursor, _, cx| this.like_cursor(cx)))
                 .on_action(cx.listener(|this, _: &PlaylistCursor, window, cx| {
                     this.playlist_cursor(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &TargetCursor, window, cx| {
+                    this.target_cursor(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &MoveCursorUp, _, cx| this.move_cursor(-1, cx)))
                 .on_action(cx.listener(|this, _: &MoveCursorDown, _, cx| this.move_cursor(1, cx)))

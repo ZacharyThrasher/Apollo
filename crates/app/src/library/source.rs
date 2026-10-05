@@ -13,6 +13,11 @@ use apollo_provider::{
 
 use crate::art::DecodedArt;
 
+/// The public video the editable-playlist list is asked about: the sheet is per video, and only
+/// its list of playlists is read. Read-only; it adds the video nowhere. The playlist picker asks
+/// about it too when it is opened to choose a target playlist with no song at hand.
+pub const PROBE_VIDEO: &str = "dQw4w9WgXcQ";
+
 /// One row of a collection's track list. `occurrence` is the row's own token: the same video
 /// may sit in a playlist twice, so paging dedups on it and never on the video id.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

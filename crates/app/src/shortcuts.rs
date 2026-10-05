@@ -148,6 +148,17 @@ pub const ENTRIES: &[Entry] = &[
         ],
     )
     .tips(&["Add to playlist"]),
+    entry(
+        "target",
+        "Add to target playlist",
+        Group::Collect,
+        &[
+            "AddCurrentToTarget",
+            "TargetSelected",
+            "AddRowToTarget",
+            "TargetCursor",
+        ],
+    ),
     entry("remove", "Remove", Group::Collect, &["RemoveCursor"]),
     entry(
         "move",

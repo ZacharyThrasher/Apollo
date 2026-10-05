@@ -43,7 +43,7 @@ use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::card::{heading, Card};
 use crate::ui::playing_row;
 use crate::ui::playlist_dialog::{self, Mode};
-use crate::ui::playlist_picker::PlaylistPicker;
+use crate::ui::playlist_picker::{PickerSong, PlaylistPicker};
 use crate::ui::row_actions::{heart_action, more_slot, playlist_action, ACTION_SIZE};
 use crate::ui::selection::{self, Click, Selection};
 use crate::ui::track_menu::{self, Command, Subject, TrackSubject};
@@ -74,6 +74,7 @@ actions!(
         LikeRow,
         CrateRow,
         AddRowToPlaylist,
+        AddRowToTarget,
         ExtendUp,
         ExtendDown,
         SelectAllRows,
@@ -98,6 +99,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("l", LikeRow, Some(LIST_CONTEXT)),
         KeyBinding::new("c", CrateRow, Some(LIST_CONTEXT)),
         KeyBinding::new("p", AddRowToPlaylist, Some(LIST_CONTEXT)),
+        KeyBinding::new("a", AddRowToTarget, Some(LIST_CONTEXT)),
         KeyBinding::new("shift-up", ExtendUp, Some(LIST_CONTEXT)),
         KeyBinding::new("shift-down", ExtendDown, Some(LIST_CONTEXT)),
         KeyBinding::new("ctrl-a", SelectAllRows, Some(LIST_CONTEXT)),
@@ -1139,6 +1141,31 @@ impl LibraryView {
             if let Some((track, thumbnail)) = this.selected_full_track(cx) {
                 crate::crate_list::add_track(&this.player, track, thumbnail, cx);
             }
+        }))
+        .on_action(cx.listener(|this, _: &AddRowToTarget, window, cx| {
+            if !crate::target_playlist::key_enabled(cx) {
+                return;
+            }
+            // Every picked song, or the cursor row's; the picker (with no target set) opens at
+            // the cursor row.
+            let songs: Vec<PickerSong> =
+                if this.selection_enabled(cx) && this.selection.is_bulk() {
+                    this.picked_songs(cx)
+                        .iter()
+                        .map(|s| PickerSong::new(s.track.video_id.as_str(), s.track.title.clone()))
+                        .collect()
+                } else {
+                    this.selected_track(cx)
+                        .map(|(video, title)| PickerSong::new(video, title))
+                        .into_iter()
+                        .collect()
+                };
+            crate::target_playlist::add_songs(
+                songs,
+                Some(&playlist_anchor(this.selected)),
+                window,
+                cx,
+            );
         }))
         .on_action(cx.listener(|this, _: &AddRowToPlaylist, window, cx| {
             if !this.picker.read(cx).key_enabled(cx) {

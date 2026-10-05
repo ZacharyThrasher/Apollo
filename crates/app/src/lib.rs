@@ -60,6 +60,7 @@ pub mod single_instance;
 #[cfg(windows)]
 pub mod smtc;
 pub mod style;
+pub mod target_playlist;
 pub mod thumbs;
 pub mod tray;
 #[cfg(windows)]
