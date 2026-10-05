@@ -350,8 +350,6 @@ fn the_device_row_lists_the_system_default_then_the_devices_and_choosing_saves_a
     cx: &mut TestAppContext,
 ) {
     let (page, vcx) = setup(cx, &[]);
-    // A tall window: the Audio rows sit below the Playback and Home rows.
-    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(1600.0)));
     settings_page(&page, vcx);
     click(vcx, "setting-output-device");
     assert!(menu_open(&page, vcx));
@@ -407,8 +405,6 @@ fn a_saved_device_that_is_not_plugged_in_reads_as_the_system_default(cx: &mut Te
 #[gpui::test]
 fn the_equalizer_switch_turns_it_on_and_off_and_remembers(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx, &[]);
-    // A tall window: the Audio rows sit below the Playback and Home rows.
-    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(1600.0)));
     settings_page(&page, vcx);
     assert!(!saved_eq(&page, vcx).enabled, "off by default");
 
@@ -435,8 +431,6 @@ fn the_equalizer_switch_turns_it_on_and_off_and_remembers(cx: &mut TestAppContex
 #[gpui::test]
 fn edit_opens_the_editor_without_flipping_the_switch_and_done_closes_it(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx, &[]);
-    // A tall window: the Audio rows sit below the Playback and Home rows.
-    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(1600.0)));
     settings_page(&page, vcx);
     click(vcx, "setting-equalizer-edit");
     assert!(on_screen(vcx, "equalizer-panel"), "the editor opens");
