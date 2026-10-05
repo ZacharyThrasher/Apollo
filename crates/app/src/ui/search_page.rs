@@ -750,6 +750,17 @@ impl SearchPage {
         }
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
             crate::crate_list::add_track(&self.player, song.track, song.thumbnail, cx);
+            self.advance(cx);
+        }
+    }
+
+    /// After C or A acted on the cursor row: the cursor steps to the next row (Settings >
+    /// Playlists), the last row staying put.
+    fn advance(&mut self, cx: &mut Context<Self>) {
+        let Some(at) = self.selected else { return };
+        let len = self.songs(cx).len();
+        if let Some(next) = crate::auto_advance::next_row(at, len, cx) {
+            self.select(next, cx);
         }
     }
 
@@ -771,7 +782,12 @@ impl SearchPage {
                 .collect()
         };
         let at = playlist_anchor(self.selected.unwrap_or_default());
+        let direct = !self.selection.is_bulk() && crate::target_playlist::has_target(cx);
         crate::target_playlist::add_songs(songs, Some(&at), window, cx);
+        // With no target the picker opens at this row to choose one, so the cursor stays.
+        if direct {
+            self.advance(cx);
+        }
     }
 
     fn playlist_selected(

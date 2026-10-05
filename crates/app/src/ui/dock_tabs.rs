@@ -58,6 +58,11 @@ impl DockFocus {
         Self(Rc::new([stop(cx), stop(cx)]))
     }
 
+    /// Whether the keyboard is on either segment.
+    pub fn any_focused(&self, window: &Window) -> bool {
+        self.0.iter().any(|h| h.is_focused(window))
+    }
+
     fn of(&self, dock: Dock) -> &FocusHandle {
         &self.0[dock.index()]
     }

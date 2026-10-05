@@ -233,6 +233,12 @@ pub fn key_enabled(cx: &App) -> bool {
         .is_none_or(|h| h.0.read(cx).key_enabled(cx))
 }
 
+/// There is a target playlist, so A adds straight to it instead of opening the picker.
+pub fn has_target(cx: &App) -> bool {
+    cx.try_global::<TargetHandle>()
+        .is_some_and(|h| h.0.read(cx).target(cx).is_some())
+}
+
 /// What the player bar's pill says, when there is a target and the pill is switched on.
 pub fn pill_label(cx: &App) -> Option<SharedString> {
     let handle = cx.try_global::<TargetHandle>()?;

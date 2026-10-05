@@ -242,6 +242,10 @@ pub struct Shell {
     crate_dock: PanelSlide,
     crate_dock_panel: Entity<CratePage>,
     crate_dock_store: Option<Arc<dyn SettingsBackend>>,
+    /// The Queue · Crate control's stops (shared with the queue panel).
+    dock_focus: DockFocus,
+    /// Where the keyboard was when Ctrl+Shift+C jumped into the docked Crate; Esc goes back.
+    dock_return: Option<FocusHandle>,
     /// Lyrics of the playing track, and the pane that shows them in Now Playing.
     lyrics: Entity<LyricsModel>,
     lyrics_pane: Entity<LyricsPane>,
@@ -350,6 +354,7 @@ impl Shell {
             cx.new(|cx| TargetModel::new(settings.clone(), writes.clone(), &edits, cx));
         cx.observe(&target_model, |_, _, cx| cx.notify()).detach();
         cx.set_global(TargetHandle(target_model.clone()));
+        cx.set_global(crate::auto_advance::AutoAdvanceHandle(settings.clone()));
         let block_model = cx.new(|_| BlockModel::new());
         cx.set_global(BlockHandle(block_model.clone()));
         let blocked_dialog =
@@ -482,6 +487,14 @@ impl Shell {
         });
         queue_panel.update(cx, |p, _| p.set_dock_tabs(dock_focus.clone(), on_dock_pick.clone()));
         crate_dock_panel.update(cx, |p, _| p.set_dock_tabs(dock_focus.clone(), on_dock_pick.clone()));
+        crate_dock_panel.update(cx, |p, _| {
+            p.set_on_leave(Rc::new(Box::new({
+                let weak = weak.clone();
+                move |window, cx| {
+                    let _ = weak.update(cx, |s, cx| s.leave_crate_dock(window, cx));
+                }
+            })))
+        });
         let lyrics = cx.new(|cx| LyricsModel::new(player.clone(), cx));
         let lyrics_pane = cx.new(|cx| LyricsPane::new(player.clone(), lyrics.clone(), cx));
         cx.observe(&lyrics_pane, |_, _, cx| cx.notify()).detach();
@@ -746,6 +759,8 @@ impl Shell {
             crate_dock: PanelSlide::default(),
             crate_dock_panel,
             crate_dock_store: None,
+            dock_focus: dock_focus.clone(),
+            dock_return: None,
             lyrics,
             lyrics_pane,
             related,
@@ -1721,6 +1736,61 @@ impl Shell {
         self.set_crate_dock(open, cx);
     }
 
+    /// Whether the docked Crate is on screen: open, and no page takes the window (Now Playing) or
+    /// shows the same list (the Crate page).
+    fn crate_dock_visible(&self) -> bool {
+        self.crate_dock.is_open() && !self.now_playing_open && self.route != Route::Crate
+    }
+
+    /// Whether the keyboard is somewhere in the docked Crate.
+    pub fn crate_dock_focused(&self, window: &Window, cx: &App) -> bool {
+        self.crate_dock_visible()
+            && (self.crate_dock_panel.read(cx).has_focus(window)
+                || self.dock_focus.any_focused(window))
+    }
+
+    /// Ctrl+Shift+C: open the docked Crate and put the cursor in it, on the row it was last on
+    /// (else the first); Esc goes back to where the keyboard was. With the dock already open and
+    /// focused it closes instead, and focus goes back too. On the Crate page, which is the same
+    /// list, the key only opens or closes the dock as before.
+    pub fn jump_crate_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.route == Route::Crate {
+            self.toggle_crate_dock(cx);
+            return;
+        }
+        if self.crate_dock_focused(window, cx) {
+            self.set_crate_dock(false, cx);
+            self.return_from_crate_dock(window, cx);
+            return;
+        }
+        let before = window.focused(cx);
+        self.set_crate_dock(true, cx);
+        let entered = self
+            .crate_dock_panel
+            .update(cx, |p, cx| p.enter(window, cx));
+        // Only a jump that landed has somewhere to come back from; a second press while the dock
+        // is already open but unfocused keeps the first place.
+        if entered {
+            self.dock_return = before.or(self.dock_return.take());
+        }
+    }
+
+    /// Esc in the docked list: the keyboard goes back to where the jump into it came from.
+    pub fn leave_crate_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.return_from_crate_dock(window, cx);
+    }
+
+    fn return_from_crate_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let queue_list = self.queue_panel.read(cx).focus_handle(cx);
+        match self.dock_return.take() {
+            // The queue went away when the Crate took its slot: there is nothing to land on.
+            Some(handle) if handle != queue_list || self.queue.is_open() => {
+                window.focus(&handle, cx)
+            }
+            _ => self.focus_main(window, cx),
+        }
+    }
+
     /// Open or close the docked Crate. Opening it takes the slot from the queue panel (and
     /// leaves Now Playing, which fills the window); the choice is remembered.
     pub fn set_crate_dock(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -2299,6 +2369,7 @@ impl Render for Shell {
             volume: self.volume.clone(),
             queue_open: self.queue.is_open() && !other_pane,
             crate_open: self.crate_dock.is_open(),
+            crate_count: self.crate_model.read(cx).len(),
             on_crate_toggle: Rc::new(Box::new({
                 let shell = shell.clone();
                 move |_, cx| shell.update(cx, |s, cx| s.toggle_crate_dock(cx))
@@ -2484,7 +2555,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_lyrics(cx)))
             .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| this.like_current(cx)))
             .on_action(cx.listener(|this, _: &CrateCurrent, _, cx| this.crate_current(cx)))
-            .on_action(cx.listener(|this, _: &ToggleCrateDock, _, cx| this.toggle_crate_dock(cx)))
+            .on_action(cx.listener(|this, _: &ToggleCrateDock, window, cx| this.jump_crate_dock(window, cx)))
             .on_action(cx.listener(|this, _: &AddCurrentToPlaylist, window, cx| {
                 this.add_current_to_playlist(window, cx)
             }))
@@ -2493,7 +2564,15 @@ impl Render for Shell {
             }))
             // Skim: K sets the song aside and the skim goes on, Enter keeps the song, Esc goes
             // back to what was playing. The keys only exist while the shell is "Skimming".
-            .on_action(cx.listener(|this, _: &SkimCrate, _, cx| this.crate_current(cx)))
+            .on_action(cx.listener(|this, _: &SkimCrate, _, cx| {
+                this.crate_current(cx);
+                // With auto-advance on, K also moves on to the next song.
+                if crate::auto_advance::enabled(cx) {
+                    this.player.update(cx, |m, cx| {
+                        m.skim_advance(cx);
+                    });
+                }
+            }))
             .on_action(cx.listener(|this, _: &SkimKeep, _, cx| {
                 this.player.update(cx, |m, cx| m.skim_keep(cx));
             }))

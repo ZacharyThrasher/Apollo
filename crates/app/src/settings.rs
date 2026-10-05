@@ -87,6 +87,10 @@ pub const MORE_LIKE_THIS: BoolSetting = BoolSetting::new("more_like_this", true)
 /// dialog, make a private "Oct 5 · Untitled" at once and open it with its title ready to rename.
 /// Off until the owner asks for it.
 pub const INSTANT_PLAYLISTS: BoolSetting = BoolSetting::new("instant_playlists", false);
+/// Playlists > Move to the next song after C, A or K: after C, A or K acts on a list's cursor
+/// row (Search, Library, queue, playlist, album, Crate) the cursor steps to the next row; Skim's
+/// K goes on to the next song. Picked songs keep the cursor where it is. Off leaves it be.
+pub const AUTO_ADVANCE: BoolSetting = BoolSetting::new("auto_advance", true);
 /// Window > Close to tray: the close button hides the window and playback continues.
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
@@ -170,6 +174,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     TARGET_PILL.key,
     MORE_LIKE_THIS.key,
     INSTANT_PLAYLISTS.key,
+    AUTO_ADVANCE.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
     PAUSE_ON_OTHER_AUDIO.key,
