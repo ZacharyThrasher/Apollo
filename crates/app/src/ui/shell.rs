@@ -475,6 +475,12 @@ impl Shell {
                         });
                     }
                 },
+                {
+                    let weak = weak.clone();
+                    move |_, cx| {
+                        let _ = weak.update(cx, |s, cx| s.show_route(Route::Crate, cx));
+                    }
+                },
                 cx,
             )
         });
@@ -643,6 +649,7 @@ impl Shell {
         };
         cx.observe(&duplicates_dialog, |_, _, cx| cx.notify()).detach();
         cx.set_global(DuplicatesDialogHandle(duplicates_dialog.clone()));
+        cx.set_global(crate::library::model::LibraryHandle(library.read(cx).model().clone()));
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&account, |this, _, cx| this.account_changed(cx))
             .detach();
@@ -1039,6 +1046,7 @@ impl Shell {
 
     /// Switch page (what the nav rail and the empty states' actions do).
     pub fn show_route(&mut self, route: Route, cx: &mut Context<Self>) {
+        crate::shelf_song::clear(cx);
         self.leave_opened_pages(cx);
         self.route = route;
         self.now_playing_open = false;
@@ -1510,8 +1518,26 @@ impl Shell {
         }
     }
 
-    /// The C key: set the playing song aside in the Crate (a song already there stays).
+    /// Song cards of a shelf are on screen (Home, Explore, or Related beside Now Playing).
+    fn shelf_cards_showing(&self, cx: &App) -> bool {
+        if self.now_playing_open {
+            return self.related_showing(cx);
+        }
+        matches!(self.route, Route::Home | Route::Explore)
+    }
+
+    /// The C key: set the song under the pointer aside in the Crate when a shelf's song card
+    /// has it (a card holding the keyboard took the key before it got here), else the playing
+    /// song. A song already there stays.
     fn crate_current(&mut self, cx: &mut Context<Self>) {
+        if self.shelf_cards_showing(cx) && crate::shelf_song::crate_hovered(cx) {
+            return;
+        }
+        self.crate_playing(cx);
+    }
+
+    /// Set the playing song aside in the Crate (Skim's K does this for the song being skimmed).
+    fn crate_playing(&mut self, cx: &mut Context<Self>) {
         let track = self
             .player
             .read(cx)
@@ -2648,7 +2674,7 @@ impl Render for Shell {
             // Skim: K sets the song aside and the skim goes on, Enter keeps the song, Esc goes
             // back to what was playing. The keys only exist while the shell is "Skimming".
             .on_action(cx.listener(|this, _: &SkimCrate, _, cx| {
-                this.crate_current(cx);
+                this.crate_playing(cx);
                 // With auto-advance on, K also moves on to the next song.
                 if crate::auto_advance::enabled(cx) {
                     this.player.update(cx, |m, cx| {
