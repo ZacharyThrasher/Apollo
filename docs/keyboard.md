@@ -22,6 +22,7 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Ctrl+L | Show / hide lyrics (opens Now Playing) |
 | L | Like / unlike the playing song |
 | C | Set a song aside in the Crate. On a Home, Explore or Related shelf: the song card the keyboard ring is on, else the one under the pointer (see "C from anywhere"). In the queue, Library and Search lists: the song under the cursor, and the cursor then steps to the next row (see "Auto-advance"). Anywhere else: the playing song |
+| D | Dig from here: the radio of the playing song, skimmed (in the queue, Library and Search lists: the song under the cursor or the pointer). Settings > Playlists > "Dig key" switches it off. See "Dig from here" |
 | P | Add to playlist: open the picker for the playing song (in the queue, Library, Search and Crate lists: the song under the cursor). Settings > Playback > "P opens the playlist picker" switches it off |
 | A | Add to the target playlist: the playing song (in the queue, Library, Search and Crate lists: the song under the cursor; with 2 or more picked, all of them). With no target set the picker opens to choose one. Settings > Playlists > "A adds to the target playlist" switches it off. See "The target playlist" |
 | Ctrl+Shift+C | Jump into the docked Crate: open it (if closed) and put the cursor on its list, on the row it was last on (else the first). Esc goes back to where you were; with the dock already focused the same key closes it and goes back too. The Crate button in the player bar only shows / hides it. See "The docked Crate" |
@@ -301,6 +302,7 @@ or search starts with none.
 | Enter | Play the row |
 | L | Like / unlike the row |
 | C | Set the row aside in the Crate (queue, Library, Search) |
+| D | Dig from the row's song (queue, Library, Search): see "Dig from here" |
 | Delete / Backspace | Remove the row (queue, Crate) |
 | Alt+Up / Alt+Down | Move the row one place up / down (up-next in the queue; the Crate; a playlist of your own). The row keeps the cursor. With songs picked on a playlist, all of them move one place together. |
 
@@ -351,6 +353,29 @@ Ctrl+Z does not touch a skim. The list is played in order with shuffle and repea
 as it lasts, and it is not saved: a restart brings back what was queued before. Skimmed songs are
 never added to YouTube Music history or the local stats. Settings > Playback > Skim (on) and
 Seconds per song (10, 20 or 30; default 20).
+
+### Dig from here
+
+One seed song, keep what fits: **D** (or the song menu's **Dig from here**) asks YouTube Music for the
+song's radio and **Skims** it at once. The player bar's pill reads "Digging · <song>".
+
+| Key | Does |
+|---|---|
+| D (queue, Library and Search lists: the song under the cursor, or under the pointer in a Library list; anywhere else: the playing song) | Start the dig. While skimming or digging it digs from the song being skimmed instead |
+| K | Keep the song in the Crate and move on (as in any skim; Settings > Playlists > "Move to the next song after C, A or K") |
+| Enter | Play this song for real; the rest of the radio plays on after it |
+| Esc | End the dig: back to the queue and the place you were at. Music that was paused stays paused |
+
+The radio is one request, sent only when D is pressed (never on hover, never at launch), and at most
+50 songs are skimmed. It leaves out songs already in the Crate, in the target playlist, in the
+library's Songs list, marked liked, or in the local play log (Settings > Playlists > "Leave out songs
+I already have"; the target playlist and Songs list count only once their page has been opened on
+this PC, because Dig asks YouTube for nothing else), and blocked artists' songs. When nothing is
+left the pill says "Nothing new in this radio". While YouTube is asking Apollo to slow down (its
+"too many requests" cooldown) D sends nothing and the pill says "YouTube is busy, try again
+shortly". Dig runs on Skim, so Settings > Playback > Skim off turns Dig off too; Settings >
+Playlists > "Dig key" off frees the D key and keeps the menu item. Skimmed songs never reach
+YouTube Music history or the stats, as in any skim.
 
 Undo covers what changes the queue: playing a new list (replacing it), Clear, Remove, reorder,
 Play next / Add to queue, Start radio (with the radio that follows it, as one step), and the
@@ -510,6 +535,7 @@ registered hotkey while the keys are held, so each press is one step.
 ## Where it lives
 
 - `crates/app/src/player/skim.rs`: Skim itself (the window, the ticker, Enter and Esc).
+- `crates/app/src/player/dig.rs`: Dig from here (the radio fetch, what it leaves out, the pill's words).
 - `crates/app/src/keymap.rs`: the in-app bindings (one key context predicate decides where they
   apply) and what each global hotkey does.
 - `crates/app/src/hotkeys_win.rs`: registers the global hotkeys with Windows (`global-hotkey` on

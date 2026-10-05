@@ -15,7 +15,7 @@ use std::time::Duration;
 use apollo_domain::model::{QueueEntryId, Track, VideoId};
 use apollo_domain::playback::{Event, Intent, Phase};
 use apollo_domain::queue::{Queue, QueueSnapshot, QueueSource, Repeat};
-use gpui::Context;
+use gpui::{Context, SharedString};
 
 use super::PlayerModel;
 
@@ -88,6 +88,8 @@ pub(super) struct Skim {
     before: Option<(QueueSnapshot, u64)>,
     /// Music was playing when Skim began: Esc starts it again.
     resume: bool,
+    /// The seed song's title when this skim is a dig (Skim over its radio): the pill says so.
+    dig: Option<SharedString>,
 }
 
 impl PlayerModel {
@@ -116,6 +118,11 @@ impl PlayerModel {
 
     pub fn skimming(&self) -> bool {
         self.skim.is_some()
+    }
+
+    /// The seed song's title while the skim running is a dig.
+    pub fn dig_seed(&self) -> Option<SharedString> {
+        self.skim.as_ref()?.dig.clone()
     }
 
     /// Whether the skim running is of the list that named itself `name` when it started (the
@@ -189,6 +196,18 @@ impl PlayerModel {
         source: Option<QueueSource>,
         cx: &mut Context<Self>,
     ) {
+        self.begin_skim(tracks, start, source, None, cx);
+    }
+
+    /// [`PlayerModel::start_skim_at`], as a dig when `dig` names the seed song.
+    pub(super) fn begin_skim(
+        &mut self,
+        tracks: Vec<Track>,
+        start: usize,
+        source: Option<QueueSource>,
+        dig: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
         if !self.skim_enabled || tracks.is_empty() || self.driver.is_none() {
             return;
         }
@@ -227,6 +246,7 @@ impl PlayerModel {
             start_ms: first,
             before,
             resume,
+            dig,
         });
         self.handle(
             Event::PlayContextAt {
@@ -278,7 +298,9 @@ impl PlayerModel {
         if !same || start >= tracks.len() {
             return false;
         }
-        self.start_skim_at(tracks.to_vec(), start, source.cloned(), cx);
+        // A song picked from a dig's list goes on digging from there.
+        let dig = self.dig_seed();
+        self.begin_skim(tracks.to_vec(), start, source.cloned(), dig, cx);
         true
     }
 

@@ -173,6 +173,10 @@ impl RenderOnce for PlayerBar {
         };
         // While skimming, a pill says where in the list it is.
         let skim_pill = v.skim.map(|skim| {
+            let label: SharedString = match &v.dig {
+                Some(seed) => crate::player::dig_pill_text(seed).into(),
+                None => skim.label().into(),
+            };
             style::text_style(div(), typography::CAPTION, cx)
                 .id("skim-pill")
                 .debug_selector(|| "skim-pill".into())
@@ -186,7 +190,7 @@ impl RenderOnce for PlayerBar {
                 .rounded(px(SKIM_PILL_HEIGHT / 2.0))
                 .bg(color::bg_overlay())
                 .text_color(color::text_secondary())
-                .aria_label(skim.label())
+                .aria_label(label.clone())
                 .child(
                     div()
                         .size(px(SKIM_DOT))
@@ -194,7 +198,7 @@ impl RenderOnce for PlayerBar {
                         .rounded_full()
                         .bg(accent_hsla),
                 )
-                .child(skim.label())
+                .child(label)
         });
         // The target playlist, under the artist: a pill that reopens the picker. Its own press is
         // its own, not the block's (which opens Now Playing).
