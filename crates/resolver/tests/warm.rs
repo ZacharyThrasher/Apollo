@@ -639,3 +639,111 @@ fn quitting_lets_idle_workers_exit_on_their_own() {
     drop(r.resolver.take());
     assert!(r.log_text().contains("SERVE QUIT"), "{}", r.log_text());
 }
+
+// ------------------------------------------------------------- 429: back off, do not hammer
+
+#[test]
+fn a_429_holds_back_the_next_load_without_asking_youtube_again() {
+    let mut r = rig(Opts::new("fail-429"));
+    r.start(0);
+    assert_eq!(r.result(WAIT).unwrap().1, Err(Failure::Throttled));
+    assert_eq!(r.count("SERVE RESOLVE START"), 1);
+    assert!(r.rs().cooldown_remaining().is_some());
+
+    // The click that follows (or a Retry) is refused on the spot: no request, still the same
+    // failure the player bar already knows how to say.
+    r.start(1);
+    assert_eq!(r.result(Duration::from_secs(2)).unwrap().1, Err(Failure::Throttled));
+    assert_eq!(r.count("SERVE RESOLVE START"), 1, "no second request during the cooldown");
+    let d = r.diag();
+    assert!(d.contains("throttled strikes=1 wait_s=30 background_wait_s="), "{d}");
+    assert!(d.contains("load held back: cooldown"), "{d}");
+}
+
+#[test]
+fn a_stream_found_through_a_fallback_client_after_a_429_still_backs_off() {
+    let mut r = rig(Opts::new("ok-throttled"));
+    r.start(0);
+    r.result(WAIT).unwrap().1.expect("the fallback client found a stream");
+    assert!(r.rs().cooldown_remaining().is_some(), "yt-dlp met a 429 on the way");
+}
+
+#[test]
+fn prefetch_stops_during_the_cooldown() {
+    let mut r = rig(Opts::new("fail-429"));
+    r.start(0);
+    assert_eq!(r.result(WAIT).unwrap().1, Err(Failure::Throttled));
+    for i in 1..4 {
+        let t = r.coordinator_requests[i].track.clone();
+        r.rs().prefetch(&t);
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(r.count("SERVE RESOLVE START"), 1, "speculation asked for nothing");
+    assert!(r.diag().contains("prefetch skipped reason=cooldown"), "{}", r.diag());
+}
+
+#[test]
+fn a_throttle_shared_with_another_caller_holds_back_the_resolver_too() {
+    let mut r = rig(Opts::new("ok"));
+    let shared = apollo_services_common::Throttle::new();
+    r.rs().set_throttle(shared.clone());
+    shared.report_throttled(Some(Duration::from_secs(120))); // e.g. InnerTube saw 429 + Retry-After
+    r.start(0);
+    assert_eq!(r.result(Duration::from_secs(2)).unwrap().1, Err(Failure::Throttled));
+    assert_eq!(r.count("SERVE RESOLVE START"), 0);
+    assert!(r.rs().cooldown_remaining().unwrap() > Duration::from_secs(100));
+}
+
+#[test]
+fn a_cached_stream_still_plays_during_the_cooldown() {
+    let mut r = rig(Opts::new("ok"));
+    let track = r.coordinator_requests[1].track.clone();
+    r.rs().prefetch(&track);
+    assert!(wait_until(WAIT, || r.rs().cached() == 1));
+    r.rs().set_throttle({
+        let t = apollo_services_common::Throttle::new();
+        t.report_throttled(None);
+        t
+    });
+    r.start(1);
+    r.result(WAIT).unwrap().1.expect("served from the cache: no request needed");
+}
+
+#[test]
+fn speculative_resolves_are_paced_even_without_a_429() {
+    let mut o = Opts::new("ok");
+    o.warm.max_workers = 4;
+    o.warm.background_limit = 4;
+    let mut r = rig(o);
+    for i in 0..8 {
+        let t = r.coordinator_requests[i].track.clone();
+        r.rs().prefetch(&t);
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        r.count("SERVE RESOLVE START"),
+        3,
+        "a burst of three, then one every six seconds: {}",
+        r.diag()
+    );
+    assert!(r.diag().contains("prefetch skipped reason="), "{}", r.diag());
+    // Playback is never rationed: a click on a fourth track still resolves at once.
+    r.start(9);
+    r.result(WAIT).unwrap().1.expect("lease");
+}
+
+#[test]
+fn only_two_prefetches_run_at_once() {
+    let mut o = Opts::new("ok");
+    o.delay_ms = 600;
+    o.warm.max_workers = 4;
+    o.warm.background_limit = 4;
+    let mut r = rig(o);
+    for i in 0..3 {
+        let t = r.coordinator_requests[i].track.clone();
+        r.rs().prefetch(&t);
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(r.count("SERVE RESOLVE START"), 2, "the third was dropped: {}", r.diag());
+}
