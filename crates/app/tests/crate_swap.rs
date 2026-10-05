@@ -247,6 +247,33 @@ fn picked_songs_are_the_only_ones_swapped_and_stay_picked(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn with_a_filter_on_the_header_swaps_only_the_songs_shown(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.shell.update(vcx, |s, cx| s.show_route(Route::Crate, cx));
+    vcx.run_until_parked();
+    let crate_page = page.shell.read_with(vcx, |s, _| s.crate_page().clone());
+    let field = crate_page
+        .read_with(vcx, |p, _| p.filter_field().cloned())
+        .expect("the Crate has a filter box");
+    field.update(vcx, |f, cx| f.set_text("Song b", cx));
+    vcx.run_until_parked();
+
+    let more = vcx.debug_bounds("crate-more").expect("the More button").center();
+    vcx.simulate_click(more, Modifiers::none());
+    vcx.run_until_parked();
+    let menu = page.shell.read_with(vcx, |s, _| s.menu().clone());
+    let commands = menu.read_with(vcx, |m, cx| m.commands(cx));
+    let at = commands
+        .iter()
+        .position(|c| *c == Command::SwapToExplicit)
+        .expect("the swap is in the header menu");
+    menu.update_in(vcx, |m, window, cx| m.choose(at, window, cx));
+    vcx.run_until_parked();
+    assert_eq!(ids(&page, vcx), ["a", "b2", "c"], "only the song the filter shows was looked up");
+    assert_eq!(pill(&page, vcx).as_deref(), Some("Swapped 1 of 1"));
+}
+
+#[gpui::test]
 fn a_row_offers_the_swap_only_while_it_is_not_explicit(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     let open = |vcx: &mut VisualTestContext, id: &str| {

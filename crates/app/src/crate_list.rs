@@ -27,6 +27,7 @@ use apollo_services_common::{Lane, Throttle};
 use apollo_store::CrateRow;
 use gpui::{App, Context, Entity, EventEmitter, Global};
 
+use crate::crate_arrange::Arrange;
 use crate::crate_swap::{self, Pick, Want};
 use crate::library::writes::{LibraryWrites, WritesEvent};
 use crate::player::PlayerModel;
@@ -644,6 +645,63 @@ impl CrateModel {
         self.items = rows;
         self.record(before, words.into(), cx);
         cx.notify();
+    }
+
+    /// One of the Arrange menu's rewrites of the whole Crate (a sort, shuffle, reverse or spread
+    /// of the artists), as one step for Ctrl+Z. Returns whether the order changed; the pill says
+    /// what was done, or that the Crate was in that order already.
+    pub fn arrange(&mut self, how: Arrange, cx: &mut Context<Self>) -> bool {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        self.arrange_seeded(how, seed, cx)
+    }
+
+    /// [`Self::arrange`] with the shuffle's seed given (tests).
+    pub fn arrange_seeded(&mut self, how: Arrange, seed: u64, cx: &mut Context<Self>) -> bool {
+        if self.items.len() < 2 {
+            return false;
+        }
+        let rows = how.apply(&self.items, seed);
+        if rows == self.items {
+            crate::confirm::arranged(how.already(), false, cx);
+            return false;
+        }
+        self.replace_all(rows, how.words(), cx);
+        crate::confirm::arranged(how.done(), true, cx);
+        true
+    }
+
+    /// Send songs to the top or the bottom, keeping the order they have among themselves. One
+    /// step for Ctrl+Z. Returns whether anything moved: songs already there stay put.
+    pub fn move_to_edge(&mut self, video_ids: &[String], top: bool, cx: &mut Context<Self>) -> bool {
+        let want: HashSet<&str> = video_ids.iter().map(String::as_str).collect();
+        let (moved, rest): (Vec<CrateRow>, Vec<CrateRow>) = self
+            .items
+            .iter()
+            .cloned()
+            .partition(|r| want.contains(r.track.video_id.as_str()));
+        if moved.is_empty() {
+            return false;
+        }
+        let count = moved.len();
+        let rows: Vec<CrateRow> = if top {
+            moved.into_iter().chain(rest).collect()
+        } else {
+            rest.into_iter().chain(moved).collect()
+        };
+        if rows == self.items {
+            return false;
+        }
+        let end = if top { "top" } else { "bottom" };
+        self.replace_all(rows, format!("moved {} to the {end} of the Crate", songs(count)), cx);
+        let said = match count {
+            1 => format!("Moved to {end}"),
+            n => format!("Moved {n} songs to {end}"),
+        };
+        crate::confirm::arranged(said, true, cx);
+        true
     }
 
     // ---- undo ----------------------------------------------------------------------------
@@ -1384,6 +1442,52 @@ mod tests {
             assert!(!m.insert_at(vec![(track("x"), None)], 1, cx));
             assert!(!m.insert_at(vec![(track("x"), None)], 2, cx));
             assert_eq!(ids(m), ["z", "x", "b", "a", "c", "y"]);
+        });
+    }
+
+    #[gpui::test]
+    fn an_arranged_order_and_a_move_to_an_end_are_what_is_stored_and_each_is_one_step(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::crate_arrange::{Arrange, SortKey};
+        let store = Arc::new(Memory::default());
+        let model = cx.new(|_| CrateModel::new());
+        model.update(cx, |m, cx| {
+            m.install(Some(store.clone()), cx);
+            m.set_account(Some("acct".into()), cx);
+            for id in ["c", "a", "d", "b"] {
+                m.add(track(id), None, cx);
+            }
+            assert!(m.arrange_seeded(Arrange::Sort(SortKey::Title), 1, cx));
+            assert_eq!(ids(m), ["a", "b", "c", "d"]);
+            assert!(!m.arrange_seeded(Arrange::Sort(SortKey::Title), 1, cx), "already sorted");
+            assert!(m.arrange_seeded(Arrange::Reverse, 1, cx));
+            assert_eq!(ids(m), ["d", "c", "b", "a"]);
+            // Two songs to the top keep their order among themselves; ones already there stay.
+            assert!(m.move_to_edge(&["a".into(), "c".into()], true, cx));
+            assert_eq!(ids(m), ["c", "a", "d", "b"]);
+            assert!(!m.move_to_edge(&["c".into()], true, cx), "already on top");
+            assert!(m.move_to_edge(&["c".into()], false, cx));
+            assert_eq!(ids(m), ["a", "d", "b", "c"]);
+            assert!(!m.move_to_edge(&["nope".into()], true, cx));
+        });
+        let stored = |store: &Memory| -> Vec<String> {
+            store.rows.lock().unwrap().iter().map(|(_, r)| r.track.video_id.as_str().to_owned()).collect()
+        };
+        for _ in 0..400 {
+            if stored(&store) == ["a", "d", "b", "c"] {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(stored(&store), ["a", "d", "b", "c"]);
+        // Each was one step, newest first.
+        model.update(cx, |m, cx| {
+            assert_eq!(m.undo(cx).as_deref(), Some("moved a song to the bottom of the Crate"));
+            assert_eq!(m.undo(cx).as_deref(), Some("moved 2 songs to the top of the Crate"));
+            assert_eq!(m.undo(cx).as_deref(), Some("reversed the Crate"));
+            assert_eq!(m.undo(cx).as_deref(), Some("sorted the Crate by title"));
+            assert_eq!(ids(m), ["c", "a", "d", "b"]);
         });
     }
 

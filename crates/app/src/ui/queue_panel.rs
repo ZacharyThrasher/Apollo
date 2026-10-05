@@ -572,6 +572,7 @@ impl QueuePanel {
                 thumbnail: None,
                 entry: (Some(r.id) != current).then_some(r.id),
                 playlist_row: None,
+                crate_row: false,
             })
             .collect()
     }
