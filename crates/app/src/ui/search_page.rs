@@ -45,7 +45,8 @@ use crate::ui::search_chips::ChipRow;
 use crate::ui::search_library::LibraryRow;
 use crate::ui::search_popover::{self, SearchPopover};
 use crate::ui::top_result::{self, TopCard};
-use crate::ui::track_menu::{self, Command, Subject};
+use crate::ui::selection::{self, Click, Selection};
+use crate::ui::track_menu::{self, Command, Subject, TrackSubject};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{self, TextField, TextFieldEvent};
@@ -65,6 +66,9 @@ actions!(
         PlaylistSelected,
         BackToField,
         PreviousSuggestion,
+        ExtendNext,
+        ExtendPrevious,
+        SelectAllSongs,
     ]
 );
 
@@ -85,6 +89,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("c", CrateSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("p", PlaylistSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("escape", BackToField, Some(RESULTS_CONTEXT)),
+        KeyBinding::new("shift-down", ExtendNext, Some(RESULTS_CONTEXT)),
+        KeyBinding::new("shift-up", ExtendPrevious, Some(RESULTS_CONTEXT)),
+        KeyBinding::new("ctrl-a", SelectAllSongs, Some(RESULTS_CONTEXT)),
     ]);
 }
 
@@ -139,6 +146,12 @@ pub struct SearchPage {
     scroll: ScrollHandle,
     /// The keyboard-selected song, shown only while the list holds focus.
     selected: Option<usize>,
+    /// The songs picked for bulk verbs (Shift/Ctrl+click, Shift+Arrows, Ctrl+A), by video id.
+    selection: Selection<String>,
+    /// What a picked row's More button and right-click open: the menu of the whole selection.
+    bulk_menu: Option<Subject>,
+    /// This page, for the closures of rows (which are drawn from `&self`).
+    this: gpui::WeakEntity<Self>,
     /// The popover under the field (recents or suggestions): the row under the keyboard or
     /// pointer, whether it was closed since the text last changed, and whether the field had
     /// focus when last drawn (gaining it brings the popover back).
@@ -179,6 +192,7 @@ impl SearchPage {
                 TextFieldEvent::Changed => {
                     let text = field.read(cx).text().to_owned();
                     this.selected = None;
+                    this.selection.clear();
                     this.active = None;
                     // Typing brings the popover back; a row picked a moment ago does not.
                     if this.picked.take().as_deref() != Some(text.as_str()) {
@@ -212,8 +226,9 @@ impl SearchPage {
                 (m.query().to_owned(), m.chip())
             };
             if view != this.shown {
-                // Another query or kind: the list starts at its top.
+                // Another query or kind: the list starts at its top, with nothing picked.
                 this.shown = view;
+                this.selection.clear();
                 this.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
             }
             this.request_thumbs(cx);
@@ -245,6 +260,9 @@ impl SearchPage {
             on_open,
             scroll: ScrollHandle::new(),
             selected: None,
+            selection: Selection::new(),
+            bulk_menu: None,
+            this: cx.weak_entity(),
             active: None,
             dismissed: false,
             field_was_focused: false,
@@ -309,6 +327,11 @@ impl SearchPage {
             .zip(&self.chip_focus)
             .find(|(_, focus)| focus.is_focused(window))
             .map(|(chip, _)| chip)
+    }
+
+    /// How many songs are picked for bulk verbs (tests and diagnostics).
+    pub fn picked(&self) -> usize {
+        self.selection.len()
     }
 
     /// The index of the keyboard-selected song, if any (tests and diagnostics).
@@ -520,15 +543,110 @@ impl SearchPage {
         if count == 0 {
             return;
         }
+        // The plain arrows only move the cursor: a picked set does not follow it.
+        self.selection.clear();
         let next = self.selected.map_or(0, |i| (i + 1).min(count - 1));
         self.select(next, cx);
     }
 
     fn select_previous(&mut self, _: &SelectPrevious, window: &mut Window, cx: &mut Context<Self>) {
+        self.selection.clear();
         match self.selected {
             Some(i) if i > 0 => self.select(i - 1, cx),
-            _ => self.back_to_field(&BackToField, window, cx),
+            _ => self.leave_list(window, cx),
         }
+    }
+
+    // ---- picking songs ---------------------------------------------------------------------
+
+    /// The key of every song on the list, top to bottom (a song is named by its video id).
+    fn song_keys(&self, cx: &App) -> Vec<String> {
+        self.songs(cx)
+            .iter()
+            .map(|s| s.track.video_id.as_str().to_owned())
+            .collect()
+    }
+
+    /// The picked songs in list order, as the track menu takes them.
+    fn picked_songs(&self, cx: &App) -> Vec<TrackSubject> {
+        let mut seen = std::collections::HashSet::new();
+        self.songs(cx)
+            .into_iter()
+            .filter(|s| {
+                let key = s.track.video_id.as_str().to_owned();
+                self.selection.contains(&key) && seen.insert(key)
+            })
+            .map(|s| TrackSubject::of_row(s.track, s.thumbnail, None))
+            .collect()
+    }
+
+    /// Drop picks that left the list and work out the selection's menu for this frame.
+    fn refresh_selection(&mut self, cx: &App) {
+        let keys = self.song_keys(cx);
+        self.selection.keep(&keys);
+        self.bulk_menu = if self.selection.is_bulk() {
+            Subject::tracks(self.picked_songs(cx))
+        } else {
+            None
+        };
+    }
+
+    /// A click on song `index` (Ctrl, Shift or plain; the row's own play is the art's and the
+    /// text's business).
+    fn row_clicked(&mut self, index: usize, how: Click, window: &mut Window, cx: &mut Context<Self>) {
+        let keys = self.song_keys(cx);
+        let Some(key) = keys.get(index) else {
+            return;
+        };
+        let cursor = self.selected.and_then(|i| keys.get(i));
+        if self.selection.click(how, key, cursor, &keys) {
+            // The keyboard carries on from the clicked row: Shift+Arrows, Ctrl+A and Esc work.
+            self.selected = Some(index);
+            window.focus(&self.results_focus, cx);
+            self.hint_selected(cx);
+        }
+        cx.notify();
+    }
+
+    fn extend_next(&mut self, _: &ExtendNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.extend_by(1, cx);
+    }
+
+    fn extend_previous(&mut self, _: &ExtendPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.extend_by(-1, cx);
+    }
+
+    /// Shift+Up / Shift+Down: the cursor moves and the picked rows stretch (or shrink) to it.
+    fn extend_by(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let keys = self.song_keys(cx);
+        if keys.is_empty() {
+            return;
+        }
+        let to = match self.selected {
+            Some(i) => (i as isize + delta).clamp(0, keys.len() as isize - 1) as usize,
+            None => 0,
+        };
+        let from = self.selected.and_then(|i| keys.get(i));
+        self.selection.extend(from, &keys[to], &keys);
+        self.select(to, cx);
+    }
+
+    /// Ctrl+A: every song on the list.
+    fn select_all(&mut self, _: &SelectAllSongs, _: &mut Window, cx: &mut Context<Self>) {
+        let keys = self.song_keys(cx);
+        self.selection.select_all(&keys);
+        cx.notify();
+    }
+
+    /// Run a menu verb on the picked songs, when two or more are picked. Whether it did.
+    fn run_bulk(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.selection.is_bulk() {
+            return false;
+        }
+        if let Some(subject) = Subject::tracks(self.picked_songs(cx)) {
+            track_menu::run_now(command, subject, window, cx);
+        }
+        true
     }
 
     /// The keyboard selection is resting on a song: have it ready in case it is played.
@@ -545,7 +663,17 @@ impl SearchPage {
         cx.notify();
     }
 
+    /// Esc: picked songs go first; with none picked it leaves the list.
     fn back_to_field(&mut self, _: &BackToField, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selection.is_empty() {
+            self.selection.clear();
+            cx.notify();
+            return;
+        }
+        self.leave_list(window, cx);
+    }
+
+    fn leave_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = None;
         text_field::focus(&self.field, window, cx);
         cx.notify();
@@ -561,7 +689,10 @@ impl SearchPage {
         }
     }
 
-    fn queue_selected(&mut self, _: &QueueSelected, _: &mut Window, cx: &mut Context<Self>) {
+    fn queue_selected(&mut self, _: &QueueSelected, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run_bulk(Command::AddToQueue, window, cx) {
+            return;
+        }
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
             self.player.update(cx, |m, cx| {
                 m.hint_art(song.track.video_id.as_str(), song.thumbnail.as_deref());
@@ -570,14 +701,20 @@ impl SearchPage {
         }
     }
 
-    fn like_selected(&mut self, _: &LikeSelected, _: &mut Window, cx: &mut Context<Self>) {
+    fn like_selected(&mut self, _: &LikeSelected, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run_bulk(Command::ToggleLike, window, cx) {
+            return;
+        }
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
             self.writes
                 .update(cx, |w, cx| w.toggle_like(song.track.video_id.as_str(), cx));
         }
     }
 
-    fn crate_selected(&mut self, _: &CrateSelected, _: &mut Window, cx: &mut Context<Self>) {
+    fn crate_selected(&mut self, _: &CrateSelected, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run_bulk(Command::AddToCrate, window, cx) {
+            return;
+        }
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
             crate::crate_list::add_track(&self.player, song.track, song.thumbnail, cx);
         }
@@ -589,6 +726,19 @@ impl SearchPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selection.is_bulk() {
+            // The picker opens at the cursor row, for every picked song.
+            let ids: Vec<String> = self
+                .picked_songs(cx)
+                .iter()
+                .map(|s| s.track.video_id.as_str().to_owned())
+                .collect();
+            let title = format!("{} songs", ids.len());
+            let at = anchor::bounds_of(&playlist_anchor(self.selected.unwrap_or_default()), cx);
+            self.picker
+                .update(cx, |p, cx| p.open_many(ids, title, at, window, cx));
+            return;
+        }
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
             let at = playlist_anchor(self.selected.unwrap_or_default());
             self.picker.update(cx, |p, cx| {
@@ -771,6 +921,8 @@ impl Render for SearchPage {
             .clone()
             .filter(|l| chip == SearchChip::All && !l.lead.is_empty());
 
+        self.refresh_selection(cx);
+
         // Every item is its own child of the scroll container, so a keyboard selection can
         // scroll to it.
         let body: Vec<AnyElement> = match (state, results) {
@@ -849,6 +1001,7 @@ impl Render for SearchPage {
             })
         });
 
+        let picked = self.selection.len();
         let fields_focus = self.results_focus.clone();
         div()
             .id("search-page")
@@ -892,7 +1045,20 @@ impl Render for SearchPage {
                         .with_priority(1)
                     })),
             )
-            .children(chips.map(|chips| div().flex_none().mt(px(spacing::S4)).child(chips)))
+            .children(chips.map(|chips| {
+                // "N selected" sits at the right end of the chip row while 2 or more are picked.
+                div()
+                    .flex_none()
+                    .mt(px(spacing::S4))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(chips)
+                    .children(selection::count_label(picked, cx).map(|label| {
+                        label.debug_selector(|| "search-selected-count".into())
+                    }))
+            }))
             .child(
                 div()
                     .id("search-results")
@@ -906,6 +1072,9 @@ impl Render for SearchPage {
                     .on_action(cx.listener(Self::crate_selected))
                     .on_action(cx.listener(Self::playlist_selected))
                     .on_action(cx.listener(Self::back_to_field))
+                    .on_action(cx.listener(Self::extend_next))
+                    .on_action(cx.listener(Self::extend_previous))
+                    .on_action(cx.listener(Self::select_all))
                     .role(gpui::Role::ListBox)
                     .aria_label("Search results")
                     .flex_1()
@@ -1545,9 +1714,22 @@ impl SearchPage {
                 .map(|d| format_time(d.as_millis() as u64)),
             thumb,
             selected: list_focused && self.selected == Some(index),
+            picked: self.selection.contains(&song.track.video_id.as_str().to_owned()),
             accent,
             liked: self.writes.read(cx).is_liked(song.track.video_id.as_str()),
-            menu: Subject::track(song.track.clone(), song.thumbnail.clone()),
+            menu: match &self.bulk_menu {
+                // A picked row speaks for every picked row.
+                Some(bulk) if self.selection.contains(&song.track.video_id.as_str().to_owned()) => {
+                    bulk.clone()
+                }
+                _ => Subject::track(song.track.clone(), song.thumbnail.clone()),
+            },
+            on_select: {
+                let this = self.this.clone();
+                Box::new(move |how, window, cx| {
+                    let _ = this.update(cx, |p, cx| p.row_clicked(index, how, window, cx));
+                })
+            },
             on_like: {
                 let (writes, video) = (self.writes.clone(), song.track.video_id.as_str().to_owned());
                 Box::new(move |_, cx| writes.update(cx, |w, cx| w.toggle_like(&video, cx)))
@@ -1731,10 +1913,14 @@ struct SongRow {
     duration: Option<String>,
     thumb: Thumb,
     selected: bool,
+    /// The song is one of the picked ones (drawn tinted).
+    picked: bool,
     accent: Accent,
     liked: bool,
     /// What the More button and a right-click offer.
     menu: Subject,
+    /// A click on the row: Ctrl and Shift pick, a plain click clears the picks.
+    on_select: Box<dyn Fn(Click, &mut Window, &mut App) + 'static>,
     on_like: RowAction,
     on_playlist: RowAction,
     on_play: RowAction,
@@ -1760,6 +1946,7 @@ impl RenderOnce for SongRow {
         let queue = self.on_queue;
         let intent = self.on_intent;
         let (on_like, on_playlist) = (self.on_like, self.on_playlist);
+        let on_select = self.on_select;
         let menu = self.menu;
         let liked = self.liked;
         let accent = color::accent(self.accent);
@@ -1777,7 +1964,12 @@ impl RenderOnce for SongRow {
             .overflow_hidden()
             .bg(color::bg_overlay())
             .cursor_pointer()
-            .on_click(move |_, window, cx| play_art(window, cx))
+            .on_click(move |event, window, cx| {
+                // Ctrl and Shift pick the row; only a plain click plays it.
+                if !Click::of_event(event).is_selecting() {
+                    play_art(window, cx)
+                }
+            })
             .child(tile(&self.thumb))
             .child(
                 div()
@@ -1805,7 +1997,11 @@ impl RenderOnce for SongRow {
             .flex_1()
             .min_w_0()
             .cursor_pointer()
-            .on_click(move |_, window, cx| play_info(window, cx))
+            .on_click(move |event, window, cx| {
+                if !Click::of_event(event).is_selecting() {
+                    play_info(window, cx)
+                }
+            })
             .child(
                 style::text_style(div(), typography::LIST_TITLE, cx)
                     .id(("song-title", id))
@@ -1892,12 +2088,15 @@ impl RenderOnce for SongRow {
                 "{}, {}",
                 self.title, self.artists
             )))
-            .aria_selected(self.selected)
+            .aria_selected(self.selected || self.picked)
+            .on_click(move |event, window, cx| on_select(Click::of_event(event), window, cx))
             // The art and the text play on click; assistive technology addresses the whole row.
             .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
                 play_row(window, cx)
             })
-            .bg(if self.selected {
+            .bg(if self.picked {
+                selection::row_tint(self.accent)
+            } else if self.selected {
                 color::state_selected()
             } else {
                 color::state_hover().opacity(level)

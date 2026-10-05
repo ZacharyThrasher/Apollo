@@ -30,6 +30,7 @@ pub mod search_chips;
 pub mod search_library;
 pub mod search_page;
 pub mod search_popover;
+pub mod selection;
 pub mod settings_page;
 pub mod settings_row;
 pub mod shell;

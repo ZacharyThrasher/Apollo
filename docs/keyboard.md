@@ -28,6 +28,26 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Esc | Close Now Playing |
 | F11 | Fullscreen while Now Playing is open (leaves fullscreen when Now Playing closes) |
 
+## Picking several songs
+
+On Search results and on a playlist page (albums, Library Songs, the Crate and the queue come
+later). The cursor row keeps its own ring; the picked rows are tinted with the accent.
+
+| Key | Does |
+|---|---|
+| Ctrl+click | Pick or un-pick a song (it also moves the cursor there) |
+| Shift+click | Pick everything from the last picked song to this one |
+| Shift+Up / Shift+Down | Move the cursor and stretch the picks to it (going back shrinks them) |
+| Ctrl+A | Pick every song in the list |
+| Esc | Clear the picks (the next Esc does what it did before: leave the list, close the page) |
+| Up / Down | Move the cursor and clear the picks |
+| L / C / P / Ctrl+Enter | With 2 or more picked: like all (or un-like when all are liked) / Crate all / Add all to a playlist (the picker opens at the cursor row) / Add all to the queue (Search) |
+
+With 2 or more picked, right-click on any picked row (or its More button) opens a menu for all
+of them: Play next, Add to queue, Add to playlist…, Add to Crate, Like, and on a playlist of your own Remove from
+playlist. A row that is not picked keeps its own menu. A plain click plays the song as before
+and clears the picks. Likes and removals go to the account one at a time.
+
 ## In lists
 
 | Key | Does |
