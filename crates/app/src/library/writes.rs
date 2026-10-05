@@ -43,6 +43,13 @@ pub enum WritesEvent {
     /// The service holds this like state for the track now (a write landed, or a read-back
     /// showed that one had). Liked Music follows these.
     LikeSettled { video_id: String, liked: bool },
+    /// A song's add to a playlist was answered: `added` is whether the service holds it now. A
+    /// page showing the playlist reads it again (landed) or takes the row it showed back (not).
+    PlaylistAddSettled {
+        playlist_id: String,
+        video_id: String,
+        added: bool,
+    },
 }
 
 /// A short error, shown for [`NOTICE_FOR`].
@@ -615,8 +622,13 @@ impl LibraryWrites {
                 if let Some(cache) = PageCache::try_global(cx) {
                     cache.invalidate_collection(&key.0);
                 }
-                if let Err(failure) = result {
-                    m.add_failed(&key, failure, cx);
+                match result {
+                    Ok(()) => cx.emit(WritesEvent::PlaylistAddSettled {
+                        playlist_id: key.0.clone(),
+                        video_id: key.1.clone(),
+                        added: true,
+                    }),
+                    Err(failure) => m.add_failed(&key, failure, cx),
                 }
             });
         })
@@ -630,6 +642,11 @@ impl LibraryWrites {
         cx: &mut Context<Self>,
     ) {
         self.added.remove(key);
+        cx.emit(WritesEvent::PlaylistAddSettled {
+            playlist_id: key.0.clone(),
+            video_id: key.1.clone(),
+            added: false,
+        });
         self.raise(add_failure_text(failure), cx);
         cx.notify();
     }

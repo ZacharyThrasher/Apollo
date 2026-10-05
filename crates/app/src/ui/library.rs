@@ -33,6 +33,7 @@ use apollo_domain::model::Track;
 use crate::library::edits::{EditEvent, LibraryEdits};
 use crate::library::source::{ArtistContent, TrackRow};
 use crate::library::writes::LibraryWrites;
+use crate::more_like::MoreLikeModel;
 use crate::motion::HoverFade;
 use crate::player::{format_time, PlayerModel};
 use crate::style::{self, color};
@@ -53,6 +54,7 @@ use crate::ui::tooltip::Tooltip;
 use crate::library::filter::Visible;
 
 mod artist;
+mod more_like;
 
 /// Where the add-to-playlist popover of track row `ix` is anchored.
 fn playlist_anchor(ix: usize) -> String {
@@ -151,6 +153,8 @@ struct Focus {
     retry: FocusHandle,
     /// The Playlists tab's New playlist button.
     new_playlist: FocusHandle,
+    /// "More like this" on a playlist page: its Refresh button.
+    more_refresh: FocusHandle,
     /// The artist page's Radio and Subscribe buttons, "Show all" and the bio.
     radio: FocusHandle,
     subscribe: FocusHandle,
@@ -226,6 +230,8 @@ pub struct LibraryView {
     player: Entity<PlayerModel>,
     writes: Entity<LibraryWrites>,
     picker: Entity<PlaylistPicker>,
+    /// The suggestions under a playlist of your own.
+    more: Entity<MoreLikeModel>,
     focus: Focus,
     playlists_scroll: UniformListScrollHandle,
     albums_scroll: UniformListScrollHandle,
@@ -341,6 +347,7 @@ impl LibraryView {
             description: stop(cx, 8),
             list: stop(cx, 9),
             retry: stop(cx, 10),
+            more_refresh: stop(cx, 11),
             new_playlist: stop(cx, 8),
             // Same slot as Shuffle (they follow it in the tree), then the list's, then the cards'.
             radio: stop(cx, 8),
@@ -350,6 +357,8 @@ impl LibraryView {
         };
         let model = cx.new(|cx| LibraryModel::new(player.clone(), writes.clone(), edits.clone(), cx));
         cx.observe(&model, |_, _, cx| cx.notify()).detach();
+        let more = cx.new(|cx| MoreLikeModel::new(player.clone(), model.clone(), writes.clone(), cx));
+        cx.observe(&more, |_, _, cx| cx.notify()).detach();
         // Hearts follow the likes made anywhere.
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         // The lists follow what is made, renamed, deleted and saved; hearts of the menu too.
@@ -368,6 +377,7 @@ impl LibraryView {
             player,
             writes,
             picker,
+            more,
             focus,
             playlists_scroll: UniformListScrollHandle::new(),
             albums_scroll: UniformListScrollHandle::new(),
@@ -1773,7 +1783,14 @@ impl LibraryView {
             // On a playlist of your own it is also where a row dropped last lands (a filter hides
             // some rows, so then rows cannot be dragged and there is no end to drop at).
             let footer = loading || failure.is_some() || skipped > 0 || (editable && !filtering);
-            self.render_list(visible + usize::from(footer), ListKind::Tracks, window, cx)
+            // A playlist of your own ends with its suggestions: more rows after the footer.
+            let suggestions = self.rail_rows(cx);
+            self.render_list(
+                visible + usize::from(footer) + suggestions,
+                ListKind::Tracks,
+                window,
+                cx,
+            )
         };
 
         div()
@@ -1837,6 +1854,9 @@ impl LibraryView {
         // playlist, so nothing is dragged while one is in use.
         let filtering = !self.filter_text(cx).is_empty();
         let Some(row) = row else {
+            if let Some(slot) = self.rail_slot(ix, cx) {
+                return self.rail_row(slot, frame, window, cx);
+            }
             return self.track_footer(
                 ix,
                 loading,
