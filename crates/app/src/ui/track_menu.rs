@@ -12,6 +12,7 @@
 //! up-next list for the radio when it arrives, so a radio that cannot be fetched costs nothing.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use apollo_domain::arrange::Edge;
 use apollo_domain::blocklist::BlockedArtist;
@@ -27,7 +28,7 @@ use gpui::{
 
 use crate::assets::Icon;
 use crate::library::edits::LibraryEdits;
-use crate::library::model::{ArtistTarget, Target};
+use crate::library::model::{ArtistTarget, LibraryHandle, Target};
 use crate::queue_source;
 use crate::library::writes::LibraryWrites;
 use crate::player::PlayerModel;
@@ -110,6 +111,11 @@ pub enum Subject {
     /// Two songs or more picked in a list (see `ui::selection`): the verbs act on all of them,
     /// in the list's order.
     Tracks(Vec<TrackSubject>),
+    /// The Library's Songs tab as a whole, from the More button of its header: its songs are
+    /// read from the Library when a verb runs (there can be thousands).
+    Songs,
+    /// A list of songs shown on a page (Explore's Top songs), from the More button of its header.
+    Loaded(Arc<Vec<TrackSubject>>),
 }
 
 /// An artist the menu is about.
@@ -245,6 +251,11 @@ pub enum Command {
     OpenOnYoutubeMusic,
     /// Keep the artist's songs out of radio, autoplay and the personal shelves (or let them back).
     BlockArtist,
+    /// Every song the page, tab or queue has loaded goes into the Crate (those held are skipped),
+    /// as one step for Ctrl+Z.
+    AddAllToCrate,
+    /// ... and then the Crate page opens (a playlist's songs, to rework there).
+    OpenInCrate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,6 +310,9 @@ pub struct Facts {
     pub artist_blocked: bool,
     /// The playlist is the target playlist now (its item then clears the target).
     pub is_target: bool,
+    /// How many songs the page, tab or queue the menu is about has loaded: Add all to Crate is
+    /// offered when there are some (see [`loaded_songs`]).
+    pub loaded: usize,
 }
 
 /// The menu's items in groups (a separator sits between groups). `liked` is the song's heart.
@@ -321,6 +335,13 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                     item(Command::StartRadio, Icon::Radio, "Start radio"),
                 ],
             ];
+            if facts.loaded > 0 {
+                let mut crate_ = vec![item(Command::AddAllToCrate, Icon::BoxRegular, "Add all to Crate")];
+                if matches!(subject, Subject::Collection(c) if c.kind == CollectionKind::Playlist) {
+                    crate_.push(item(Command::OpenInCrate, Icon::BoxFilled, "Open in Crate"));
+                }
+                out.push(crate_);
+            }
             match facts.saved {
                 Some(false) => out.push(vec![item(
                     Command::SaveToLibrary,
@@ -476,11 +497,36 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
             }
             out
         }
-        Subject::Queue => vec![vec![item(
-            Command::SaveQueue,
-            Icon::PlaylistAdd,
-            "Save as playlist\u{2026}",
-        )]],
+        Subject::Queue => {
+            let mut out = vec![vec![item(
+                Command::SaveQueue,
+                Icon::PlaylistAdd,
+                "Save as playlist\u{2026}",
+            )]];
+            if facts.loaded > 0 {
+                out.push(vec![item(
+                    Command::AddAllToCrate,
+                    Icon::BoxRegular,
+                    "Add queue to Crate",
+                )]);
+            }
+            out
+        }
+        Subject::Songs | Subject::Loaded(_) => {
+            let loaded = match subject {
+                Subject::Loaded(songs) => songs.len(),
+                _ => facts.loaded,
+            };
+            if loaded > 0 {
+                vec![vec![item(
+                    Command::AddAllToCrate,
+                    Icon::BoxRegular,
+                    "Add all to Crate",
+                )]]
+            } else {
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -534,7 +580,7 @@ pub fn link_of(subject: &Subject) -> String {
     match subject {
         Subject::Track(t) => links::track_url(&t.track.video_id),
         Subject::Collection(c) => links::collection_url(c),
-        Subject::Queue | Subject::Tracks(_) => String::new(),
+        Subject::Queue | Subject::Tracks(_) | Subject::Songs | Subject::Loaded(_) => String::new(),
         Subject::Artist(a) => format!("https://music.youtube.com/channel/{}", a.id.as_str()),
     }
 }
@@ -563,6 +609,49 @@ pub fn queue_video_ids(view: &crate::player::QueueView) -> Vec<String> {
         .map(|row| row.video_id.clone())
         .filter(|id| seen.insert(id.clone()))
         .collect()
+}
+
+/// The songs Add all to Crate takes from a menu's subject, and whether more are still on the way.
+pub struct LoadedSongs {
+    pub songs: Vec<(Track, Option<String>)>,
+    pub loading: bool,
+}
+
+/// What a subject has loaded right now, in its own order; `None` where the subject is not a page
+/// or a list. A playlist or album counts only while its own page is open (a card elsewhere has no
+/// rows). Reads the Library's and the queue's present state; asks for nothing.
+pub fn loaded_songs(subject: &Subject, player: &Entity<PlayerModel>, cx: &App) -> Option<LoadedSongs> {
+    let rows = |rows: &[&crate::library::source::TrackRow], loading| LoadedSongs {
+        songs: rows.iter().map(|r| (r.track.clone(), r.thumbnail.clone())).collect(),
+        loading,
+    };
+    match subject {
+        Subject::Collection(c) => {
+            let model = cx.try_global::<LibraryHandle>()?.0.read(cx);
+            let detail = model.detail().filter(|d| d.collection.library_key() == c.library_key())?;
+            Some(rows(&detail.listing.items().iter().collect::<Vec<_>>(), detail.is_loading()))
+        }
+        Subject::Songs => {
+            let model = cx.try_global::<LibraryHandle>()?.0.read(cx);
+            Some(rows(&model.songs_kept(), model.songs().is_loading()))
+        }
+        Subject::Loaded(songs) => Some(LoadedSongs {
+            songs: songs.iter().map(|s| (s.track.clone(), s.thumbnail.clone())).collect(),
+            loading: false,
+        }),
+        Subject::Queue => {
+            let view = player.read(cx).queue_view();
+            let songs = view
+                .history
+                .iter()
+                .chain(view.current.iter())
+                .chain(view.upcoming.iter())
+                .map(|row| (row.track.clone(), None))
+                .collect();
+            Some(LoadedSongs { songs, loading: false })
+        }
+        Subject::Track(_) | Subject::Tracks(_) | Subject::Artist(_) => None,
+    }
 }
 
 // ---- where it goes ---------------------------------------------------------------------------
@@ -729,6 +818,8 @@ pub struct TrackMenu {
     on_open: OpenTarget,
     on_remove_row: RemoveRow,
     on_arrange: ArrangeRows,
+    /// Opens the Crate page (Open in Crate).
+    on_open_crate: Rc<dyn Fn(&mut Window, &mut App)>,
     focus: FocusHandle,
     open: Option<Open>,
 }
@@ -746,6 +837,7 @@ impl TrackMenu {
         on_open: impl Fn(Target, &mut Window, &mut App) + 'static,
         on_remove_row: impl Fn(&Collection, &[String], &mut App) + 'static,
         on_arrange: impl Fn(&Collection, &[String], Edge, &mut App) + 'static,
+        on_open_crate: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
@@ -758,6 +850,7 @@ impl TrackMenu {
             on_open: Rc::new(on_open),
             on_remove_row: Rc::new(on_remove_row),
             on_arrange: Rc::new(on_arrange),
+            on_open_crate: Rc::new(on_open_crate),
             focus: cx.focus_handle(),
             open: None,
         }
@@ -829,6 +922,8 @@ impl TrackMenu {
                             .try_global::<duplicates_dialog::DuplicatesDialogHandle>()
                             .is_some_and(|h| h.0.read(cx).can_open(c, cx)),
                         saved: edits.saved_state(c),
+                        loaded: loaded_songs(&open.subject, &self.player, cx)
+                            .map_or(0, |l| l.songs.len()),
                         ..Facts::default()
                     },
                 )
@@ -845,7 +940,14 @@ impl TrackMenu {
                     ..Facts::default()
                 },
             ),
-            Subject::Queue => (false, Facts::default()),
+            Subject::Queue | Subject::Songs | Subject::Loaded(_) => (
+                false,
+                Facts {
+                    loaded: loaded_songs(&open.subject, &self.player, cx)
+                        .map_or(0, |l| l.songs.len()),
+                    ..Facts::default()
+                },
+            ),
         };
         groups_with(&open.subject, liked, facts)
     }
@@ -1151,7 +1253,11 @@ impl TrackMenu {
                 let artist = match &subject {
                     Subject::Track(t) => blocked_artist_of(&t.track),
                     Subject::Artist(a) => Some(a.blocked()),
-                    Subject::Collection(_) | Subject::Queue | Subject::Tracks(_) => None,
+                    Subject::Collection(_)
+                    | Subject::Queue
+                    | Subject::Tracks(_)
+                    | Subject::Songs
+                    | Subject::Loaded(_) => None,
                 };
                 if let (Some(artist), Some(model)) = (artist, crate::blocked_artists::handle(cx)) {
                     model.update(cx, |m, cx| {
@@ -1218,6 +1324,25 @@ impl TrackMenu {
             (Command::ClearTarget, Subject::Collection(_)) => {
                 if let Some(handle) = cx.try_global::<TargetHandle>().map(|h| h.0.clone()) {
                     handle.update(cx, |m, cx| m.clear(cx));
+                }
+            }
+            (Command::AddAllToCrate | Command::OpenInCrate, subject) => {
+                // Only what is loaded now: nothing here asks YouTube for more, and nothing
+                // starts resolving a song.
+                if let Some(loaded) = loaded_songs(&subject, &self.player, cx) {
+                    let songs = loaded
+                        .songs
+                        .into_iter()
+                        .map(|(track, thumbnail)| {
+                            let thumbnail = thumbnail
+                                .or_else(|| self.player.read(cx).art_url(track.video_id.as_str()));
+                            (track, thumbnail)
+                        })
+                        .collect();
+                    crate::crate_list::add_rows(songs, loaded.loading, cx);
+                    if command == Command::OpenInCrate {
+                        (self.on_open_crate.clone())(window, cx);
+                    }
                 }
             }
             _ => {}
@@ -1494,6 +1619,44 @@ mod tests {
             .iter()
             .map(|g| g.iter().map(|i| i.command).collect())
             .collect()
+    }
+
+    #[test]
+    fn add_all_to_crate_is_offered_only_where_rows_are_loaded() {
+        use Command::*;
+        let playlist = Collection {
+            kind: CollectionKind::Playlist,
+            id: BrowseId::new("VLPLx"),
+            title: "Mix".into(),
+            subtitle: None,
+            thumbnail: None,
+        };
+        let album = Collection {
+            kind: CollectionKind::Album,
+            ..playlist.clone()
+        };
+        let flat = |subject: &Subject, loaded| -> Vec<Command> {
+            groups_with(subject, false, Facts { loaded, ..Facts::default() })
+                .into_iter()
+                .flatten()
+                .map(|i| i.command)
+                .collect()
+        };
+        // A card with no rows loaded has neither item; an open playlist has both, an album one.
+        assert!(!flat(&Subject::Collection(playlist.clone()), 0).contains(&AddAllToCrate));
+        let open = flat(&Subject::Collection(playlist), 5);
+        let at = open.iter().position(|c| *c == AddAllToCrate).unwrap();
+        assert_eq!(open[at + 1], OpenInCrate);
+        let open_album = flat(&Subject::Collection(album), 5);
+        assert!(open_album.contains(&AddAllToCrate) && !open_album.contains(&OpenInCrate));
+        // The queue says "queue"; the Songs tab and a chart have just the one item.
+        let queue = groups_with(&Subject::Queue, false, Facts { loaded: 3, ..Facts::default() });
+        assert_eq!(queue[1][0].label, "Add queue to Crate");
+        assert_eq!(flat(&Subject::Queue, 0), [SaveQueue]);
+        assert_eq!(flat(&Subject::Songs, 9), [AddAllToCrate]);
+        assert!(flat(&Subject::Songs, 0).is_empty());
+        let chart = Subject::Loaded(Arc::new(vec![TrackSubject::of_row(song(false, false), None, None)]));
+        assert_eq!(flat(&chart, 0), [AddAllToCrate], "a chart knows its own songs");
     }
 
     #[test]

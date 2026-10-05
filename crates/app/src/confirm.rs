@@ -270,6 +270,28 @@ pub fn already_crated(cx: &mut App) {
     confirm("Already in Crate".to_owned(), false, Some((Place::Crate, Vec::new())), cx);
 }
 
+/// The pill for an add of many songs to the Crate: "Added 24 songs to Crate", "Added 18 · 6
+/// already in Crate" when some were held, "Already in Crate" when all were. `partial` marks a list
+/// that was still loading when it was read.
+pub fn crated_many_text(added: usize, held: usize, partial: bool) -> String {
+    let mut text = match (added, held) {
+        (0, _) => "Already in Crate".to_owned(),
+        (n, 0) => added_text(n, "Crate"),
+        (n, held) => format!("Added {n} · {held} already in Crate"),
+    };
+    if partial {
+        text.push_str(" · still loading");
+    }
+    text
+}
+
+/// Songs went into the Crate in one add (see [`crated_many_text`]); `held` is how many were in
+/// it already.
+pub fn crated_many(videos: Vec<String>, held: usize, partial: bool, cx: &mut App) {
+    let text = crated_many_text(videos.len(), held, partial);
+    confirm(text, false, Some((Place::Crate, videos)), cx);
+}
+
 /// Songs went into a playlist; the service has said so.
 pub fn added_to_playlist(playlist_id: &str, title: &str, count: usize, cx: &mut App) {
     let place = crate::target_playlist::is_target(playlist_id, cx).then_some((Place::Target, Vec::new()));
@@ -310,6 +332,11 @@ mod tests {
         assert_eq!(with_undo_hint("Added to Queue", true, true), "Added to Queue \u{b7} Ctrl+Z to undo");
         assert_eq!(with_undo_hint("Added to Queue", true, false), "Added to Queue");
         assert_eq!(with_undo_hint("Liked", false, true), "Liked");
+        assert_eq!(crated_many_text(24, 0, false), "Added 24 songs to Crate");
+        assert_eq!(crated_many_text(1, 0, false), "Added to Crate");
+        assert_eq!(crated_many_text(18, 6, false), "Added 18 · 6 already in Crate");
+        assert_eq!(crated_many_text(0, 6, false), "Already in Crate");
+        assert_eq!(crated_many_text(5, 0, true), "Added 5 songs to Crate · still loading");
     }
 
     #[test]

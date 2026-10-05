@@ -279,6 +279,12 @@ enum PageEdit {
     },
 }
 
+/// The Library's model, reachable from the track menu (which reads what a page has loaded).
+#[derive(Clone)]
+pub struct LibraryHandle(pub Entity<LibraryModel>);
+
+impl gpui::Global for LibraryHandle {}
+
 pub struct Detail {
     id: u64,
     pub collection: Collection,
@@ -566,6 +572,16 @@ impl LibraryModel {
             None if self.tab == Tab::Songs => &self.songs_shown,
             None => &[],
         }
+    }
+
+    /// The Songs tab's loaded songs in the chosen order that its filter box keeps (all of them
+    /// while it is empty): what Play takes, and what Add all to Crate does.
+    pub fn songs_kept(&self) -> Vec<&TrackRow> {
+        let kept = Visible::of(&self.songs_shown, &self.songs_query);
+        (0..kept.len())
+            .filter_map(|n| kept.get(n))
+            .filter_map(|i| self.songs_shown.get(i))
+            .collect()
     }
 
     /// Whether the Songs tab is what the overview shows.
