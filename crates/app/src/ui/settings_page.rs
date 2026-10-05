@@ -16,7 +16,8 @@ use crate::settings::{
     BoolSetting, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS, HUD_AUTO_HIDE,
     KEY_BADGES, SHOW_SHORTCUT_HINTS,
     MINI_COLLAPSE_ON_BLUR, MINI_DIM, MINI_FADE_CONTROLS, MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP,
-    MINI_SHOW_LYRICS, MINI_SHOW_VOLUME, MOOD_CHIPS, PERSONAL_SHELVES, START_MINIMIZED_TO_TRAY,
+    MINI_SHOW_LYRICS, MINI_SHOW_VOLUME, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES,
+    START_MINIMIZED_TO_TRAY,
 };
 use crate::ui::account_page::{self, AccountPage};
 use crate::ui::audio_page::AudioPage;
@@ -106,7 +107,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(19, cx);
+        let h = self.handles(20, cx);
 
         let home_section = SettingsSection::new("Home")
             .row(self.bool_row(
@@ -125,6 +126,15 @@ impl Render for SettingsPage {
                 accent,
                 cx,
             ));
+
+        let playlists_section = SettingsSection::new("Playlists").row(self.bool_row(
+            "setting-more-like-this",
+            "Show More like this on playlists",
+            &MORE_LIKE_THIS,
+            &h[17],
+            accent,
+            cx,
+        ));
 
         let search_section = SettingsSection::new("Search")
             .row(self.bool_row(
@@ -270,7 +280,7 @@ impl Render for SettingsPage {
                 "setting-shortcut-hints",
                 "Show shortcut hints",
                 &SHOW_SHORTCUT_HINTS,
-                &h[17],
+                &h[18],
                 accent,
                 cx,
             ))
@@ -278,7 +288,7 @@ impl Render for SettingsPage {
                 "setting-key-badges",
                 "Hold Ctrl for key badges",
                 &KEY_BADGES,
-                &h[18],
+                &h[19],
                 accent,
                 cx,
             ));
@@ -302,5 +312,6 @@ impl Render for SettingsPage {
             .child(discord_section)
             .child(keyboard_section)
             .child(self.data_page.clone())
+            .child(playlists_section)
     }
 }

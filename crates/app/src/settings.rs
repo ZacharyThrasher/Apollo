@@ -60,6 +60,9 @@ pub const PERSONAL_SHELVES: BoolSetting = BoolSetting::new("personal_shelves", t
 /// Home > Mood chips: the row of mood chips ("Relax", "Workout") under Home's title, which filter
 /// the feed the way YouTube Music's do. Off hides the row and shows the ordinary feed.
 pub const MOOD_CHIPS: BoolSetting = BoolSetting::new("mood_chips", true);
+/// Playlists > Show More like this: a playlist of your own ends with a short list of songs like
+/// its own, each with a + that adds it in place. Off hides the section and fetches nothing.
+pub const MORE_LIKE_THIS: BoolSetting = BoolSetting::new("more_like_this", true);
 /// Window > Close to tray: the close button hides the window and playback continues.
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
@@ -131,6 +134,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     KEY_RELATED_OPEN,
     ADD_PLAYS_TO_HISTORY.key,
     PERSONAL_SHELVES.key,
+    MORE_LIKE_THIS.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
     PAUSE_ON_OTHER_AUDIO.key,
