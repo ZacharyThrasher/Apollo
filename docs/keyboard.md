@@ -39,10 +39,10 @@ later). The cursor row keeps its own ring; the picked rows are tinted with the a
 | Ctrl+A | Pick every song in the list |
 | Esc | Clear the picks (the next Esc does what it did before: leave the list, close the page) |
 | Up / Down | Move the cursor and clear the picks |
-| L / C / Ctrl+Enter | With 2 or more picked: like all (or un-like when all are liked) / Crate all / Add all to the queue (Search) |
+| L / C / P / Ctrl+Enter | With 2 or more picked: like all (or un-like when all are liked) / Crate all / Add all to a playlist (the picker opens at the cursor row) / Add all to the queue (Search) |
 
 With 2 or more picked, right-click on any picked row (or its More button) opens a menu for all
-of them: Play next, Add to queue, Add to Crate, Like, and on a playlist of your own Remove from
+of them: Play next, Add to queue, Add to playlist…, Add to Crate, Like, and on a playlist of your own Remove from
 playlist. A row that is not picked keeps its own menu. A plain click plays the song as before
 and clears the picks. Likes and removals go to the account one at a time.
 

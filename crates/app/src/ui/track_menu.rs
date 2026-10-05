@@ -58,9 +58,9 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// Whether the playlist picker can take a list of songs. Until it does, a selection's menu has
-/// no Add to playlist\u{2026}.
-pub const PICKER_TAKES_MANY: bool = false;
+/// Whether the playlist picker can take a list of songs (`PlaylistPicker::open_many`). A
+/// selection's menu has Add to playlist\u{2026} while it can.
+pub const PICKER_TAKES_MANY: bool = true;
 
 pub const MENU_WIDTH: f32 = 220.0;
 pub const ITEM_HEIGHT: f32 = layout::MIN_HIT_TARGET;
@@ -924,6 +924,23 @@ impl TrackMenu {
             (Command::AddToQueue, Subject::Tracks(songs)) => {
                 let tracks = self.hinted_songs(songs, cx);
                 self.player.update(cx, |p, cx| p.add_tracks_to_queue(tracks, cx));
+            }
+            (Command::AddToPlaylist, Subject::Tracks(songs)) => {
+                // The picker opens where the menu was, for all of them, in list order.
+                let anchor = Bounds::new(
+                    point(px(at.left), px(at.top - ANCHOR_GAP)),
+                    gpui::size(px(PANEL_WIDTH), px(0.0)),
+                );
+                let mut seen = std::collections::HashSet::new();
+                let video_ids: Vec<String> = songs
+                    .iter()
+                    .map(|s| s.track.video_id.as_str().to_owned())
+                    .filter(|id| seen.insert(id.clone()))
+                    .collect();
+                let title = format!("{} songs", video_ids.len());
+                self.picker.update(cx, |p, cx| {
+                    p.open_many(video_ids, title, Some(anchor), window, cx)
+                });
             }
             (Command::AddToCrate, Subject::Tracks(songs)) => {
                 for song in songs {

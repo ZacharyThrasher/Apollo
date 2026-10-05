@@ -268,8 +268,8 @@ fn right_click_on_a_picked_row_opens_the_menu_of_the_selection(cx: &mut TestAppC
     right_click(vcx, at);
     assert_eq!(
         commands(&page, vcx),
-        [PlayNext, AddToQueue, AddToCrate, ToggleLike],
-        "no Add to playlist until the picker takes many, no Remove from playlist on Search"
+        [PlayNext, AddToQueue, AddToPlaylist, AddToCrate, ToggleLike],
+        "no Remove from playlist on Search"
     );
     match menu_subject(&page, vcx) {
         Some(Subject::Tracks(songs)) => {
@@ -458,6 +458,39 @@ fn plain_arrows_drop_the_picks_and_a_new_search_starts_clean(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn add_to_playlist_adds_every_picked_song_in_one_write(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    search(&page, vcx);
+    ctrl_click_song(vcx, 3);
+    ctrl_click_song(vcx, 1);
+    let at = song_at(vcx, 1);
+    right_click(vcx, at);
+    choose(&page, vcx, Command::AddToPlaylist);
+    vcx.run_until_parked();
+    let picker = page.shell.read_with(vcx, |s, _| s.picker().clone());
+    assert!(picker.read_with(vcx, |p, _| p.is_open()));
+    vcx.update(|window, cx| picker.update(cx, |p, cx| p.choose(0, window, cx)));
+    vcx.run_until_parked();
+    let added: Vec<String> = page.sim.added().into_iter().map(|(_, v)| v).collect();
+    assert_eq!(added, [FOUND[1], FOUND[3]], "in the list's order");
+    let writes: Vec<_> = page.sim.write_log().into_iter().filter(|(w, _)| w.starts_with("add")).collect();
+    assert_eq!(writes.len(), 1, "one request for the lot");
+}
+
+#[gpui::test]
+fn the_p_key_opens_the_picker_for_the_picked_songs(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    search(&page, vcx);
+    ctrl_click_song(vcx, 0);
+    ctrl_click_song(vcx, 2);
+    vcx.simulate_keystrokes("p");
+    vcx.run_until_parked();
+    let picker = page.shell.read_with(vcx, |s, _| s.picker().clone());
+    assert!(picker.read_with(vcx, |p, _| p.is_open()));
+    assert_eq!(picker.read_with(vcx, |p, _| p.video().map(str::to_owned)), Some(FOUND[0].to_owned()));
+}
+
+#[gpui::test]
 fn the_like_and_crate_keys_act_on_the_picked_songs(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     search(&page, vcx);
@@ -534,7 +567,7 @@ fn picking_on_a_playlist_page_and_removing_the_picked_songs(cx: &mut TestAppCont
     right_click(vcx, at);
     assert_eq!(
         commands(&page, vcx),
-        [PlayNext, AddToQueue, AddToCrate, ToggleLike, RemoveFromPlaylist]
+        [PlayNext, AddToQueue, AddToPlaylist, AddToCrate, ToggleLike, RemoveFromPlaylist]
     );
     choose(&page, vcx, RemoveFromPlaylist);
     vcx.run_until_parked();
@@ -578,7 +611,10 @@ fn another_persons_playlist_has_no_remove_in_the_selection_menu(cx: &mut TestApp
     ctrl_click_row(vcx, 1);
     let at = bounds(vcx, "library-row-1").center();
     right_click(vcx, at);
-    assert_eq!(commands(&page, vcx), [PlayNext, AddToQueue, AddToCrate, ToggleLike]);
+    assert_eq!(
+        commands(&page, vcx),
+        [PlayNext, AddToQueue, AddToPlaylist, AddToCrate, ToggleLike]
+    );
 }
 
 #[gpui::test]

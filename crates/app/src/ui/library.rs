@@ -1138,10 +1138,17 @@ impl LibraryView {
             }
         }))
         .on_action(cx.listener(|this, _: &AddRowToPlaylist, window, cx| {
-            if this.selection.is_bulk() {
-                if track_menu::PICKER_TAKES_MANY {
-                    this.run_bulk(Command::AddToPlaylist, window, cx);
-                }
+            if this.selection_enabled(cx) && this.selection.is_bulk() {
+                // The picker opens at the cursor row, for every picked song.
+                let ids: Vec<String> = this
+                    .picked_songs(cx)
+                    .iter()
+                    .map(|s| s.track.video_id.as_str().to_owned())
+                    .collect();
+                let title = format!("{} songs", ids.len());
+                let at = anchor::bounds_of(&playlist_anchor(this.selected), cx);
+                this.picker
+                    .update(cx, |p, cx| p.open_many(ids, title, at, window, cx));
                 return;
             }
             if let Some((video, title)) = this.selected_track(cx) {

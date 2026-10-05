@@ -727,9 +727,16 @@ impl SearchPage {
         cx: &mut Context<Self>,
     ) {
         if self.selection.is_bulk() {
-            if track_menu::PICKER_TAKES_MANY {
-                self.run_bulk(Command::AddToPlaylist, window, cx);
-            }
+            // The picker opens at the cursor row, for every picked song.
+            let ids: Vec<String> = self
+                .picked_songs(cx)
+                .iter()
+                .map(|s| s.track.video_id.as_str().to_owned())
+                .collect();
+            let title = format!("{} songs", ids.len());
+            let at = anchor::bounds_of(&playlist_anchor(self.selected.unwrap_or_default()), cx);
+            self.picker
+                .update(cx, |p, cx| p.open_many(ids, title, at, window, cx));
             return;
         }
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
