@@ -143,6 +143,30 @@ fn play_all_replaces_the_queue_and_starts_the_first_track_in_order(cx: &mut Test
 }
 
 #[gpui::test]
+fn skim_on_a_playlist_header_auditions_it_in_order(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open(&page, vcx, LIKED_MUSIC_BROWSE_ID);
+    let at = vcx
+        .debug_bounds("detail-skim")
+        .expect("a Skim button beside Play and Shuffle")
+        .center();
+    vcx.simulate_click(at, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(current_title(&page, vcx), "Midnight Drive");
+    assert_eq!(queue_len(&page, vcx), 6);
+    page.player.read_with(vcx, |m, _| {
+        let skim = m.view().skim.expect("skimming");
+        assert_eq!((skim.index, skim.total), (1, 6));
+        assert!(!m.coordinator().unwrap().queue().shuffle());
+    });
+    // Switched off in Settings, the button is gone.
+    page.player.update(vcx, |m, cx| m.set_skim_enabled(false, cx));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("detail-skim").is_none());
+    assert!(vcx.debug_bounds("detail-play").is_some());
+}
+
+#[gpui::test]
 fn shuffle_turns_shuffle_on_and_queues_every_track(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     open(&page, vcx, LIKED_MUSIC_BROWSE_ID);

@@ -164,16 +164,18 @@ pub fn progress(
     cx: &App,
 ) -> gpui::Div {
     let controls = v.status == Status::Ready && v.has_track;
-    let duration = v.duration_ms;
+    // While skimming the bar is the skim window, not the song.
+    let skim = v.skim;
+    let (position, duration) = v.progress_ms();
     let seekable = controls && duration.is_some_and(|d| d > 0);
     let scrub = state.read(cx).scrubbing();
     let shown_ms = match (scrub, duration) {
         (Some(f), Some(d)) => (f64::from(f) * d as f64) as u64,
-        _ => v.position_ms,
+        _ => position,
     };
     let fraction = duration
         .filter(|d| *d > 0)
-        .map_or(0.0, |d| (v.position_ms as f64 / d as f64).min(1.0) as f32);
+        .map_or(0.0, |d| (position as f64 / d as f64).min(1.0) as f32);
     div()
         .flex()
         .flex_row()
@@ -209,6 +211,7 @@ pub fn progress(
                             if committed {
                                 if let Some(d) = duration {
                                     let ms = (f64::from(frac) * d as f64).round() as u64;
+                                    let ms = skim.map_or(ms, |s| s.to_song(ms));
                                     p.update(cx, |m, cx| m.seek(ms, cx));
                                 }
                             }
