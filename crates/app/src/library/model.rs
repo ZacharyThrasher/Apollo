@@ -459,6 +459,7 @@ impl LibraryModel {
                 video_id,
                 added,
             } => m.playlist_add_settled(playlist_id, video_id, *added, cx),
+            WritesEvent::PlaylistAddedMany { .. } => {}
         })
         .detach();
         let mut model = Self {

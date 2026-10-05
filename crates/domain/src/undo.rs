@@ -151,32 +151,54 @@ impl UndoHistory {
     }
 }
 
-/// A number that only grows, from one call to the next anywhere in the process. The histories
-/// that are not the queue's (playlist edits, Crate swaps) stamp each step with one when they
-/// make it, which is how Ctrl+Z tells which of them is newest.
-pub fn next_seq() -> u64 {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
-}
-
-/// Which history Ctrl+Z takes from. The queue's steps and the playlist edits' steps are kept
-/// apart (different things to put back), but they are one line in time: the newest of either
-/// goes first. A playlist edit notes the queue history's [`UndoHistory::depth`] when it is
-/// made; queue steps recorded since then leave the depth above that note.
+/// Which history Ctrl+Z takes from. The queue's steps, the playlist edits' steps and the Crate's
+/// steps are kept apart (different things to put back), but they are one line in time: the
+/// newest of any goes first. A playlist or Crate step notes the queue history's
+/// [`UndoHistory::depth`] when it is made (queue steps recorded since then leave the depth above
+/// that note) and takes a number from [`tick`], which orders it against the other side history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Newest {
     Queue,
     Playlist,
+    Crate,
     Nothing,
 }
 
-/// The newest step of the two histories. `playlist_note` is the queue depth noted by the newest
-/// playlist step (`None`: there is none); `queue_depth` the queue history's depth now, and
+/// What a playlist or Crate history knows about its newest step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Side {
+    /// The queue history's depth when the step was made.
+    pub note: i64,
+    /// The step's number from [`tick`].
+    pub seq: u64,
+}
+
+/// A number that only grows: the order steps of different histories were made in.
+pub fn tick() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CLOCK: AtomicU64 = AtomicU64::new(0);
+    CLOCK.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// The newest step of the three histories. `playlist` and `crate_` describe the newest step of
+/// each (`None`: it has none); `queue_depth` is the queue history's depth now, and
 /// `queue_undoable` whether it has a step to take.
-pub fn newest(queue_depth: i64, queue_undoable: bool, playlist_note: Option<i64>) -> Newest {
-    match playlist_note {
-        Some(note) if queue_undoable && queue_depth > note => Newest::Queue,
-        Some(_) => Newest::Playlist,
+pub fn newest(
+    queue_depth: i64,
+    queue_undoable: bool,
+    playlist: Option<Side>,
+    crate_: Option<Side>,
+) -> Newest {
+    // The later of the two side histories is the one to compare with the queue.
+    let side = match (playlist, crate_) {
+        (Some(p), Some(c)) if c.seq > p.seq => Some((Newest::Crate, c)),
+        (Some(p), _) => Some((Newest::Playlist, p)),
+        (None, Some(c)) => Some((Newest::Crate, c)),
+        (None, None) => None,
+    };
+    match side {
+        Some((_, side)) if queue_undoable && queue_depth > side.note => Newest::Queue,
+        Some((which, _)) => which,
         None if queue_undoable => Newest::Queue,
         None => Newest::Nothing,
     }
@@ -437,24 +459,43 @@ mod tests {
         assert_eq!(h.depth(), 0);
     }
 
-    #[test]
-    fn the_newest_step_is_found_across_both_histories() {
-        // Nothing noted by a playlist step: the queue's, if it has one.
-        assert_eq!(newest(0, false, None), Newest::Nothing);
-        assert_eq!(newest(2, true, None), Newest::Queue);
-        // A playlist edit made at queue depth 2: queue steps since then go first.
-        assert_eq!(newest(3, true, Some(2)), Newest::Queue);
-        assert_eq!(newest(2, true, Some(2)), Newest::Playlist);
-        // Queue steps undone back below the note: the playlist edit is still the newest left.
-        assert_eq!(newest(1, true, Some(2)), Newest::Playlist);
-        // A queue that cannot undo (empty, or a skim) leaves the playlist step.
-        assert_eq!(newest(3, false, Some(2)), Newest::Playlist);
+    fn side(note: i64, seq: u64) -> Option<Side> {
+        Some(Side { note, seq })
     }
 
     #[test]
-    fn stamps_only_grow() {
-        let (a, b, c) = (next_seq(), next_seq(), next_seq());
-        assert!(a < b && b < c);
+    fn the_newest_step_is_found_across_both_histories() {
+        // Nothing noted by a playlist step: the queue's, if it has one.
+        assert_eq!(newest(0, false, None, None), Newest::Nothing);
+        assert_eq!(newest(2, true, None, None), Newest::Queue);
+        // A playlist edit made at queue depth 2: queue steps since then go first.
+        assert_eq!(newest(3, true, side(2, 1), None), Newest::Queue);
+        assert_eq!(newest(2, true, side(2, 1), None), Newest::Playlist);
+        // Queue steps undone back below the note: the playlist edit is still the newest left.
+        assert_eq!(newest(1, true, side(2, 1), None), Newest::Playlist);
+        // A queue that cannot undo (empty, or a skim) leaves the playlist step.
+        assert_eq!(newest(3, false, side(2, 1), None), Newest::Playlist);
+    }
+
+    #[test]
+    fn the_crate_is_in_the_same_line_of_time() {
+        // Only the Crate has a step: the same rules as a playlist's.
+        assert_eq!(newest(0, false, None, side(0, 1)), Newest::Crate);
+        assert_eq!(newest(3, true, None, side(2, 1)), Newest::Queue);
+        assert_eq!(newest(2, true, None, side(2, 1)), Newest::Crate);
+        // Both side histories: the later of the two, then against the queue.
+        assert_eq!(newest(2, true, side(2, 1), side(2, 2)), Newest::Crate);
+        assert_eq!(newest(2, true, side(2, 3), side(2, 2)), Newest::Playlist);
+        assert_eq!(newest(5, true, side(2, 3), side(4, 2)), Newest::Queue);
+        // The queue step came after the Crate's (depth above its note) but before the playlist
+        // edit that the Crate step is older than: the playlist edit is still the newest.
+        assert_eq!(newest(3, true, side(3, 9), side(2, 2)), Newest::Playlist);
+    }
+
+    #[test]
+    fn ticks_only_grow() {
+        let (a, b) = (tick(), tick());
+        assert!(b > a);
     }
 
     #[test]

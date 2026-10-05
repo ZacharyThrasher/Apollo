@@ -5,22 +5,54 @@
 //! It is local, kept in the app's SQLite store per account (see `apollo_store::CrateRow`), never
 //! written to YouTube. Reads come from memory; every change is written by one background thread
 //! in the order it was made. Signing out deletes it.
+//!
+//! Every change is a step for Ctrl+Z (see [`CrateModel::undo`]): the list as it was before, kept
+//! in memory for this session. The steps are one line in time with the queue's and the
+//! playlists' (`apollo_domain::undo::newest`).
+//!
+//! "File and forget": with Settings > Playlists > "Take songs out of the Crate once filed" on, a
+//! song the service confirms is in a playlist leaves the Crate ([`CrateModel::file`]), as one
+//! step for Ctrl+Z.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use apollo_domain::listing::LoadFailure;
 use apollo_domain::model::Track;
+use apollo_domain::undo::Side;
 use apollo_provider::{ListedTrack, SearchFilter};
 use apollo_store::CrateRow;
 use gpui::{App, Context, Entity, EventEmitter, Global};
 
 use crate::crate_swap::{self, Pick, Want};
+use crate::library::writes::{LibraryWrites, WritesEvent};
 use crate::player::PlayerModel;
 use crate::search::SearchSource;
-use crate::settings::SqliteSettings;
+use crate::settings::{SettingsModel, SqliteSettings, CRATE_FILE_AND_FORGET};
+
+/// How many changes to the Crate Ctrl+Z can take back.
+pub const UNDO_LIMIT: usize = 30;
+
+/// The Crate as it was before one change.
+struct Step {
+    before: Vec<CrateRow>,
+    /// What the change did, in words for "Undid: …".
+    words: String,
+    /// The queue history's depth when the change was made.
+    note: i64,
+    /// Where the change sits in time among the playlist edits.
+    seq: u64,
+}
+
+/// "a song" or "3 songs".
+fn songs(count: usize) -> String {
+    match count {
+        1 => "a song".to_owned(),
+        n => format!("{n} songs"),
+    }
+}
 
 /// Where the crate is kept. Blocking: call off the UI thread.
 pub trait CrateStore: Send + Sync {
@@ -32,8 +64,8 @@ pub trait CrateStore: Send + Sync {
     /// The whole crate as arranged now, top to bottom.
     fn reorder(&self, account_key: &str, video_ids: &[String]);
     fn remove(&self, account_key: &str, video_id: &str);
-    /// Put `row` in the place of the song `old_video_id` (another version of it, or the same
-    /// song with a corrected flag).
+    /// Put `row` where the song `old_video_id` stands (the same song, to correct what is known
+    /// of it).
     fn swap(&self, account_key: &str, old_video_id: &str, row: &CrateRow);
     fn clear(&self, account_key: &str);
     /// Delete every account's crate (sign-out).
@@ -119,6 +151,16 @@ pub struct CrateModel {
     items: Vec<CrateRow>,
     /// Bumped whenever the list is replaced, so a load that finishes late is dropped.
     epoch: u64,
+    /// What Ctrl+Z can take back, oldest first.
+    history: VecDeque<Step>,
+    /// Read for the queue history's depth, which steps note (see `apollo_domain::undo`).
+    player: Option<Entity<PlayerModel>>,
+    /// Read for "Take songs out of the Crate once filed".
+    settings: Option<Entity<SettingsModel>>,
+    /// Songs a picker is open for: filing them waits until it closes (see [`Self::hold`]).
+    held: HashSet<String>,
+    /// Songs filed while held, to leave the Crate when the picker closes.
+    waiting: Vec<String>,
     /// Where a swap looks for the other version of a song (see [`crate_swap`]).
     search: Option<Arc<dyn SearchSource>>,
     /// Settings > Playlists > Prefer explicit versions: a clean song added is swapped at once.
@@ -129,14 +171,15 @@ pub struct CrateModel {
     batch: Option<Batch>,
     /// A task is working through `jobs`.
     runner: bool,
-    /// What Ctrl+Z can take back, oldest first.
-    steps: VecDeque<SwapStep>,
-    /// Numbers batches and steps.
+    /// Numbers batches.
     serial: u64,
+    /// How long the runner waits between one pair of searches and the next.
+    pause: Duration,
+    /// How long searches stop after YouTube says it is busy.
+    cooldown: Duration,
+    /// Searches are stopped until then (YouTube said it is busy).
+    cooling_until: Option<Instant>,
 }
-
-/// How many batches Ctrl+Z can take back.
-const STEP_LIMIT: usize = 20;
 
 /// One song waiting to be looked up.
 #[derive(Clone, Debug)]
@@ -149,43 +192,32 @@ struct Job {
     epoch: u64,
 }
 
-/// A batch the owner started: how far it is, and the undo step its swaps go into.
+/// A batch the owner started. Its swaps are held until every song has been looked up, then
+/// made together as one step for Ctrl+Z.
 #[derive(Debug)]
 struct Batch {
     id: u64,
     want: Want,
     total: usize,
     done: usize,
-    swapped: usize,
     /// Songs the search showed to be that version already.
     already: usize,
     /// Searches that failed (the service could not be reached).
     errors: usize,
-    /// The queue history's depth when it started (see `domain::undo::newest`).
-    note: i64,
-    /// Its step in `steps`, made by the first swap.
-    step: Option<u64>,
-}
-
-/// What one batch changed: the song each swap put in, with the row it replaced.
-#[derive(Debug)]
-struct SwapStep {
-    id: u64,
-    /// Where the step sits in time among the other histories ([`apollo_domain::undo::next_seq`]).
-    seq: u64,
-    note: i64,
-    want: Want,
-    /// (video id now in the crate, the row it replaced), oldest swap first.
-    changes: Vec<(String, CrateRow)>,
+    /// (video id it replaces, the row to put there), in the order they were found.
+    found: Vec<(String, CrateRow)>,
 }
 
 enum Outcome {
-    Swapped,
+    /// A version was found and will take the song's place.
+    Found,
     /// The song is that version already (the crate had not known).
     Already,
-    /// Nothing changed: no match, already that version, or the song left the crate.
+    /// Nothing changed: no match, or the song left the crate.
     Unchanged,
     Failed,
+    /// YouTube said it is busy.
+    Throttled,
 }
 
 /// What starting a batch did.
@@ -199,6 +231,8 @@ pub enum SwapStart {
     Busy,
     /// There is no search to ask yet (the backend is not ready).
     NoSearch,
+    /// YouTube said it was busy a moment ago: searches wait.
+    Paused,
 }
 
 /// What the crate tells the window about swaps.
@@ -209,7 +243,15 @@ pub enum CrateEvent {
     /// A batch is under way.
     Progress { want: Want, done: usize, total: usize },
     /// A batch is over.
-    Finished { want: Want, swapped: usize, total: usize, already: usize, unreachable: bool },
+    Finished {
+        want: Want,
+        swapped: usize,
+        total: usize,
+        already: usize,
+        unreachable: bool,
+        /// Stopped by the service's "too many requests".
+        paused: bool,
+    },
 }
 
 impl EventEmitter<CrateEvent> for CrateModel {}
@@ -229,14 +271,43 @@ impl CrateModel {
             key: None,
             items: Vec::new(),
             epoch: 0,
+            history: VecDeque::new(),
+            player: None,
+            settings: None,
+            held: HashSet::new(),
+            waiting: Vec::new(),
             search: None,
             prefer_explicit: false,
             jobs: VecDeque::new(),
             batch: None,
             runner: false,
-            steps: VecDeque::new(),
             serial: 0,
+            pause: crate_swap::PAUSE,
+            cooldown: crate_swap::COOLDOWN,
+            cooling_until: None,
         }
+    }
+
+    /// Put the Crate in the app's line of undo steps and let it follow what is filed: `player`
+    /// says where the queue's history is, `writes` says when a song is in a playlist, and
+    /// `settings` whether that takes it out of the Crate.
+    pub fn follow(
+        &mut self,
+        player: Entity<PlayerModel>,
+        writes: &Entity<LibraryWrites>,
+        settings: Entity<SettingsModel>,
+        cx: &mut Context<Self>,
+    ) {
+        self.player = Some(player);
+        self.settings = Some(settings);
+        cx.subscribe(writes, |m, _, event, cx| match event {
+            WritesEvent::PlaylistAddSettled { video_id, added: true, .. } => {
+                m.filed(std::slice::from_ref(video_id), cx)
+            }
+            WritesEvent::PlaylistAddedMany { video_ids, .. } => m.filed(video_ids, cx),
+            _ => {}
+        })
+        .detach();
     }
 
     /// Where the crate is kept between runs. An account already chosen has its crate read now.
@@ -262,7 +333,6 @@ impl CrateModel {
         });
         self.store = store;
         self.epoch += 1;
-        self.reset_swaps();
         self.load(cx);
     }
 
@@ -274,8 +344,10 @@ impl CrateModel {
         }
         self.key = key;
         self.epoch += 1;
-        self.reset_swaps();
         self.items.clear();
+        self.history.clear();
+        self.waiting.clear();
+        self.reset_swaps();
         cx.notify();
         self.load(cx);
     }
@@ -307,6 +379,8 @@ impl CrateModel {
                         .into_iter()
                         .filter(|r| !stored.contains(r.track.video_id.as_str())),
                 );
+                // Steps made while this was loading hold a list that was missing what was stored.
+                m.history.clear();
                 cx.notify();
             });
         })
@@ -317,8 +391,10 @@ impl CrateModel {
     pub fn forget(&mut self, cx: &mut Context<Self>) {
         self.key = None;
         self.epoch += 1;
-        self.reset_swaps();
         self.items.clear();
+        self.history.clear();
+        self.waiting.clear();
+        self.reset_swaps();
         if let Some(writer) = &self.writer {
             let _ = writer.send(Write::Purge);
         }
@@ -370,6 +446,7 @@ impl CrateModel {
         if self.contains(track.video_id.as_str()) {
             return false;
         }
+        let before = self.items.clone();
         let video = track.video_id.as_str().to_owned();
         let row = CrateRow {
             explicit: explicit || crate::explicit_marks::is_explicit(&video),
@@ -381,6 +458,7 @@ impl CrateModel {
             let _ = writer.send(Write::Add(key.clone(), Box::new(row.clone())));
         }
         self.items.push(row);
+        self.record(before, "added a song to the Crate".to_owned(), cx);
         cx.notify();
         self.auto_swap(vec![video], cx);
         true
@@ -388,21 +466,18 @@ impl CrateModel {
 
     /// Drop songs into the crate before what is at slot `slot` now (`len` or more means the
     /// bottom). A song already in the crate moves there instead of being added twice; the songs
-    /// keep the order they are given in. Returns whether anything changed.
+    /// keep the order they are given in. Returns whether anything changed. One step for Ctrl+Z.
     pub fn insert_at(
         &mut self,
-        songs: Vec<(Track, Option<String>)>,
+        songs_in: Vec<(Track, Option<String>)>,
         slot: usize,
         cx: &mut Context<Self>,
     ) -> bool {
-        let before = self
-            .items
-            .iter()
-            .map(|r| r.track.video_id.as_str().to_owned())
-            .collect::<Vec<_>>();
+        let before = self.items.clone();
+        let asked = songs_in.len();
+        let mut added_ids: Vec<String> = Vec::new();
         let mut slot = slot.min(self.items.len());
-        let mut fresh = Vec::new();
-        for (track, thumbnail) in songs {
+        for (track, thumbnail) in songs_in {
             let video = track.video_id.as_str();
             if let Some(at) = self.items.iter().position(|r| r.track.video_id.as_str() == video) {
                 // Already here: it moves to the drop point (the slot is counted in the list as it
@@ -413,7 +488,6 @@ impl CrateModel {
                 }
                 self.items.insert(slot, row);
             } else {
-                fresh.push(video.to_owned());
                 let row = CrateRow {
                     explicit: crate::explicit_marks::is_explicit(video),
                     track,
@@ -423,24 +497,30 @@ impl CrateModel {
                 if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
                     let _ = writer.send(Write::Add(key.clone(), Box::new(row.clone())));
                 }
+                added_ids.push(row.track.video_id.as_str().to_owned());
                 self.items.insert(slot, row);
             }
             slot += 1;
         }
-        let after = self
-            .items
-            .iter()
-            .map(|r| r.track.video_id.as_str().to_owned())
-            .collect::<Vec<_>>();
-        if before == after {
+        let ids = |rows: &[CrateRow]| {
+            rows.iter()
+                .map(|r| r.track.video_id.as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        if ids(&before) == ids(&self.items) {
             return false;
         }
         self.save_order();
+        let words = if !added_ids.is_empty() {
+            format!("added {} to the Crate", songs(added_ids.len()))
+        } else {
+            format!("moved {} in the Crate", songs(asked))
+        };
+        self.record(before, words, cx);
         cx.notify();
-        self.auto_swap(fresh, cx);
         // Songs that were not in the crate before are the ones added (the rest only moved).
-        let added: Vec<String> = after.into_iter().filter(|v| !before.contains(v)).collect();
-        crate::confirm::crated(added, cx);
+        crate::confirm::crated(added_ids.clone(), cx);
+        self.auto_swap(added_ids, cx);
         true
     }
 
@@ -456,9 +536,11 @@ impl CrateModel {
         if to == from {
             return false;
         }
+        let before = self.items.clone();
         let row = self.items.remove(from);
         self.items.insert(to, row);
         self.save_order();
+        self.record(before, "moved a song in the Crate".to_owned(), cx);
         cx.notify();
         true
     }
@@ -495,32 +577,170 @@ impl CrateModel {
     }
 
     pub fn remove(&mut self, video_id: &str, cx: &mut Context<Self>) -> bool {
-        let Some(at) = self
-            .items
-            .iter()
-            .position(|r| r.track.video_id.as_str() == video_id)
-        else {
-            return false;
-        };
-        self.items.remove(at);
-        if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
-            let _ = writer.send(Write::Remove(key.clone(), video_id.to_owned()));
+        self.remove_many(&[video_id.to_owned()], cx) > 0
+    }
+
+    /// Take several songs out as one step for Ctrl+Z. Returns how many were in the crate.
+    pub fn remove_many(&mut self, video_ids: &[String], cx: &mut Context<Self>) -> usize {
+        let words = |n| format!("removed {} from the Crate", songs(n));
+        self.take_out(video_ids, words, cx)
+    }
+
+    fn take_out(
+        &mut self,
+        video_ids: &[String],
+        words: impl FnOnce(usize) -> String,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let before = self.items.clone();
+        let gone: HashSet<&str> = video_ids.iter().map(String::as_str).collect();
+        self.items.retain(|r| !gone.contains(r.track.video_id.as_str()));
+        let count = before.len() - self.items.len();
+        if count == 0 {
+            return 0;
         }
-        self.prune_steps();
+        if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
+            for row in &before {
+                let video = row.track.video_id.as_str();
+                if gone.contains(video) {
+                    let _ = writer.send(Write::Remove(key.clone(), video.to_owned()));
+                }
+            }
+        }
+        self.record(before, words(count), cx);
         cx.notify();
-        true
+        count
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         if self.items.is_empty() {
             return;
         }
-        self.items.clear();
+        let before = std::mem::take(&mut self.items);
         if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
             let _ = writer.send(Write::Clear(key.clone()));
         }
-        self.prune_steps();
+        self.record(before, "cleared the Crate".to_owned(), cx);
         cx.notify();
+    }
+
+    /// Put the crate in exactly this state (a rearrangement made elsewhere, such as a swap in
+    /// place) as one step for Ctrl+Z; `words` say what it did ("swapped 3 songs").
+    pub fn replace_all(
+        &mut self,
+        rows: Vec<CrateRow>,
+        words: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.items.clone();
+        if before == rows {
+            return;
+        }
+        self.write_state(&rows);
+        self.items = rows;
+        self.record(before, words.into(), cx);
+        cx.notify();
+    }
+
+    // ---- undo ----------------------------------------------------------------------------
+
+    /// Note that a change turned `before` into the list now.
+    fn record(&mut self, before: Vec<CrateRow>, words: String, cx: &App) {
+        let note = self
+            .player
+            .as_ref()
+            .map_or(0, |p| p.read(cx).queue_undo_depth());
+        self.history.push_back(Step {
+            before,
+            words,
+            note,
+            seq: apollo_domain::undo::tick(),
+        });
+        while self.history.len() > UNDO_LIMIT {
+            self.history.pop_front();
+        }
+    }
+
+    /// Where the newest change sits in time, for Ctrl+Z to choose between histories.
+    pub fn undo_side(&self) -> Option<Side> {
+        self.history.back().map(|s| Side { note: s.note, seq: s.seq })
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.history.is_empty()
+    }
+
+    /// Ctrl+Z: take back the newest change. Returns what it was, in words for "Undid: …".
+    pub fn undo(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let step = self.history.pop_back()?;
+        self.write_state(&step.before);
+        self.items = step.before;
+        cx.notify();
+        Some(step.words)
+    }
+
+    /// Make the store hold `rows`, in order, given what the list holds now.
+    fn write_state(&self, rows: &[CrateRow]) {
+        let (Some(writer), Some(key)) = (&self.writer, &self.key) else {
+            return;
+        };
+        let want: HashSet<&str> = rows.iter().map(|r| r.track.video_id.as_str()).collect();
+        let have: HashSet<&str> = self.items.iter().map(|r| r.track.video_id.as_str()).collect();
+        for row in &self.items {
+            let video = row.track.video_id.as_str();
+            if !want.contains(video) {
+                let _ = writer.send(Write::Remove(key.clone(), video.to_owned()));
+            }
+        }
+        for row in rows {
+            if !have.contains(row.track.video_id.as_str()) {
+                let _ = writer.send(Write::Add(key.clone(), Box::new(row.clone())));
+            }
+        }
+        let ids = rows
+            .iter()
+            .map(|r| r.track.video_id.as_str().to_owned())
+            .collect();
+        let _ = writer.send(Write::Order(key.clone(), ids));
+    }
+
+    // ---- file and forget -----------------------------------------------------------------
+
+    /// Songs are being filed through a picker: they stay in the crate until [`Self::release`],
+    /// so a song marked for several playlists is not gone after the first.
+    pub fn hold(&mut self, video_ids: &[String]) {
+        self.held = video_ids.iter().cloned().collect();
+    }
+
+    /// The picker closed: songs filed while it was open leave the crate now.
+    pub fn release(&mut self, cx: &mut Context<Self>) {
+        self.held.clear();
+        let waiting = std::mem::take(&mut self.waiting);
+        self.take_out(&waiting, |n| format!("took {} out of the Crate", songs(n)), cx);
+    }
+
+    /// The service holds these songs in a playlist: with "Take songs out of the Crate once
+    /// filed" on, the ones in the crate leave it as one step for Ctrl+Z.
+    pub fn filed(&mut self, video_ids: &[String], cx: &mut Context<Self>) {
+        let on = self
+            .settings
+            .as_ref()
+            .is_some_and(|s| s.read(cx).get(&CRATE_FILE_AND_FORGET));
+        if on {
+            self.file(video_ids, cx);
+        }
+    }
+
+    /// Take filed songs out of the crate (a held song waits for the picker to close). Returns
+    /// how many left now.
+    pub fn file(&mut self, video_ids: &[String], cx: &mut Context<Self>) -> usize {
+        let (held, free): (Vec<&String>, Vec<&String>) = video_ids
+            .iter()
+            .filter(|v| self.contains(v))
+            .partition(|v| self.held.contains(*v));
+        self.waiting.extend(held.into_iter().cloned());
+        let free: Vec<String> = free.into_iter().cloned().collect();
+        self.take_out(&free, |n| format!("took {} out of the Crate", songs(n)), cx)
     }
 }
 
@@ -537,6 +757,13 @@ impl CrateModel {
         self.prefer_explicit = on;
     }
 
+    /// How long to wait between one pair of searches and the next, and how long searches stop
+    /// after the service says it is busy.
+    pub fn set_swap_pacing(&mut self, pause: Duration, cooldown: Duration) {
+        self.pause = pause;
+        self.cooldown = cooldown;
+    }
+
     /// Whether the service marks the song explicit, as far as the crate knows.
     pub fn is_explicit(&self, video_id: &str) -> bool {
         self.items
@@ -549,6 +776,11 @@ impl CrateModel {
         self.batch.is_some()
     }
 
+    /// Whether searches are stopped because the service said it is busy.
+    fn cooling(&self) -> bool {
+        self.cooling_until.is_some_and(|t| Instant::now() < t)
+    }
+
     fn index_of(&self, video_id: &str) -> Option<usize> {
         self.items
             .iter()
@@ -556,14 +788,13 @@ impl CrateModel {
     }
 
     /// Look for the other version of the songs that are not `want` yet: every song of the crate,
-    /// or only those of `only` (a selection). Each swap replaces the song where it stands, and
-    /// the whole batch is one step for Ctrl+Z (`note` is the queue history's depth now). The
-    /// window hears of it through [`CrateEvent`].
+    /// or only those of `only` (a selection). The swaps are made together once every song has
+    /// been looked up, as one step for Ctrl+Z, each song keeping its place. The window hears of
+    /// it through [`CrateEvent`].
     pub fn start_swap(
         &mut self,
         want: Want,
         only: Option<&[String]>,
-        note: i64,
         cx: &mut Context<Self>,
     ) -> SwapStart {
         if self.batch.is_some() {
@@ -580,22 +811,38 @@ impl CrateModel {
             only,
         );
         if ids.is_empty() {
-            cx.emit(CrateEvent::Finished { want, swapped: 0, total: 0, already: 0, unreachable: false });
+            cx.emit(CrateEvent::Finished {
+                want,
+                swapped: 0,
+                total: 0,
+                already: 0,
+                unreachable: false,
+                paused: false,
+            });
             return SwapStart::Nothing;
+        }
+        let total = ids.len();
+        if self.cooling() {
+            cx.emit(CrateEvent::Finished {
+                want,
+                swapped: 0,
+                total,
+                already: 0,
+                unreachable: false,
+                paused: true,
+            });
+            return SwapStart::Paused;
         }
         self.serial += 1;
         let id = self.serial;
-        let total = ids.len();
         self.batch = Some(Batch {
             id,
             want,
             total,
             done: 0,
-            swapped: 0,
             already: 0,
             errors: 0,
-            note,
-            step: None,
+            found: Vec::new(),
         });
         let epoch = self.epoch;
         self.jobs.extend(ids.into_iter().map(|video_id| Job {
@@ -609,10 +856,10 @@ impl CrateModel {
         SwapStart::Started(total)
     }
 
-    /// A song just added: with Prefer explicit versions on, look for its explicit version. Quiet,
-    /// and not a step for Ctrl+Z.
+    /// Songs just added: with Prefer explicit versions on, look for their explicit versions.
+    /// Quiet, and not a step for Ctrl+Z.
     fn auto_swap(&mut self, video_ids: Vec<String>, cx: &mut Context<Self>) {
-        if !self.prefer_explicit || self.search.is_none() {
+        if !self.prefer_explicit || self.search.is_none() || self.cooling() {
             return;
         }
         let epoch = self.epoch;
@@ -626,7 +873,7 @@ impl CrateModel {
     }
 
     /// Start the task that works through the waiting songs, [`crate_swap::CONCURRENCY`] searches
-    /// at a time, if one is not running.
+    /// at a time with a pause between, if one is not running.
     fn ensure_runner(&mut self, cx: &mut Context<Self>) {
         if self.runner || self.jobs.is_empty() {
             return;
@@ -658,6 +905,13 @@ impl CrateModel {
                 let found = task.await;
                 let _ = this.update(cx, |m, cx| m.finish_job(job, found, cx));
             }
+            // A small gap before the next pair, so a long Crate does not hammer the service.
+            let wait = this
+                .update(cx, |m, _| if m.jobs.is_empty() { Duration::ZERO } else { m.pause })
+                .unwrap_or(Duration::ZERO);
+            if !wait.is_zero() {
+                cx.background_executor().timer(wait).await;
+            }
         })
         .detach();
     }
@@ -680,7 +934,7 @@ impl CrateModel {
         taken
     }
 
-    /// A search came back: swap the song if it found its other version.
+    /// A search came back: note the song's other version if it found one.
     fn finish_job(
         &mut self,
         job: Job,
@@ -690,30 +944,40 @@ impl CrateModel {
         if job.epoch != self.epoch {
             return;
         }
-        // A batch that was undone while this was in flight changes nothing more.
+        // A batch that was stopped while this was in flight changes nothing more.
         if job.batch.is_some() && self.batch.as_ref().map(|b| b.id) != job.batch {
             return;
         }
         let outcome = match found {
+            Err(LoadFailure::Throttled) => Outcome::Throttled,
             Err(_) => Outcome::Failed,
             Ok(songs) => self.apply(&job, &songs, cx),
         };
         self.settle(&job, outcome, cx);
     }
 
-    /// Put the picked version in the song's place.
+    /// Work out what the search found for the song. A song added on its own is swapped at once;
+    /// a batch's is held for the end.
     fn apply(&mut self, job: &Job, songs: &[ListedTrack], cx: &mut Context<Self>) -> Outcome {
         let Some(at) = self.index_of(&job.video_id) else {
             return Outcome::Unchanged;
         };
         let old = self.items[at].clone();
-        let picked = crate_swap::pick(&old.track, job.want, songs, |id| self.contains(id));
+        let held: Vec<String> = self
+            .batch
+            .iter()
+            .filter(|b| Some(b.id) == job.batch)
+            .flat_map(|b| b.found.iter().map(|(_, row)| row.track.video_id.as_str().to_owned()))
+            .collect();
+        let picked = crate_swap::pick(&old.track, job.want, songs, |id| {
+            self.contains(id) || held.iter().any(|h| h == id)
+        });
         match picked {
             Pick::None => Outcome::Unchanged,
             Pick::Already => {
                 // The song is that version already; the crate only had not known.
                 if old.explicit != job.want.explicit() {
-                    let mut row = old.clone();
+                    let mut row = old;
                     row.explicit = job.want.explicit();
                     self.write_swap(&job.video_id, &row);
                     self.items[at] = row;
@@ -722,26 +986,22 @@ impl CrateModel {
                 Outcome::Already
             }
             Pick::Swap(found_at) => {
-                let found = &songs[found_at];
-                let mut track = found.track.clone();
-                if track.artists.is_empty() {
-                    track.artists = old.track.artists.clone();
+                let row = swapped_row(&old, &songs[found_at], job.want);
+                match job.batch {
+                    Some(id) => {
+                        if let Some(batch) = self.batch.as_mut().filter(|b| b.id == id) {
+                            batch.found.push((job.video_id.clone(), row));
+                        }
+                    }
+                    None => {
+                        let new_id = row.track.video_id.as_str().to_owned();
+                        self.write_swap(&job.video_id, &row);
+                        self.items[at] = row;
+                        cx.emit(CrateEvent::Swapped(vec![(job.video_id.clone(), new_id)]));
+                        cx.notify();
+                    }
                 }
-                let row = CrateRow {
-                    track,
-                    thumbnail: found.thumbnail.clone().or_else(|| old.thumbnail.clone()),
-                    explicit: job.want.explicit(),
-                    added_ms: old.added_ms,
-                };
-                let new_id = row.track.video_id.as_str().to_owned();
-                self.write_swap(&job.video_id, &row);
-                self.items[at] = row;
-                if let Some(batch) = job.batch {
-                    self.note_change(batch, new_id.clone(), old);
-                }
-                cx.emit(CrateEvent::Swapped(vec![(job.video_id.clone(), new_id)]));
-                cx.notify();
-                Outcome::Swapped
+                Outcome::Found
             }
         }
     }
@@ -752,119 +1012,94 @@ impl CrateModel {
         }
     }
 
-    /// Note a swap of batch `batch` for Ctrl+Z, in the batch's step (made by its first swap).
-    fn note_change(&mut self, batch: u64, now: String, replaced: CrateRow) {
-        let Some(b) = self.batch.as_mut().filter(|b| b.id == batch) else {
-            return;
-        };
-        let live = b
-            .step
-            .filter(|id| self.steps.iter().any(|s| s.id == *id));
-        let step = match live {
-            Some(id) => id,
-            None => {
-                self.serial += 1;
-                let id = self.serial;
-                b.step = Some(id);
-                self.steps.push_back(SwapStep {
-                    id,
-                    seq: apollo_domain::undo::next_seq(),
-                    note: b.note,
-                    want: b.want,
-                    changes: Vec::new(),
-                });
-                while self.steps.len() > STEP_LIMIT {
-                    self.steps.pop_front();
-                }
-                id
-            }
-        };
-        if let Some(step) = self.steps.iter_mut().find(|s| s.id == step) {
-            step.changes.push((now, replaced));
-        }
-    }
-
     /// One song of a job is settled; the batch it counts for moves on and may be over.
     fn settle(&mut self, job: &Job, outcome: Outcome, cx: &mut Context<Self>) {
+        if matches!(outcome, Outcome::Throttled) {
+            self.back_off(cx);
+            return;
+        }
         let Some(batch) = self.batch.as_mut().filter(|b| Some(b.id) == job.batch) else {
             return;
         };
         batch.done += 1;
         match outcome {
-            Outcome::Swapped => batch.swapped += 1,
             Outcome::Already => batch.already += 1,
             Outcome::Failed => batch.errors += 1,
-            Outcome::Unchanged => {}
+            Outcome::Found | Outcome::Unchanged | Outcome::Throttled => {}
         }
         let (want, done, total) = (batch.want, batch.done, batch.total);
         if done < total {
             cx.emit(CrateEvent::Progress { want, done, total });
             return;
         }
-        let (swapped, already, unreachable) = (batch.swapped, batch.already, batch.errors == total);
-        self.batch = None;
-        cx.emit(CrateEvent::Finished { want, swapped, total, already, unreachable });
+        self.finish_batch(false, cx);
     }
 
-    /// A new crate (another account, sign-out): nothing waits and nothing can be taken back.
+    /// The service said "too many requests": every search stops for a while, and a batch
+    /// ends there with what it had found.
+    fn back_off(&mut self, cx: &mut Context<Self>) {
+        self.cooling_until = Some(Instant::now() + self.cooldown);
+        self.jobs.clear();
+        self.finish_batch(true, cx);
+    }
+
+    /// The batch is over (every song looked up, or stopped): put what it found in the crate, in
+    /// place, as one step for Ctrl+Z, and say how it went.
+    fn finish_batch(&mut self, paused: bool, cx: &mut Context<Self>) {
+        let Some(batch) = self.batch.take() else {
+            return;
+        };
+        let mut rows = self.items.clone();
+        let mut made = Vec::new();
+        for (old_id, row) in batch.found {
+            let Some(at) = rows.iter().position(|r| r.track.video_id.as_str() == old_id) else {
+                continue; // left the crate meanwhile
+            };
+            let new_id = row.track.video_id.as_str();
+            // Another song of the crate, or an earlier swap, is that version already.
+            if new_id != old_id && rows.iter().any(|r| r.track.video_id.as_str() == new_id) {
+                continue;
+            }
+            made.push((old_id, new_id.to_owned()));
+            rows[at] = row;
+        }
+        let swapped = made.len();
+        if swapped > 0 {
+            let words = match swapped {
+                1 => format!("swapped a song to its {} version", batch.want.word()),
+                n => format!("swapped {n} songs to {} versions", batch.want.word()),
+            };
+            self.replace_all(rows, words, cx);
+            cx.emit(CrateEvent::Swapped(made));
+        }
+        cx.emit(CrateEvent::Finished {
+            want: batch.want,
+            swapped,
+            total: batch.total,
+            already: batch.already,
+            unreachable: !paused && batch.errors == batch.total,
+            paused,
+        });
+    }
+
+    /// A new crate (another account, sign-out): nothing waits.
     fn reset_swaps(&mut self) {
         self.jobs.clear();
         self.batch = None;
-        self.steps.clear();
     }
+}
 
-    /// Steps forget swaps whose song left the crate; a step with none left is gone.
-    fn prune_steps(&mut self) {
-        let present: HashSet<&str> = self
-            .items
-            .iter()
-            .map(|r| r.track.video_id.as_str())
-            .collect();
-        for step in &mut self.steps {
-            step.changes.retain(|(id, _)| present.contains(id.as_str()));
-        }
-        self.steps.retain(|s| !s.changes.is_empty());
+/// The row that takes a song's place: the version found, keeping when the song was set aside.
+fn swapped_row(old: &CrateRow, found: &ListedTrack, want: Want) -> CrateRow {
+    let mut track = found.track.clone();
+    if track.artists.is_empty() {
+        track.artists = old.track.artists.clone();
     }
-
-    /// The newest swap Ctrl+Z can take back: the queue history's depth it was made at, and its
-    /// place in time among the playlist edits (`apollo_domain::undo::next_seq`).
-    pub fn undo_stamp(&self) -> Option<(i64, u64)> {
-        self.steps.back().map(|s| (s.note, s.seq))
-    }
-
-    /// Ctrl+Z: put back the songs the newest batch swapped, where they are. Returns what was
-    /// undone, in words for "Undid: …"; `None` when nothing could be put back.
-    pub fn undo_swap(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        let step = self.steps.pop_back()?;
-        // A batch still running stops: what it had not reached stays as it was.
-        if let Some(batch) = self.batch.as_ref().filter(|b| b.step == Some(step.id)) {
-            let id = Some(batch.id);
-            self.jobs.retain(|j| j.batch != id);
-            self.batch = None;
-        }
-        let mut put_back = Vec::new();
-        for (now, old) in step.changes.iter().rev() {
-            let Some(at) = self.index_of(now) else {
-                continue;
-            };
-            // The old song came back to the crate by another way meanwhile: it cannot be twice.
-            if old.track.video_id.as_str() != now && self.contains(old.track.video_id.as_str()) {
-                continue;
-            }
-            self.write_swap(now, old);
-            self.items[at] = old.clone();
-            put_back.push((now.clone(), old.track.video_id.as_str().to_owned()));
-        }
-        if put_back.is_empty() {
-            return None;
-        }
-        let words = match put_back.len() {
-            1 => format!("swapped a song to its {} version", step.want.word()),
-            n => format!("swapped {n} songs to {} versions", step.want.word()),
-        };
-        cx.emit(CrateEvent::Swapped(put_back));
-        cx.notify();
-        Some(words)
+    CrateRow {
+        track,
+        thumbnail: found.thumbnail.clone().or_else(|| old.thumbnail.clone()),
+        explicit: want.explicit(),
+        added_ms: old.added_ms,
     }
 }
 
@@ -922,15 +1157,9 @@ pub fn add_tracks(
 
 /// Swap the Crate's songs for their `want` version: every song, or only `only`. The window's tip
 /// pill follows along (see [`CrateEvent`]). Does nothing where there is no shell.
-pub fn swap(
-    player: &Entity<PlayerModel>,
-    want: Want,
-    only: Option<Vec<String>>,
-    cx: &mut App,
-) -> Option<SwapStart> {
+pub fn swap(want: Want, only: Option<Vec<String>>, cx: &mut App) -> Option<SwapStart> {
     let model = handle(cx)?;
-    let note = player.read(cx).queue_undo_depth();
-    Some(model.update(cx, |m, cx| m.start_swap(want, only.as_deref(), note, cx)))
+    Some(model.update(cx, |m, cx| m.start_swap(want, only.as_deref(), cx)))
 }
 
 #[cfg(test)]
@@ -975,13 +1204,6 @@ mod tests {
         }
         fn swap(&self, key: &str, old_video_id: &str, row: &CrateRow) {
             let mut rows = self.rows.lock().unwrap();
-            let taken = row.track.video_id.as_str() != old_video_id
-                && rows
-                    .iter()
-                    .any(|(k, r)| k == key && r.track.video_id == row.track.video_id);
-            if taken {
-                return;
-            }
             if let Some((_, r)) = rows
                 .iter_mut()
                 .find(|(k, r)| k == key && r.track.video_id.as_str() == old_video_id)
@@ -1171,7 +1393,6 @@ mod tests {
     // ---- swapping songs for another version ----------------------------------------------
 
     use std::collections::HashMap;
-    use std::time::Duration;
 
     use apollo_domain::model::ArtistRef;
     use apollo_provider::{SearchPage, SearchResults};
@@ -1201,6 +1422,8 @@ mod tests {
     struct Script {
         answers: HashMap<String, Vec<ListedTrack>>,
         fail: bool,
+        /// A query the service answers with "too many requests".
+        throttle: Option<String>,
         asked: Mutex<Vec<String>>,
     }
 
@@ -1209,9 +1432,16 @@ mod tests {
             Err(LoadFailure::Other)
         }
 
-        fn search_filtered(&self, query: &str, filter: SearchFilter) -> Result<SearchPage, LoadFailure> {
+        fn search_filtered(
+            &self,
+            query: &str,
+            filter: SearchFilter,
+        ) -> Result<SearchPage, LoadFailure> {
             assert_eq!(filter, SearchFilter::Songs, "a swap asks for songs only");
             self.asked.lock().unwrap().push(query.to_owned());
+            if self.throttle.as_deref() == Some(query) {
+                return Err(LoadFailure::Throttled);
+            }
             if self.fail {
                 return Err(LoadFailure::Network);
             }
@@ -1236,8 +1466,8 @@ mod tests {
         heard
     }
 
-    /// A crate of clean songs a, b, c whose explicit versions (a2, b2; none for c) the script knows.
-    fn swap_setup(cx: &mut TestAppContext) -> (Entity<CrateModel>, Arc<Script>, Arc<Mutex<Vec<CrateEvent>>>) {
+    /// A script that knows the explicit versions of "a" (a2) and "b" (b2), and none for "c".
+    fn script_for_abc() -> Script {
         let mut script = Script::default();
         for (clean, explicit) in [("a", "a2"), ("b", "b2")] {
             script.answers.insert(
@@ -1251,22 +1481,48 @@ mod tests {
         script
             .answers
             .insert("Song c Artist".into(), vec![found("c", "Song c", 200, false)]);
+        script
+    }
+
+    /// A crate of clean songs a, b, c with no wait between searches.
+    fn swap_setup(
+        cx: &mut TestAppContext,
+        script: Script,
+    ) -> (Entity<CrateModel>, Arc<Script>, Arc<Mutex<Vec<CrateEvent>>>) {
         let script = Arc::new(script);
         let model = cx.new(|_| CrateModel::new());
         let heard = listen(&model, cx);
         model.update(cx, |m, cx| {
             m.install_search(script.clone());
+            m.set_swap_pacing(Duration::ZERO, Duration::from_secs(60));
             for id in ["a", "b", "c"] {
-                m.add(song(id, &format!("Song {id}"), 200), None, cx);
+                m.add(song(id, &format!("Song {id}"), 200), Some(format!("art-{id}")), cx);
             }
         });
         (model, script, heard)
     }
 
+    fn finished(
+        swapped: usize,
+        total: usize,
+        already: usize,
+        unreachable: bool,
+        paused: bool,
+    ) -> CrateEvent {
+        CrateEvent::Finished {
+            want: Want::Explicit,
+            swapped,
+            total,
+            already,
+            unreachable,
+            paused,
+        }
+    }
+
     #[gpui::test]
     fn a_batch_swaps_in_place_and_leaves_songs_with_no_match(cx: &mut TestAppContext) {
-        let (model, script, heard) = swap_setup(cx);
-        let start = model.update(cx, |m, cx| m.start_swap(Want::Explicit, None, 0, cx));
+        let (model, script, heard) = swap_setup(cx, script_for_abc());
+        let start = model.update(cx, |m, cx| m.start_swap(Want::Explicit, None, cx));
         assert_eq!(start, SwapStart::Started(3));
         cx.run_until_parked();
         model.read_with(cx, |m, _| {
@@ -1289,18 +1545,18 @@ mod tests {
             })
             .collect();
         assert_eq!(progress, [(0, 3), (1, 3), (2, 3)], "the pill counts up to the last song");
-        assert_eq!(
-            heard.last(),
-            Some(&CrateEvent::Finished { want: Want::Explicit, swapped: 2, total: 3, already: 0, unreachable: false })
-        );
-        assert!(heard.contains(&CrateEvent::Swapped(vec![("a".into(), "a2".into())])));
+        assert_eq!(heard.last(), Some(&finished(2, 3, 0, false, false)));
+        assert!(heard.contains(&CrateEvent::Swapped(vec![
+            ("a".into(), "a2".into()),
+            ("b".into(), "b2".into())
+        ])));
     }
 
     #[gpui::test]
     fn only_the_picked_songs_are_looked_up(cx: &mut TestAppContext) {
-        let (model, script, _) = swap_setup(cx);
+        let (model, script, _) = swap_setup(cx, script_for_abc());
         let picked = ["b".to_owned()];
-        let start = model.update(cx, |m, cx| m.start_swap(Want::Explicit, Some(&picked), 0, cx));
+        let start = model.update(cx, |m, cx| m.start_swap(Want::Explicit, Some(&picked), cx));
         assert_eq!(start, SwapStart::Started(1));
         cx.run_until_parked();
         model.read_with(cx, |m, _| assert_eq!(ids(m), ["a", "b2", "c"]));
@@ -1310,52 +1566,40 @@ mod tests {
     #[gpui::test]
     fn one_undo_puts_the_whole_batch_back_where_it_was(cx: &mut TestAppContext) {
         let store = Arc::new(Memory::default());
-        let (model, _, heard) = swap_setup(cx);
+        let (model, _, _) = swap_setup(cx, script_for_abc());
         model.update(cx, |m, cx| {
             m.install(Some(store.clone()), cx);
             m.set_account(Some("acct".into()), cx);
         });
         cx.run_until_parked();
         // install() starts a fresh crate for the account; fill it again.
-        let mut script = Script::default();
-        script.answers.insert(
-            "Song a Artist".into(),
-            vec![found("a2", "Song a", 200, true)],
-        );
-        script.answers.insert(
-            "Song b Artist".into(),
-            vec![found("b2", "Song b", 200, true)],
-        );
         model.update(cx, |m, cx| {
-            m.install_search(Arc::new(script));
+            m.install_search(Arc::new(script_for_abc()));
             for id in ["a", "b", "c"] {
                 m.add(song(id, &format!("Song {id}"), 200), Some(format!("art-{id}")), cx);
             }
-            assert_eq!(m.undo_stamp(), None, "nothing to take back yet");
-            m.start_swap(Want::Explicit, None, 7, cx);
+            m.start_swap(Want::Explicit, None, cx);
         });
         cx.run_until_parked();
-        model.read_with(cx, |m, _| {
-            assert_eq!(ids(m), ["a2", "b2", "c"]);
-            assert_eq!(m.undo_stamp().map(|s| s.0), Some(7), "the queue depth is noted");
-        });
+        model.read_with(cx, |m, _| assert_eq!(ids(m), ["a2", "b2", "c"]));
 
-        let words = model.update(cx, |m, cx| m.undo_swap(cx));
+        // The batch is the newest step; Ctrl+Z takes back all of it in one go.
+        let words = model.update(cx, |m, cx| m.undo(cx));
         assert_eq!(words.as_deref(), Some("swapped 2 songs to explicit versions"));
         cx.run_until_parked();
         model.read_with(cx, |m, _| {
             assert_eq!(ids(m), ["a", "b", "c"], "one step undid both");
             assert!(m.items().iter().all(|r| !r.explicit));
             assert_eq!(m.items()[0].thumbnail.as_deref(), Some("art-a"), "the old row, whole");
-            assert_eq!(m.undo_stamp(), None);
         });
-        assert!(heard
-            .lock()
-            .unwrap()
-            .contains(&CrateEvent::Swapped(vec![("b2".into(), "b".into()), ("a2".into(), "a".into())])));
-        assert_eq!(model.update(cx, |m, cx| m.undo_swap(cx)), None, "nothing left");
+        let step_before = model.update(cx, |m, cx| m.undo(cx));
+        assert_eq!(
+            step_before.as_deref(),
+            Some("added a song to the Crate"),
+            "the next step is the add before the batch"
+        );
 
-        // The store followed both ways, in the same slots.
+        // The store followed both ways: the same songs, in the same order.
         for _ in 0..200 {
             let stored: Vec<String> = store
                 .rows
@@ -1364,33 +1608,26 @@ mod tests {
                 .iter()
                 .map(|(_, r)| r.track.video_id.as_str().to_owned())
                 .collect();
-            if stored == ["a", "b", "c"] {
+            if stored == ["a", "b"] {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5));
         }
         let rows = store.rows.lock().unwrap();
         let stored: Vec<&str> = rows.iter().map(|(_, r)| r.track.video_id.as_str()).collect();
-        assert_eq!(stored, ["a", "b", "c"]);
+        assert_eq!(stored, ["a", "b"]);
     }
 
     #[gpui::test]
-    fn a_song_that_left_the_crate_is_not_put_back_by_undo(cx: &mut TestAppContext) {
-        let (model, _, _) = swap_setup(cx);
-        model.update(cx, |m, cx| m.start_swap(Want::Explicit, None, 0, cx));
-        cx.run_until_parked();
+    fn a_song_that_left_the_crate_during_the_batch_is_not_brought_back(cx: &mut TestAppContext) {
+        let (model, _, heard) = swap_setup(cx, script_for_abc());
         model.update(cx, |m, cx| {
-            m.remove("a2", cx);
+            m.start_swap(Want::Explicit, None, cx);
+            m.remove("a", cx);
         });
-        let words = model.update(cx, |m, cx| m.undo_swap(cx));
-        assert_eq!(words.as_deref(), Some("swapped a song to its explicit version"));
-        model.read_with(cx, |m, _| assert_eq!(ids(m), ["b", "c"]));
-        // Everything of a step gone: no step left to offer.
-        let (model, _, _) = swap_setup(cx);
-        model.update(cx, |m, cx| m.start_swap(Want::Explicit, None, 0, cx));
         cx.run_until_parked();
-        model.update(cx, |m, cx| m.clear(cx));
-        assert_eq!(model.read_with(cx, |m, _| m.undo_stamp()), None);
+        model.read_with(cx, |m, _| assert_eq!(ids(m), ["b2", "c"]));
+        assert_eq!(heard.lock().unwrap().last(), Some(&finished(1, 3, 0, false, false)));
     }
 
     #[gpui::test]
@@ -1405,7 +1642,7 @@ mod tests {
             m.install_search(Arc::new(script));
             m.add_marked(song("a", "Song a", 200), None, true, cx);
         });
-        let start = model.update(cx, |m, cx| m.start_swap(Want::Clean, None, 0, cx));
+        let start = model.update(cx, |m, cx| m.start_swap(Want::Clean, None, cx));
         assert_eq!(start, SwapStart::Started(1));
         cx.run_until_parked();
         model.read_with(cx, |m, _| {
@@ -1416,47 +1653,96 @@ mod tests {
 
     #[gpui::test]
     fn nothing_to_do_and_a_busy_batch_are_said_not_started(cx: &mut TestAppContext) {
-        let (model, _, heard) = swap_setup(cx);
-        // Everything is explicit already when asked for explicit; no source yet is its own answer.
+        let (model, _, heard) = swap_setup(cx, script_for_abc());
+        // No source yet is its own answer.
         let bare = cx.new(|_| CrateModel::new());
         assert_eq!(
-            bare.update(cx, |m, cx| m.start_swap(Want::Explicit, None, 0, cx)),
+            bare.update(cx, |m, cx| m.start_swap(Want::Explicit, None, cx)),
             SwapStart::NoSearch
         );
         let none: [String; 0] = [];
         assert_eq!(
-            model.update(cx, |m, cx| m.start_swap(Want::Explicit, Some(&none), 0, cx)),
+            model.update(cx, |m, cx| m.start_swap(Want::Explicit, Some(&none), cx)),
             SwapStart::Nothing
         );
-        assert_eq!(
-            heard.lock().unwrap().last(),
-            Some(&CrateEvent::Finished { want: Want::Explicit, swapped: 0, total: 0, already: 0, unreachable: false })
-        );
+        assert_eq!(heard.lock().unwrap().last(), Some(&finished(0, 0, 0, false, false)));
         model.update(cx, |m, cx| {
-            assert_eq!(m.start_swap(Want::Explicit, None, 0, cx), SwapStart::Started(3));
+            assert_eq!(m.start_swap(Want::Explicit, None, cx), SwapStart::Started(3));
             assert!(m.swapping());
-            assert_eq!(m.start_swap(Want::Clean, None, 0, cx), SwapStart::Busy);
+            assert_eq!(m.start_swap(Want::Clean, None, cx), SwapStart::Busy);
         });
         cx.run_until_parked();
     }
 
     #[gpui::test]
     fn a_service_that_cannot_be_reached_changes_nothing_and_says_so(cx: &mut TestAppContext) {
-        let model = cx.new(|_| CrateModel::new());
-        let heard = listen(&model, cx);
+        let (model, _, heard) = swap_setup(cx, Script { fail: true, ..Script::default() });
+        model.update(cx, |m, cx| m.start_swap(Want::Explicit, None, cx));
+        cx.run_until_parked();
+        model.read_with(cx, |m, _| assert_eq!(ids(m), ["a", "b", "c"]));
+        assert_eq!(heard.lock().unwrap().last(), Some(&finished(0, 3, 0, true, false)));
+        assert_eq!(
+            model.update(cx, |m, cx| m.undo(cx)).as_deref(),
+            Some("added a song to the Crate"),
+            "no swap step was made"
+        );
+    }
+
+    #[gpui::test]
+    fn the_first_too_many_requests_stops_the_batch_and_keeps_what_was_found(
+        cx: &mut TestAppContext,
+    ) {
+        let mut script = script_for_abc();
+        script.throttle = Some("Song c Artist".into());
+        let (model, script, heard) = swap_setup(cx, script);
         model.update(cx, |m, cx| {
-            m.install_search(Arc::new(Script { fail: true, ..Script::default() }));
-            m.add(song("a", "Song a", 200), None, cx);
-            m.add(song("b", "Song b", 200), None, cx);
-            m.start_swap(Want::Explicit, None, 0, cx);
+            m.add(song("d", "Song d", 200), None, cx);
+            m.add(song("e", "Song e", 200), None, cx);
+            m.start_swap(Want::Explicit, None, cx);
         });
         cx.run_until_parked();
-        model.read_with(cx, |m, _| assert_eq!(ids(m), ["a", "b"]));
+        model.read_with(cx, |m, _| {
+            assert_eq!(ids(m), ["a2", "b2", "c", "d", "e"], "a and b were found before c");
+            assert!(!m.swapping());
+        });
+        assert_eq!(heard.lock().unwrap().last(), Some(&finished(2, 5, 0, false, true)));
+        // Song e was never searched for: the batch stopped at c (d was already in flight).
+        assert!(!script.asked.lock().unwrap().iter().any(|q| q == "Song e Artist"));
+
+        // The found swaps are one step; Ctrl+Z puts them back together.
         assert_eq!(
-            heard.lock().unwrap().last(),
-            Some(&CrateEvent::Finished { want: Want::Explicit, swapped: 0, total: 2, already: 0, unreachable: true })
+            model.update(cx, |m, cx| m.undo(cx)).as_deref(),
+            Some("swapped 2 songs to explicit versions")
         );
-        assert_eq!(model.read_with(cx, |m, _| m.undo_stamp()), None);
+        model.read_with(cx, |m, _| assert_eq!(ids(m), ["a", "b", "c", "d", "e"]));
+
+        // While YouTube is busy another batch says so at once and asks nothing.
+        let asked = script.asked.lock().unwrap().len();
+        let start = model.update(cx, |m, cx| m.start_swap(Want::Explicit, None, cx));
+        assert_eq!(start, SwapStart::Paused);
+        assert_eq!(heard.lock().unwrap().last(), Some(&finished(0, 5, 0, false, true)));
+        cx.run_until_parked();
+        assert_eq!(script.asked.lock().unwrap().len(), asked);
+
+        // A cooldown that has run out lets searches go on.
+        model.update(cx, |m, _| m.cooling_until = Some(Instant::now() - Duration::from_secs(1)));
+        let start = model.update(cx, |m, cx| m.start_swap(Want::Explicit, None, cx));
+        assert!(matches!(start, SwapStart::Started(_)));
+    }
+
+    #[gpui::test]
+    fn searches_wait_between_pairs(cx: &mut TestAppContext) {
+        let (model, script, _) = swap_setup(cx, script_for_abc());
+        model.update(cx, |m, cx| {
+            m.set_swap_pacing(Duration::from_millis(400), Duration::from_secs(60));
+            m.start_swap(Want::Explicit, None, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(script.asked.lock().unwrap().len(), 2, "the first pair, then the wait");
+        cx.executor().advance_clock(Duration::from_millis(401));
+        cx.run_until_parked();
+        assert_eq!(script.asked.lock().unwrap().len(), 3, "the last song after the wait");
+        model.read_with(cx, |m, _| assert_eq!(ids(m), ["a2", "b2", "c"]));
     }
 
     #[gpui::test]
@@ -1470,37 +1756,50 @@ mod tests {
             m.install_search(Arc::new(script));
             m.add(song("a", "Song a", 200), None, cx);
             assert!(!m.is_explicit("a"));
-            m.start_swap(Want::Explicit, None, 0, cx);
+            m.start_swap(Want::Explicit, None, cx);
         });
         cx.run_until_parked();
-        assert_eq!(
-            heard.lock().unwrap().last(),
-            Some(&CrateEvent::Finished { want: Want::Explicit, swapped: 0, total: 1, already: 1, unreachable: false })
-        );
+        assert_eq!(heard.lock().unwrap().last(), Some(&finished(0, 1, 1, false, false)));
         model.read_with(cx, |m, _| {
             assert_eq!(ids(m), ["a"]);
             assert!(m.is_explicit("a"), "now it is known");
-            assert_eq!(m.undo_stamp(), None);
         });
     }
 
     #[gpui::test]
     fn a_swap_never_puts_a_song_in_the_crate_twice(cx: &mut TestAppContext) {
         let mut script = Script::default();
-        script.answers.insert(
-            "Song a Artist".into(),
-            vec![found("b", "Song a", 200, true)],
-        );
+        script.answers.insert("Song a Artist".into(), vec![found("b", "Song a", 200, true)]);
         let model = cx.new(|_| CrateModel::new());
         model.update(cx, |m, cx| {
             m.install_search(Arc::new(script));
             m.add(song("a", "Song a", 200), None, cx);
             // The explicit version is already in the crate, as its own row.
             m.add_marked(song("b", "Song a", 200), None, true, cx);
-            m.start_swap(Want::Explicit, None, 0, cx);
+            m.start_swap(Want::Explicit, None, cx);
         });
         cx.run_until_parked();
         model.read_with(cx, |m, _| assert_eq!(ids(m), ["a", "b"]));
+    }
+
+    #[gpui::test]
+    fn two_songs_with_one_explicit_version_swap_only_once(cx: &mut TestAppContext) {
+        let mut script = Script::default();
+        for id in ["a", "b"] {
+            script
+                .answers
+                .insert(format!("Song {id} Artist"), vec![found("shared", &format!("Song {id}"), 200, true)]);
+        }
+        let model = cx.new(|_| CrateModel::new());
+        model.update(cx, |m, cx| {
+            m.install_search(Arc::new(script));
+            m.set_swap_pacing(Duration::ZERO, Duration::from_secs(60));
+            m.add(song("a", "Song a", 200), None, cx);
+            m.add(song("b", "Song b", 200), None, cx);
+            m.start_swap(Want::Explicit, None, cx);
+        });
+        cx.run_until_parked();
+        model.read_with(cx, |m, _| assert_eq!(ids(m), ["shared", "b"]));
     }
 
     #[gpui::test]
@@ -1512,6 +1811,7 @@ mod tests {
         let heard = listen(&model, cx);
         model.update(cx, |m, cx| {
             m.install_search(script.clone());
+            m.set_swap_pacing(Duration::ZERO, Duration::from_secs(60));
             m.add(song("a", "Song a", 200), None, cx);
         });
         cx.run_until_parked();
@@ -1535,14 +1835,37 @@ mod tests {
             m.add(song("a", "Song a", 200), None, cx);
         });
         cx.run_until_parked();
-        model2.read_with(cx, |m, _| {
-            assert_eq!(ids(m), ["a2"], "swapped where it was added");
-            assert_eq!(m.undo_stamp(), None, "no step for Ctrl+Z: the owner did nothing");
-        });
+        model2.read_with(cx, |m, _| assert_eq!(ids(m), ["a2"], "swapped where it was added"));
         assert!(
-            !heard.lock().unwrap().iter().any(|e| matches!(e, CrateEvent::Progress { .. } | CrateEvent::Finished { .. })),
+            !heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, CrateEvent::Progress { .. } | CrateEvent::Finished { .. })),
             "no pill for a song swapped on its own"
         );
+    }
+
+    #[gpui::test]
+    fn prefer_explicit_asks_nothing_while_youtube_is_busy(cx: &mut TestAppContext) {
+        let mut script = script_for_abc();
+        script.throttle = Some("Song a Artist".into());
+        let script = Arc::new(script);
+        let model = cx.new(|_| CrateModel::new());
+        model.update(cx, |m, cx| {
+            m.install_search(script.clone());
+            m.set_swap_pacing(Duration::ZERO, Duration::from_secs(60));
+            m.set_prefer_explicit(true);
+            m.add(song("a", "Song a", 200), None, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(script.asked.lock().unwrap().len(), 1);
+        model.update(cx, |m, cx| {
+            m.add(song("b", "Song b", 200), None, cx);
+        });
+        cx.run_until_parked();
+        model.read_with(cx, |m, _| assert_eq!(ids(m), ["a", "b"], "b is left as it is"));
+        assert_eq!(script.asked.lock().unwrap().len(), 1, "no more searches in the cooldown");
     }
 
     #[gpui::test]
@@ -1577,7 +1900,6 @@ mod tests {
         model.update(cx, |m, cx| {
             m.add(song("crate-mark-1", "Marked", 100), None, cx);
             m.add(song("crate-mark-2", "Plain", 100), None, cx);
-            m.insert_at(vec![(song("crate-mark-1b", "Dropped", 100), None)], 0, cx);
             assert!(m.is_explicit("crate-mark-1"));
             assert!(!m.is_explicit("crate-mark-2"));
         });
@@ -1590,13 +1912,13 @@ mod tests {
 
     #[gpui::test]
     fn a_batch_does_not_outlive_its_account(cx: &mut TestAppContext) {
-        let (model, _, _) = swap_setup(cx);
+        let (model, _, _) = swap_setup(cx, script_for_abc());
         model.update(cx, |m, cx| {
-            m.start_swap(Want::Explicit, None, 0, cx);
+            m.start_swap(Want::Explicit, None, cx);
             m.set_account(Some("other".into()), cx);
             assert!(!m.swapping());
         });
         cx.run_until_parked();
-        model.read_with(cx, |m, _| assert!(m.is_empty() && m.undo_stamp().is_none()));
+        model.read_with(cx, |m, _| assert!(m.is_empty() && !m.can_undo()));
     }
 }

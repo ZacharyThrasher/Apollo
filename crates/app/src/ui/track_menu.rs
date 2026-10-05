@@ -1074,10 +1074,12 @@ impl TrackMenu {
             }
             (Command::RemoveFromCrate, Subject::Tracks(songs)) => {
                 if let Some(model) = crate::crate_list::handle(cx) {
+                    let ids: Vec<String> = songs
+                        .iter()
+                        .map(|s| s.track.video_id.as_str().to_owned())
+                        .collect();
                     model.update(cx, |m, cx| {
-                        for song in &songs {
-                            m.remove(song.track.video_id.as_str(), cx);
-                        }
+                        m.remove_many(&ids, cx);
                     });
                 }
             }
@@ -1223,7 +1225,7 @@ impl TrackMenu {
                     Subject::Crate(picked) => (!picked.is_empty()).then_some(picked),
                     Subject::Collection(_) | Subject::Queue | Subject::Artist(_) => return,
                 };
-                crate::crate_list::swap(&self.player, want, only, cx);
+                crate::crate_list::swap(want, only, cx);
             }
             (Command::RemoveFromCrate, Subject::Track(t)) => {
                 if let Some(model) = crate::crate_list::handle(cx) {

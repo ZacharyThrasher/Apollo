@@ -72,8 +72,7 @@ pub struct Step {
     pub action: Action,
     /// The queue history's depth when the edit was made.
     pub note: i64,
-    /// Where the edit sits in time among the other non-queue histories
-    /// ([`apollo_domain::undo::next_seq`]).
+    /// Where the edit sits in time among the Crate's steps (`apollo_domain::undo::tick`).
     pub seq: u64,
 }
 
@@ -119,7 +118,7 @@ impl PlaylistLog {
     pub fn record(&mut self, playlist: PlaylistRef, action: Action, note: i64) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
-        self.steps.push_back(Step { id, playlist, action, note, seq: apollo_domain::undo::next_seq() });
+        self.steps.push_back(Step { id, playlist, action, note, seq: apollo_domain::undo::tick() });
         while self.steps.len() > LIMIT {
             self.steps.pop_front();
         }
@@ -144,9 +143,9 @@ impl PlaylistLog {
         self.last().map(|s| s.note)
     }
 
-    /// The place in time of the newest step.
-    pub fn newest_seq(&self) -> Option<u64> {
-        self.last().map(|s| s.seq)
+    /// What the newest step knows of its place in time (see `apollo_domain::undo::newest`).
+    pub fn newest_side(&self) -> Option<apollo_domain::undo::Side> {
+        self.last().map(|s| apollo_domain::undo::Side { note: s.note, seq: s.seq })
     }
 
     /// Take the newest step to undo it.

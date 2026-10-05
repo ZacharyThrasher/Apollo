@@ -51,6 +51,11 @@ pub enum WritesEvent {
         video_id: String,
         added: bool,
     },
+    /// Several songs were added to a playlist in one request and the service holds them now.
+    PlaylistAddedMany {
+        playlist_id: String,
+        video_ids: Vec<String>,
+    },
 }
 
 /// A short error, shown for [`NOTICE_FOR`].
@@ -753,6 +758,10 @@ impl LibraryWrites {
                         if let Some(step) = step {
                             m.log.settle_added(step, rows);
                         }
+                        cx.emit(WritesEvent::PlaylistAddedMany {
+                            playlist_id: playlist_id.clone(),
+                            video_ids: videos.clone(),
+                        });
                         // Songs the playlist already held are not counted; none new says so.
                         if fresh.is_empty() {
                             crate::confirm::already_in_playlist(&title, cx);
@@ -828,15 +837,10 @@ impl LibraryWrites {
         self.log.record(playlist, action, note)
     }
 
-    /// The queue history depth noted by the newest playlist edit that can be undone.
-    pub fn playlist_undo_note(&self) -> Option<i64> {
-        self.log.newest_note()
-    }
-
-    /// The newest playlist edit's place in time (`apollo_domain::undo::next_seq`), which is how
-    /// Ctrl+Z tells it from a Crate swap.
-    pub fn playlist_undo_seq(&self) -> Option<u64> {
-        self.log.newest_seq()
+    /// Where the newest playlist edit that can be undone sits in time (see
+    /// `apollo_domain::undo::newest`).
+    pub fn playlist_undo_side(&self) -> Option<apollo_domain::undo::Side> {
+        self.log.newest_side()
     }
 
     /// The newest playlist edit is an add the service has not answered yet.

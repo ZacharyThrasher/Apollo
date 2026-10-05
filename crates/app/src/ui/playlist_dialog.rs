@@ -561,9 +561,7 @@ impl PlaylistDialog {
                 if let Some(model) = crate_list::handle(cx) {
                     let video_ids = video_ids.clone();
                     model.update(cx, |m, cx| {
-                        for video in &video_ids {
-                            m.remove(video, cx);
-                        }
+                        m.remove_many(&video_ids, cx);
                     });
                 }
             }

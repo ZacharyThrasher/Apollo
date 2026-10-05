@@ -26,6 +26,12 @@ pub const DURATION_SLACK: Duration = Duration::from_secs(5);
 /// How many searches run at once. Low on purpose: a long Crate must not hammer the service.
 pub const CONCURRENCY: usize = 2;
 
+/// How long to wait between one pair of searches and the next, so a long Crate trickles.
+pub const PAUSE: Duration = Duration::from_millis(400);
+
+/// How long searches stay stopped once the service says "too many requests".
+pub const COOLDOWN: Duration = Duration::from_secs(120);
+
 /// Which version a swap looks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Want {
@@ -60,8 +66,15 @@ pub fn finished_text(
     total: usize,
     already: usize,
     unreachable: bool,
+    paused: bool,
 ) -> String {
-    if total == 0 {
+    if paused {
+        // The first 429 stops the batch; what was found before it is kept.
+        match swapped {
+            0 => "Paused: YouTube is busy".to_owned(),
+            n => format!("Paused: YouTube is busy. Swapped {n} of {total}"),
+        }
+    } else if total == 0 {
         "Nothing to swap".to_owned()
     } else if unreachable {
         "Couldn't reach YouTube Music".to_owned()
@@ -404,13 +417,18 @@ mod tests {
     fn the_pill_words() {
         assert_eq!(progress_text(Want::Explicit, 3, 15), "Finding explicit versions\u{2026} 3/15");
         assert_eq!(progress_text(Want::Clean, 0, 4), "Finding clean versions\u{2026} 0/4");
-        assert_eq!(finished_text(Want::Explicit, 12, 15, 0, false), "Swapped 12 of 15");
-        assert_eq!(finished_text(Want::Explicit, 0, 15, 0, false), "No explicit versions found");
-        assert_eq!(finished_text(Want::Explicit, 0, 15, 4, false), "No explicit versions found");
-        assert_eq!(finished_text(Want::Explicit, 0, 3, 3, false), "Already explicit");
-        assert_eq!(finished_text(Want::Clean, 0, 3, 3, false), "Already clean");
-        assert_eq!(finished_text(Want::Clean, 0, 3, 0, false), "No clean versions found");
-        assert_eq!(finished_text(Want::Explicit, 0, 3, 0, true), "Couldn't reach YouTube Music");
-        assert_eq!(finished_text(Want::Explicit, 0, 0, 0, false), "Nothing to swap");
+        assert_eq!(finished_text(Want::Explicit, 12, 15, 0, false, false), "Swapped 12 of 15");
+        assert_eq!(finished_text(Want::Explicit, 0, 15, 0, false, false), "No explicit versions found");
+        assert_eq!(finished_text(Want::Explicit, 0, 15, 4, false, false), "No explicit versions found");
+        assert_eq!(finished_text(Want::Explicit, 0, 3, 3, false, false), "Already explicit");
+        assert_eq!(finished_text(Want::Clean, 0, 3, 3, false, false), "Already clean");
+        assert_eq!(finished_text(Want::Clean, 0, 3, 0, false, false), "No clean versions found");
+        assert_eq!(finished_text(Want::Explicit, 0, 3, 0, true, false), "Couldn't reach YouTube Music");
+        assert_eq!(finished_text(Want::Explicit, 0, 0, 0, false, false), "Nothing to swap");
+        assert_eq!(finished_text(Want::Explicit, 0, 15, 0, false, true), "Paused: YouTube is busy");
+        assert_eq!(
+            finished_text(Want::Explicit, 5, 15, 0, false, true),
+            "Paused: YouTube is busy. Swapped 5 of 15"
+        );
     }
 }

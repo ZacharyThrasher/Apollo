@@ -78,6 +78,19 @@ impl SearchSource for Script {
     }
 }
 
+/// A service that has had enough: every search is answered "too many requests".
+struct Busy;
+
+impl SearchSource for Busy {
+    fn search(&self, _: &str) -> Result<SearchResults, LoadFailure> {
+        Err(LoadFailure::Throttled)
+    }
+
+    fn search_filtered(&self, _: &str, _: SearchFilter) -> Result<SearchPage, LoadFailure> {
+        Err(LoadFailure::Throttled)
+    }
+}
+
 struct Page {
     player: Entity<PlayerModel>,
     shell: Entity<Shell>,
@@ -119,6 +132,10 @@ fn setup(cx: &mut TestAppContext) -> (Page, &mut VisualTestContext) {
     shell.update(vcx, |s, cx| s.install_search(search, thumbs, cx));
     vcx.run_until_parked();
     let crate_model = shell.read_with(vcx, |s, _| s.crate_model().clone());
+    // No wait between searches in a test: the executor's clock does not run by itself.
+    crate_model.update(vcx, |m, _| {
+        m.set_swap_pacing(std::time::Duration::ZERO, std::time::Duration::from_secs(60))
+    });
     crate_model.update(vcx, |m, cx| {
         for id in ["a", "b", "c"] {
             m.add(song(id, &format!("Song {id}"), 200), None, cx);
@@ -165,6 +182,19 @@ fn the_header_menu_swaps_the_whole_crate_and_the_pill_says_how_it_went(cx: &mut 
     choose(&page, vcx, Subject::Crate(Vec::new()), Command::SwapToExplicit);
     assert_eq!(ids(&page, vcx), ["a2", "b2", "c"], "in place; c has no explicit version");
     assert_eq!(pill(&page, vcx).as_deref(), Some("Swapped 2 of 3"));
+}
+
+#[gpui::test]
+fn the_first_too_many_requests_pauses_the_batch_and_the_pill_says_so(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.shell
+        .update(vcx, |s, cx| s.install_search(Arc::new(Busy), Arc::new(NoThumbs), cx));
+    choose(&page, vcx, Subject::Crate(Vec::new()), Command::SwapToExplicit);
+    assert_eq!(ids(&page, vcx), ["a", "b", "c"], "nothing was found, nothing changed");
+    assert_eq!(pill(&page, vcx).as_deref(), Some("Paused: YouTube is busy"));
+    // Asking again while it is busy says so without another search.
+    choose(&page, vcx, Subject::Crate(Vec::new()), Command::SwapToExplicit);
+    assert_eq!(pill(&page, vcx).as_deref(), Some("Paused: YouTube is busy"));
 }
 
 #[gpui::test]
@@ -324,12 +354,16 @@ fn a_playlist_edit_made_after_a_swap_is_taken_back_before_it(cx: &mut TestAppCon
 
     vcx.simulate_keystrokes("ctrl-z");
     assert_eq!(ids(&page, vcx), ["a2", "b2", "c", "d"], "swap 2 first");
-    assert!(writes.read_with(vcx, |w, _| w.playlist_undo_seq().is_some()), "the playlist edit waits");
+    assert!(writes.read_with(vcx, |w, _| w.playlist_undo_side().is_some()), "the playlist edit waits");
 
     vcx.simulate_keystrokes("ctrl-z");
-    assert_eq!(ids(&page, vcx), ["a2", "b2", "c", "d"], "then the playlist edit, not swap 1");
-    assert!(writes.read_with(vcx, |w, _| w.playlist_undo_seq().is_none()), "it was taken");
+    assert_eq!(ids(&page, vcx), ["a2", "b2", "c"], "then adding d, which came after the edit");
+    assert!(writes.read_with(vcx, |w, _| w.playlist_undo_side().is_some()), "the playlist edit waits");
 
     vcx.simulate_keystrokes("ctrl-z");
-    assert_eq!(ids(&page, vcx), ["a", "b", "c", "d"], "and last, swap 1");
+    assert_eq!(ids(&page, vcx), ["a2", "b2", "c"], "then the playlist edit, not swap 1");
+    assert!(writes.read_with(vcx, |w, _| w.playlist_undo_side().is_none()), "it was taken");
+
+    vcx.simulate_keystrokes("ctrl-z");
+    assert_eq!(ids(&page, vcx), ["a", "b", "c"], "and last, swap 1");
 }

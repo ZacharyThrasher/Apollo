@@ -363,15 +363,22 @@ impl Shell {
             CrateEvent::Progress { want, done, total } => {
                 this.show_tip(crate::crate_swap::progress_text(*want, *done, *total).into(), cx)
             }
-            CrateEvent::Finished { want, swapped, total, already, unreachable } => this.show_tip(
-                crate::crate_swap::finished_text(*want, *swapped, *total, *already, *unreachable)
+            CrateEvent::Finished { want, swapped, total, already, unreachable, paused } => {
+                this.show_tip(
+                    crate::crate_swap::finished_text(
+                        *want, *swapped, *total, *already, *unreachable, *paused,
+                    )
                     .into(),
-                cx,
-            ),
+                    cx,
+                )
+            }
             CrateEvent::Swapped(_) => {}
         })
         .detach();
         cx.set_global(CrateHandle(crate_model.clone()));
+        crate_model.update(cx, |m, cx| {
+            m.follow(player.clone(), &writes, settings.clone(), cx)
+        });
         let target_model =
             cx.new(|cx| TargetModel::new(settings.clone(), writes.clone(), &edits, cx));
         cx.observe(&target_model, |_, _, cx| cx.notify()).detach();
@@ -1582,37 +1589,26 @@ impl Shell {
         }
     }
 
-    /// Ctrl+Z: take back the last thing done to the queue, to a playlist or to the Crate's songs
-    /// (a swap to explicit or clean versions), whichever came last.
+    /// Ctrl+Z: take back the last thing done to the queue, to a playlist or to the Crate,
+    /// whichever came last.
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         let (depth, queue_undoable) = {
             let player = self.player.read(cx);
             (player.queue_undo_depth(), player.queue_undoable())
         };
-        let playlist = self
-            .writes
-            .read(cx)
-            .playlist_undo_note()
-            .zip(self.writes.read(cx).playlist_undo_seq());
-        let crate_swap = self.crate_model.read(cx).undo_stamp();
-        // Of the two histories that are not the queue's, the newer one stands for both.
-        let (other, is_crate) = match (playlist, crate_swap) {
-            (Some(p), Some(c)) if c.1 > p.1 => (Some(c.0), true),
-            (Some(p), _) => (Some(p.0), false),
-            (None, Some(c)) => (Some(c.0), true),
-            (None, None) => (None, false),
-        };
-        match apollo_domain::undo::newest(depth, queue_undoable, other) {
+        let playlist = self.writes.read(cx).playlist_undo_side();
+        let crate_ = self.crate_model.read(cx).undo_side();
+        match apollo_domain::undo::newest(depth, queue_undoable, playlist, crate_) {
             apollo_domain::undo::Newest::Queue => self.undo_queue(cx),
-            apollo_domain::undo::Newest::Playlist if is_crate => self.undo_crate_swap(cx),
             apollo_domain::undo::Newest::Playlist => self.undo_playlist(cx),
+            apollo_domain::undo::Newest::Crate => self.undo_crate(cx),
             apollo_domain::undo::Newest::Nothing => {}
         }
     }
 
-    /// Take back the newest swap of Crate songs; the pill says what was undone.
-    fn undo_crate_swap(&mut self, cx: &mut Context<Self>) {
-        if let Some(words) = self.crate_model.update(cx, |m, cx| m.undo_swap(cx)) {
+    /// Take back the last change to the Crate; the pill says what was undone.
+    fn undo_crate(&mut self, cx: &mut Context<Self>) {
+        if let Some(words) = self.crate_model.update(cx, |m, cx| m.undo(cx)) {
             self.show_tip(format!("Undid: {words}").into(), cx);
         }
     }
