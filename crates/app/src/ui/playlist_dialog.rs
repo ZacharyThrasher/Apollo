@@ -13,6 +13,11 @@
 //! name is not lost. While a write is out Escape and clicks outside do nothing: closing could not
 //! take the write back, and the dialog is where its outcome shows.
 //!
+//! With Settings > Playlists > Create playlists instantly on, the three ways to make a playlist
+//! (the Library's New playlist, Save the queue, Save the Crate) never show the dialog: they write
+//! a private "Oct 5 \u{b7} Untitled" at once, and the shell opens its page ready to rename (see
+//! [`PlaylistDialog::take_instant`]). Saving the Crate that way leaves the Crate as it is.
+//!
 //! Keyboard: Enter in the name field confirms (in the description it is a line break), Tab and
 //! Shift+Tab move between the fields, the visibility button, Cancel and the main button, Escape
 //! cancels. Delete opens with Cancel focused, so a stray Enter keeps
@@ -29,8 +34,10 @@ use gpui::{
 };
 
 use crate::crate_list;
+use crate::instant_playlist;
 use crate::library::edits::{Edit, EditEvent, LibraryEdits};
 use crate::player::PlayerModel;
+use crate::settings::{SettingsModel, INSTANT_PLAYLISTS};
 use crate::style::{self, color};
 use crate::ui::anchor;
 use crate::ui::choice_menu::{self, Choice};
@@ -165,6 +172,12 @@ pub fn open(mode: Mode, window: &mut Window, cx: &mut App) {
 pub struct PlaylistDialog {
     player: Entity<PlayerModel>,
     edits: Entity<LibraryEdits>,
+    settings: Entity<SettingsModel>,
+    /// An instant playlist's write is out, under this name.
+    instant: Option<String>,
+    /// An instant playlist now exists: the shell opens it on the next frame (events carry no
+    /// window).
+    instant_made: Option<Collection>,
     focus: FocusHandle,
     field: Entity<TextField>,
     description: Entity<TextField>,
@@ -179,6 +192,7 @@ impl PlaylistDialog {
     pub fn new(
         player: Entity<PlayerModel>,
         edits: Entity<LibraryEdits>,
+        settings: Entity<SettingsModel>,
         cx: &mut Context<Self>,
     ) -> Self {
         let field_focus = cx.focus_handle();
@@ -209,6 +223,9 @@ impl PlaylistDialog {
         Self {
             player,
             edits,
+            settings,
+            instant: None,
+            instant_made: None,
             focus: cx.focus_handle(),
             field,
             description,
@@ -253,6 +270,14 @@ impl PlaylistDialog {
     }
 
     pub fn open(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        let makes = matches!(
+            mode,
+            Mode::Create { .. } | Mode::FromQueue { .. } | Mode::FromCrate { .. }
+        );
+        if makes && self.settings.read(cx).get(&INSTANT_PLAYLISTS) {
+            self.make_instantly(mode, cx);
+            return;
+        }
         let return_focus = self
             .open
             .as_ref()
@@ -289,6 +314,32 @@ impl PlaylistDialog {
             text_field::focus(&self.field, window, cx);
         }
         cx.notify();
+    }
+
+    /// Make the playlist `mode` asks for without asking for a name: private, named for today,
+    /// holding the songs in one write. Does nothing while another playlist is being made.
+    fn make_instantly(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        if self.instant.is_some() || self.edits.read(cx).is_busy("create") {
+            return;
+        }
+        let (month, day) = instant_playlist::today();
+        let name = {
+            let edits = self.edits.read(cx);
+            instant_playlist::default_name(month, day, |n| edits.has_playlist_titled(n))
+        };
+        self.instant = Some(name.clone());
+        self.edits.update(cx, |e, cx| match mode {
+            Mode::Create { add_video } => e.create(name, add_video, cx),
+            Mode::FromQueue { video_ids, .. } => e.create_with_songs(name, video_ids, cx),
+            // The Crate is left as it is: its dialog's "Clear Crate after saving" is not asked.
+            Mode::FromCrate { video_ids, .. } => e.create_with_crate(name, video_ids, cx),
+            Mode::Edit(_) | Mode::Delete(_) => {}
+        });
+    }
+
+    /// The playlist an instant create just made, once, for the shell to open and rename.
+    pub fn take_instant(&mut self) -> Option<Collection> {
+        self.instant_made.take()
     }
 
     /// Close without touching focus: the account changed under the dialog.
@@ -478,6 +529,20 @@ impl PlaylistDialog {
     }
 
     fn edited(&mut self, event: &EditEvent, cx: &mut Context<Self>) {
+        if let Some(name) = self.instant.as_ref() {
+            match event {
+                EditEvent::Created(c) if c.title == *name => {
+                    self.instant = None;
+                    self.instant_made = Some(c.clone());
+                    cx.notify();
+                }
+                EditEvent::Failed(Edit::Create | Edit::SaveQueue | Edit::SaveCrate) => {
+                    self.instant = None;
+                }
+                _ => {}
+            }
+            return;
+        }
         let Some(open) = self.open.as_ref().filter(|o| o.busy) else {
             return;
         };
