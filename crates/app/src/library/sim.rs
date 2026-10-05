@@ -1519,6 +1519,34 @@ impl LibrarySource for SimLibrary {
         lands.map(|_| ())
     }
 
+    fn add_many_to_playlist(
+        &self,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<(), WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        let lands = self.write_answer(format!("add-many:{playlist_id}"), &video_ids.join(","));
+        let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        if applies {
+            let mut state = self.state();
+            for video_id in video_ids {
+                let key = (playlist_id.to_owned(), video_id.clone());
+                if state.added.contains(&key) {
+                    continue;
+                }
+                state.added.push(key);
+                if let Some(rows) = state.edited_rows.get_mut(playlist_id) {
+                    let n = rows.len();
+                    let mut row = liked_row(video_id, n);
+                    row.occurrence = Some(format!("occ-added-{playlist_id}-{video_id}"));
+                    row.liked = None;
+                    rows.push(row);
+                }
+            }
+        }
+        lands.map(|_| ())
+    }
+
     fn account_token(&self) -> Option<String> {
         self.state().account.clone()
     }

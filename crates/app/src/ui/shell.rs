@@ -287,6 +287,7 @@ impl Shell {
                 crate_model.clone(),
                 player.clone(),
                 writes.clone(),
+                picker.clone(),
                 {
                     let weak = weak.clone();
                     move |window, cx| {
