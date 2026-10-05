@@ -896,6 +896,15 @@ impl LibraryView {
         }
     }
 
+    /// After C or A acted on the cursor row: the cursor steps to the next row (Settings >
+    /// Playlists), the last row staying put.
+    fn advance(&mut self, cx: &mut Context<Self>) {
+        let rows = self.selectable_rows(cx);
+        if let Some(next) = crate::auto_advance::next_row(self.selected, rows, cx) {
+            self.move_selection(next as isize, cx);
+        }
+    }
+
     fn move_selection(&mut self, target: isize, cx: &mut Context<Self>) {
         let rows = self.selectable_rows(cx);
         if rows == 0 {
@@ -1350,6 +1359,7 @@ impl LibraryView {
             }
             if let Some((track, thumbnail)) = this.selected_full_track(cx) {
                 crate::crate_list::add_track(&this.player, track, thumbnail, cx);
+                this.advance(cx);
             }
         }))
         .on_action(cx.listener(|this, _: &SkimRow, _, cx| this.skim_from_row(cx)))
@@ -1371,12 +1381,20 @@ impl LibraryView {
                         .into_iter()
                         .collect()
                 };
+            // With the key acting on one song and a target set it goes straight in, so the
+            // cursor steps on; with none the picker opens at this row and the cursor stays.
+            let direct = !songs.is_empty()
+                && !(this.selection_enabled(cx) && this.selection.is_bulk())
+                && crate::target_playlist::has_target(cx);
             crate::target_playlist::add_songs(
                 songs,
                 Some(&playlist_anchor(this.selected)),
                 window,
                 cx,
             );
+            if direct {
+                this.advance(cx);
+            }
         }))
         .on_action(cx.listener(|this, _: &AddRowToPlaylist, window, cx| {
             if !this.picker.read(cx).key_enabled(cx) {

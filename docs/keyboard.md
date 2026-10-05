@@ -21,10 +21,10 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | ? (Shift+/) | Cheat sheet: every key, grouped by Play / Collect / Navigate / Window. Esc, ?, Enter or Space close it; the other keys stand down while it is open |
 | Ctrl+L | Show / hide lyrics (opens Now Playing) |
 | L | Like / unlike the playing song |
-| C | Set the playing song aside in the Crate (in the queue, Library and Search lists: the song under the cursor) |
+| C | Set the playing song aside in the Crate (in the queue, Library and Search lists: the song under the cursor, and the cursor then steps to the next row: see "Auto-advance") |
 | P | Add to playlist: open the picker for the playing song (in the queue, Library, Search and Crate lists: the song under the cursor). Settings > Playback > "P opens the playlist picker" switches it off |
 | A | Add to the target playlist: the playing song (in the queue, Library, Search and Crate lists: the song under the cursor; with 2 or more picked, all of them). With no target set the picker opens to choose one. Settings > Playlists > "A adds to the target playlist" switches it off. See "The target playlist" |
-| Ctrl+Shift+C | Show / hide the docked Crate on the right of the window (the Crate button in the player bar does the same). See "The docked Crate" |
+| Ctrl+Shift+C | Jump into the docked Crate: open it (if closed) and put the cursor on its list, on the row it was last on (else the first). Esc goes back to where you were; with the dock already focused the same key closes it and goes back too. The Crate button in the player bar only shows / hides it. See "The docked Crate" |
 | Ctrl+Z | Undo the last queue change, playlist edit or Crate change, whichever came last (see "Undo") |
 | Ctrl+Shift+Z or Ctrl+Y | Redo a queue change (playlist edits have no redo) |
 | Alt+Left / Alt+Right | Back / Forward through the places you have been (see "Back and Forward"). Work in text fields too |
@@ -98,11 +98,34 @@ puts the cursor in it): Up/Down, Enter plays from there, L, P, A, Delete, Alt+Up
 multi-select all work, and More opens the usual song menu. The header has **Save as playlist…**
 and **Add all to…**.
 
+**Jumping in and out:** **Ctrl+Shift+C** opens the dock and lands the keyboard in its list, on
+the row the cursor was last on (the first row the first time; nothing to land on while the Crate
+is empty, when the key only opens or closes the dock). **Esc** puts the keyboard back where it was before the jump (picked songs clear
+first: Esc once for them, once to leave). With the dock open and focused, Ctrl+Shift+C closes it
+and goes back the same way; open but with the keyboard elsewhere, it just takes the keyboard in.
+On the Crate page itself (the same list) the key only opens or closes the dock.
+
+**How long it runs:** the header line under "Crate", and the same line under the dock's buttons,
+reads "42 songs · 2 h 51 min" (m:ss under an hour). With two or more picked it reads
+"8 picked · 31:20". Songs YouTube gave no length for add " + 2 unknown"; with none known there
+is no length, just the count. The player bar's Crate button also carries the count (nothing
+when empty, 99+ from a hundred).
+
 **Dragging songs in:** pick up a song (or, from a picked row, every picked song) in Search, a
 playlist, an album or the Songs tab and let go on the panel. A thin line shows where it lands;
 below the last row, or on the empty panel, is the bottom / the start. A song the Crate already
 holds moves to that place instead of being added twice. C still adds at the bottom. Rows of the
 panel drag to rearrange it, as on the page.
+
+## Auto-advance
+
+After **C**, **A** or Skim's **K** acts on a cursor row, the cursor steps to the next one, so
+collecting down a list is one finger on one key: C, C, C. It applies to Search, Library
+(playlist, album, Songs), the queue and the Crate. The last row stays put. With two or more songs
+picked the key acts on the picks and the cursor stays. **A** with no target playlist set opens the
+picker at that row instead, and the cursor stays too. In **Skim**, K sets the song aside and moves
+on to the next song's window (at the last song it stays). Settings > Playlists > **Move to the next
+song after C, A or K** (on) switches it off.
 
 ## Back and Forward
 
@@ -194,7 +217,7 @@ only then, and a text field or popup still keeps its own keys:
 
 | Key | Does |
 |---|---|
-| K | Set the song aside in the Crate; the skim carries on |
+| K | Set the song aside in the Crate and move on to the next song (Settings > Playlists > "Move to the next song after C, A or K"; off: the skim just carries on) |
 | Enter | Stop skimming and play this song from its start; the rest of the list plays after it (Ctrl+Z goes back to what was queued before) |
 | Esc | Stop skimming and put back what was playing before (nothing, if nothing was) |
 | Shift+Right / Shift+Left | Next / previous song's window |
