@@ -23,6 +23,7 @@ use apollo_domain::listing::LoadFailure;
 use apollo_domain::model::Track;
 use apollo_domain::undo::Side;
 use apollo_provider::{ListedTrack, SearchFilter};
+use apollo_services_common::{Lane, Throttle};
 use apollo_store::CrateRow;
 use gpui::{App, Context, Entity, EventEmitter, Global};
 
@@ -179,6 +180,8 @@ pub struct CrateModel {
     cooldown: Duration,
     /// Searches are stopped until then (YouTube said it is busy).
     cooling_until: Option<Instant>,
+    /// What the rest of the app has been told about YouTube being busy (the process's own).
+    throttle: Throttle,
 }
 
 /// One song waiting to be looked up.
@@ -285,6 +288,7 @@ impl CrateModel {
             pause: crate_swap::PAUSE,
             cooldown: crate_swap::COOLDOWN,
             cooling_until: None,
+            throttle: Throttle::global(),
         }
     }
 
@@ -764,6 +768,11 @@ impl CrateModel {
         self.cooldown = cooldown;
     }
 
+    /// Use `throttle` in place of the process's own (tests).
+    pub fn set_throttle(&mut self, throttle: Throttle) {
+        self.throttle = throttle;
+    }
+
     /// Whether the service marks the song explicit, as far as the crate knows.
     pub fn is_explicit(&self, video_id: &str) -> bool {
         self.items
@@ -776,9 +785,12 @@ impl CrateModel {
         self.batch.is_some()
     }
 
-    /// Whether searches are stopped because the service said it is busy.
+    /// Whether searches are stopped because the service said it is busy: by a swap's own
+    /// search, or by anything else of the app (the shared throttle's background lane, which
+    /// leaves the first request after a ban to the user).
     fn cooling(&self) -> bool {
         self.cooling_until.is_some_and(|t| Instant::now() < t)
+            || self.throttle.blocked(Lane::Background).is_some()
     }
 
     fn index_of(&self, video_id: &str) -> Option<usize> {
@@ -918,6 +930,11 @@ impl CrateModel {
 
     /// The next songs to look up. Ones that left the crate meanwhile count as done.
     fn take_jobs(&mut self, cx: &mut Context<Self>) -> Vec<(Job, Track)> {
+        // Something else of the app was told to slow down since the last pair: stop here.
+        if !self.jobs.is_empty() && self.cooling() {
+            self.back_off(cx);
+            return Vec::new();
+        }
         let mut taken = Vec::new();
         while taken.len() < crate_swap::CONCURRENCY {
             let Some(job) = self.jobs.pop_front() else {
@@ -1728,6 +1745,32 @@ mod tests {
         model.update(cx, |m, _| m.cooling_until = Some(Instant::now() - Duration::from_secs(1)));
         let start = model.update(cx, |m, cx| m.start_swap(Want::Explicit, None, cx));
         assert!(matches!(start, SwapStart::Started(_)));
+    }
+
+    #[gpui::test]
+    fn a_ban_the_rest_of_the_app_ran_into_stops_a_batch_before_it_asks(cx: &mut TestAppContext) {
+        let (model, script, heard) = swap_setup(cx, script_for_abc());
+        let throttle = Throttle::new();
+        model.update(cx, |m, _| m.set_throttle(throttle.clone()));
+        throttle.report_throttled(None);
+        let start = model.update(cx, |m, cx| m.start_swap(Want::Explicit, None, cx));
+        assert_eq!(start, SwapStart::Paused);
+        assert_eq!(heard.lock().unwrap().last(), Some(&finished(0, 3, 0, false, true)));
+        cx.run_until_parked();
+        assert!(script.asked.lock().unwrap().is_empty());
+
+        // Banned just after a batch started: it stops before asking anything.
+        let throttle = Throttle::new();
+        let (model, script, heard) = swap_setup(cx, script_for_abc());
+        model.update(cx, |m, cx| {
+            m.set_throttle(throttle.clone());
+            m.start_swap(Want::Explicit, None, cx);
+            throttle.report_throttled(None);
+        });
+        cx.run_until_parked();
+        assert_eq!(heard.lock().unwrap().last(), Some(&finished(0, 3, 0, false, true)));
+        model.read_with(cx, |m, _| assert_eq!(ids(m), ["a", "b", "c"]));
+        assert!(script.asked.lock().unwrap().is_empty());
     }
 
     #[gpui::test]
