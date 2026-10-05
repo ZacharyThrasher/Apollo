@@ -25,4 +25,4 @@ pub use tracking::{new_nonce, PingState, PlaybackTracking, WatchtimePing};
 pub use models::metadata::{
     AccountIdentity, AccountInfo, LibraryToggle, NextResult, Rating, SearchResult, SongItem,
 };
-pub use transport::{cookie_sapisid, Error, InnerTube, Session};
+pub use transport::{cookie_sapisid, set_throttle_hook, Error, InnerTube, Session};

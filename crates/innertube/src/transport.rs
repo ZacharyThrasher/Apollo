@@ -6,7 +6,7 @@
 //! [`InnerTube::send_tracking_ping`] (https YouTube hosts only, one attempt), and `Session`
 //! never prints its cookie.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, SET_COOKIE};
@@ -21,6 +21,33 @@ pub const BASE_URL: &str = "https://music.youtube.com/youtubei/v1/";
 pub const ORIGIN: &str = "https://music.youtube.com";
 pub const REFERER: &str = "https://music.youtube.com/";
 pub const SW_JS_DATA_URL: &str = "https://music.youtube.com/sw.js_data";
+
+type ThrottleHook = Box<dyn Fn(Option<Duration>) + Send + Sync>;
+static THROTTLE_HOOK: OnceLock<ThrottleHook> = OnceLock::new();
+
+/// Register what happens whenever YouTube answers 429 to any request of this crate, with the
+/// server's `Retry-After` (in whole seconds) when it sent one. The app points this at its shared
+/// throttle so every caller backs off together. Set once; a second call is ignored. The request
+/// itself still fails as before (`Error::Http` with status 429): this only reports.
+pub fn set_throttle_hook(hook: impl Fn(Option<Duration>) + Send + Sync + 'static) {
+    let _ = THROTTLE_HOOK.set(Box::new(hook));
+}
+
+/// Pass a 429 to the hook; any other response is left alone.
+fn note_throttle(resp: &reqwest::Response) {
+    if resp.status().as_u16() != 429 {
+        return;
+    }
+    if let Some(hook) = THROTTLE_HOOK.get() {
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
+        hook(retry_after);
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -338,7 +365,10 @@ impl InnerTube {
                 .body(body.clone())
                 .send()
                 .await
-                .and_then(|r| r.error_for_status());
+                .and_then(|r| {
+                    note_throttle(&r);
+                    r.error_for_status()
+                });
 
             match res {
                 Ok(resp) => {
@@ -430,7 +460,10 @@ impl InnerTube {
             .timeout(Duration::from_secs(10))
             .send()
             .await
-            .and_then(|r| r.error_for_status())
+            .and_then(|r| {
+                note_throttle(&r);
+                r.error_for_status()
+            })
             .map_err(|e| Error::Http(e.without_url()))?;
         Ok(())
     }

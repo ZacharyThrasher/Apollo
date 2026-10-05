@@ -15,6 +15,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::throttle::{Lane, Throttle};
 use crate::unix_now;
 
 /// Entries the in-memory table keeps. A queue is a few hundred tracks at most; the SQLite cache
@@ -24,6 +25,9 @@ const TABLE_CAPACITY: usize = 512;
 const UNKNOWN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// After a failed lookup (offline, refused) the same track is left alone this long.
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(60);
+/// The least time between two requests to the service. Loudness is background work: a queue of
+/// a hundred tracks must not become a hundred requests in a minute.
+pub const MIN_GAP: Duration = Duration::from_millis(1500);
 
 /// Loudness by video id, as the engine reads it. Cheap to clone; clones share the table.
 #[derive(Clone, Default)]
@@ -126,6 +130,11 @@ struct Inner {
     queue: Mutex<Queue>,
     wake: Condvar,
     failed: Mutex<HashMap<String, Instant>>,
+    /// Shared with the other YouTube callers: while it says slow down, nothing is asked.
+    throttle: Option<Throttle>,
+    /// The least time between two requests to the service.
+    min_gap: Duration,
+    last_request: Mutex<Option<Instant>>,
 }
 
 /// Learns loudness in the background. Dropping it stops the worker.
@@ -139,6 +148,27 @@ impl LoudnessFetcher {
         source: impl LoudnessSource,
         cache: impl LoudnessCache,
     ) -> Self {
+        Self::build(table, source, cache, None, Duration::ZERO)
+    }
+
+    /// [`Self::new`] for the real app: requests are at least [`MIN_GAP`] apart and none are made
+    /// while `throttle` says YouTube asked to slow down (the source reports the 429s to it).
+    pub fn with_throttle(
+        table: LoudnessTable,
+        source: impl LoudnessSource,
+        cache: impl LoudnessCache,
+        throttle: Throttle,
+    ) -> Self {
+        Self::build(table, source, cache, Some(throttle), MIN_GAP)
+    }
+
+    fn build(
+        table: LoudnessTable,
+        source: impl LoudnessSource,
+        cache: impl LoudnessCache,
+        throttle: Option<Throttle>,
+        min_gap: Duration,
+    ) -> Self {
         let inner = Arc::new(Inner {
             table,
             source: Box::new(source),
@@ -150,6 +180,9 @@ impl LoudnessFetcher {
             }),
             wake: Condvar::new(),
             failed: Mutex::new(HashMap::new()),
+            throttle,
+            min_gap,
+            last_request: Mutex::new(None),
         });
         let worker = inner.clone();
         // A thread that cannot start leaves the table empty: every track plays at unity.
@@ -239,6 +272,9 @@ impl Inner {
                 return;
             }
         }
+        if !self.wait_to_ask() {
+            return;
+        }
         match self.source.fetch(video_id) {
             Ok(loudness_db) => {
                 if let Some(db) = loudness_db {
@@ -257,6 +293,36 @@ impl Inner {
                     .lock()
                     .unwrap()
                     .insert(video_id.to_owned(), Instant::now());
+            }
+        }
+    }
+
+    /// Wait until a request may be made: the throttle is clear and the last request is old
+    /// enough. False if the fetcher was dropped meanwhile.
+    fn wait_to_ask(&self) -> bool {
+        loop {
+            let throttled = self
+                .throttle
+                .as_ref()
+                .and_then(|t| t.blocked(Lane::Background));
+            let spacing = self.last_request.lock().unwrap().and_then(|at| {
+                self.min_gap.checked_sub(at.elapsed()).filter(|d| !d.is_zero())
+            });
+            let Some(wait) = throttled.into_iter().chain(spacing).max() else {
+                *self.last_request.lock().unwrap() = Some(Instant::now());
+                return true;
+            };
+            let q = self.queue.lock().unwrap();
+            if q.closed {
+                return false;
+            }
+            // Woken early only by a new id or by closing; either way look again.
+            let (q, _) = self
+                .wake
+                .wait_timeout(q, wait.min(Duration::from_secs(1)))
+                .unwrap();
+            if q.closed {
+                return false;
             }
         }
     }
@@ -326,6 +392,9 @@ mod tests {
                 }),
                 wake: Condvar::new(),
                 failed: Mutex::new(HashMap::new()),
+                throttle: None,
+                min_gap: Duration::ZERO,
+                last_request: Mutex::new(None),
             },
             table,
         )
@@ -427,6 +496,42 @@ mod tests {
         assert!(
             cache.get("a").is_none(),
             "a failure says nothing about the track"
+        );
+    }
+
+    #[test]
+    fn nothing_is_asked_while_the_throttle_says_slow_down_and_dropping_ends_the_wait() {
+        let (src, calls) = Scripted::new(&[("a", Ok(Some(1.0)))]);
+        let (mut inner, _) = inner(src, MemCache::default());
+        let throttle = Throttle::new();
+        throttle.report_throttled(None);
+        inner.throttle = Some(throttle);
+        let inner = Arc::new(inner);
+        let worker = {
+            let inner = inner.clone();
+            thread::spawn(move || inner.resolve("a"))
+        };
+        thread::sleep(Duration::from_millis(150));
+        assert!(!worker.is_finished(), "still waiting out the cooldown");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no request during it");
+        inner.queue.lock().unwrap().closed = true;
+        inner.wake.notify_all();
+        worker.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn requests_are_spaced_by_the_minimum_gap() {
+        let (src, calls) = Scripted::new(&[("a", Ok(None)), ("b", Ok(None))]);
+        let (mut inner, _) = inner(src, MemCache::default());
+        inner.min_gap = Duration::from_millis(120);
+        let started = Instant::now();
+        inner.resolve("a");
+        inner.resolve("b");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            started.elapsed() >= Duration::from_millis(120),
+            "the second request waited for the gap"
         );
     }
 

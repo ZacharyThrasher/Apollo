@@ -30,7 +30,8 @@ use apollo_runtime::{ResolveRequest, Resolver};
 #[cfg(windows)]
 use apollo_services_common::win::{self, PrivateDir};
 use apollo_services_common::{
-    EventSink, LeaseStore, SecretString, SessionProvider, SessionSnapshot, SessionUnavailable,
+    EventSink, Lane, LeaseStore, Pacer, SecretString, SessionProvider, SessionSnapshot,
+    SessionUnavailable, Throttle,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -112,8 +113,19 @@ impl Job {
 /// Speculative requests (prefetch) are numbered above any real load id so the same job table can
 /// hold them: `cancel_all` (logout, quit) must stop them too.
 const PREFETCH_KEY_BASE: u64 = 1 << 62;
-/// At most this many prefetch threads at once; more are dropped (hover spam, long queues).
-const MAX_PREFETCH_PENDING: usize = 6;
+/// At most this many prefetch resolutions at once; more are dropped (hover spam, long queues).
+/// Each one is about six YouTube requests, so this is what keeps a burst of hints from becoming
+/// a burst of traffic.
+const MAX_PREFETCH_PENDING: usize = 2;
+/// Prefetches allowed back to back, then one per [`PREFETCH_EVERY`] (10 a minute). Playback
+/// itself (a click, the next track) is never counted against this.
+const PREFETCH_BURST: u32 = 3;
+const PREFETCH_EVERY: Duration = Duration::from_secs(6);
+/// A skipped prefetch is written to the log at most this often (with how many were skipped).
+const DROP_NOTE_EVERY: Duration = Duration::from_secs(30);
+/// Prefetched ids remembered, to tell a track that is being resolved again from a new one.
+const RECENT_PREFETCH_MAX: usize = 512;
+const RECENT_PREFETCH_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// What one resolution produced, shareable between the callers waiting for it.
 #[derive(Clone, Copy)]
@@ -142,6 +154,8 @@ struct Note {
     client: Option<String>,
     /// The chosen format's id and audio bitrate (kbps), to see what quality a setting yields.
     format: Option<String>,
+    /// yt-dlp met a 429 on the way, even if another client then got the track.
+    throttled: bool,
 }
 
 impl Note {
@@ -189,6 +203,14 @@ struct Inner {
     flights: Mutex<HashMap<String, Arc<Flight>>>,
     prefetch_pending: AtomicUsize,
     prefetch_seq: AtomicU64,
+    prefetch_pacer: Pacer,
+    /// Prefetches skipped since the last time that was written to the log, and when it was.
+    dropped: Mutex<(u64, Option<Instant>)>,
+    /// When each id was last prefetched here (bounded), to log `repeat=true` for a track that is
+    /// resolved again: the sign of a cache that does not hold or a trigger that does not stop.
+    recent_prefetch: Mutex<HashMap<String, Instant>>,
+    /// Shared with the other YouTube callers (see `apollo_services_common::throttle`).
+    throttle: Mutex<Throttle>,
     log_file: Mutex<Option<std::path::PathBuf>>,
 }
 
@@ -204,6 +226,11 @@ impl ResolverHandle {
     /// reloads the cookies), but their cookie state is marked stale.
     pub fn invalidate(&self) {
         self.inner.invalidate();
+    }
+
+    /// Write a line (outcome codes and numbers only) to the resolver's log.
+    pub fn note(&self, line: String) {
+        self.inner.note(line);
     }
 }
 
@@ -286,6 +313,10 @@ impl YtDlpResolver {
                 flights: Mutex::new(HashMap::new()),
                 prefetch_pending: AtomicUsize::new(0),
                 prefetch_seq: AtomicU64::new(0),
+                prefetch_pacer: Pacer::new(PREFETCH_BURST, PREFETCH_EVERY),
+                dropped: Mutex::new((0, None)),
+                recent_prefetch: Mutex::new(HashMap::new()),
+                throttle: Mutex::new(Throttle::new()),
                 log_file: Mutex::new(None),
             }),
             threads: Mutex::new(Vec::new()),
@@ -299,6 +330,19 @@ impl YtDlpResolver {
             let _ = fs::rename(&path, path.with_extension("old"));
         }
         *self.inner.log_file.lock().unwrap() = Some(path);
+    }
+
+    /// Share one throttle with the other things that talk to YouTube as this account, so a 429
+    /// seen by any of them slows all of them. Without this the resolver has a throttle of its own.
+    pub fn set_throttle(&self, throttle: Throttle) {
+        *self.inner.throttle.lock().unwrap() = throttle;
+    }
+
+    /// How long a click would have to wait before the resolver may ask YouTube again (`None` =
+    /// not at all). While this is set a resolution that needs the network fails at once with
+    /// `Failure::Throttled` instead of making another doomed request.
+    pub fn cooldown_remaining(&self) -> Option<Duration> {
+        self.inner.throttle().blocked(Lane::Foreground)
     }
 
     pub fn handle(&self) -> ResolverHandle {
@@ -435,6 +479,54 @@ enum Warm {
 }
 
 impl Inner {
+    fn throttle(&self) -> Throttle {
+        self.throttle.lock().unwrap().clone()
+    }
+
+    /// A prefetch that was not started. Counted, and written to the log at most every
+    /// [`DROP_NOTE_EVERY`], so a storm of hints is visible without flooding the log.
+    fn note_dropped(&self, reason: &str) {
+        let mut d = self.dropped.lock().unwrap();
+        d.0 += 1;
+        if d.1.is_some_and(|at| at.elapsed() < DROP_NOTE_EVERY) {
+            return;
+        }
+        let n = std::mem::replace(&mut d.0, 0);
+        d.1 = Some(Instant::now());
+        drop(d);
+        self.note(format!("prefetch skipped reason={reason} n={n}"));
+    }
+
+    /// Whether `vid` was already prefetched here within the last hour, remembering it now.
+    fn seen_before(&self, vid: &str) -> bool {
+        let mut m = self.recent_prefetch.lock().unwrap();
+        if m.len() >= RECENT_PREFETCH_MAX {
+            m.retain(|_, at| at.elapsed() < RECENT_PREFETCH_AGE);
+            if m.len() >= RECENT_PREFETCH_MAX {
+                m.clear();
+            }
+        }
+        m.insert(vid.to_owned(), Instant::now())
+            .is_some_and(|at| at.elapsed() < RECENT_PREFETCH_AGE)
+    }
+
+    /// Feed what a finished resolution says about YouTube's mood into the shared throttle.
+    fn learn(&self, outcome: &Outcome, note: &Note) {
+        let throttle = self.throttle();
+        if matches!(outcome, Outcome::Failed(Failure::Throttled, _)) || note.throttled {
+            let wait = throttle.report_throttled(None);
+            let bg = throttle.blocked(Lane::Background).unwrap_or_default();
+            self.note(format!(
+                "throttled strikes={} wait_s={} background_wait_s={}",
+                throttle.strikes(),
+                wait.as_secs(),
+                bg.as_secs()
+            ));
+        } else if matches!(outcome, Outcome::Ok(_)) {
+            throttle.report_ok();
+        }
+    }
+
     fn note(&self, line: String) {
         if let Some(path) = self.log_file.lock().unwrap().as_ref() {
             use std::io::Write;
@@ -518,8 +610,22 @@ impl Inner {
         }
         if self.prefetch_pending.fetch_add(1, Ordering::SeqCst) >= MAX_PREFETCH_PENDING {
             self.prefetch_pending.fetch_sub(1, Ordering::SeqCst);
+            self.note_dropped("busy");
             return;
         }
+        // Speculation is the first thing to stop when YouTube pushes back, and it is paced
+        // even when it does not.
+        if self.throttle().blocked(Lane::Background).is_some() {
+            self.prefetch_pending.fetch_sub(1, Ordering::SeqCst);
+            self.note_dropped("cooldown");
+            return;
+        }
+        if !self.prefetch_pacer.try_take() {
+            self.prefetch_pending.fetch_sub(1, Ordering::SeqCst);
+            self.note_dropped("budget");
+            return;
+        }
+        let repeat = self.seen_before(&vid);
         let key = PREFETCH_KEY_BASE + self.prefetch_seq.fetch_add(1, Ordering::SeqCst);
         let job = Arc::new(Job::default());
         self.jobs.lock().unwrap().insert(key, job.clone());
@@ -536,9 +642,10 @@ impl Inner {
                     Outcome::Cancelled => "cancelled".to_owned(),
                 };
                 me.note(format!(
-                    "prefetch outcome={label} ms={}{}",
+                    "prefetch outcome={label} ms={}{}{}",
                     started.elapsed().as_millis(),
-                    note.suffix()
+                    note.suffix(),
+                    if repeat { " repeat=true" } else { "" }
                 ));
                 me.jobs.lock().unwrap().remove(&key);
                 me.prefetch_pending.fetch_sub(1, Ordering::SeqCst);
@@ -596,6 +703,17 @@ impl Inner {
                 match flights.get(vid) {
                     Some(f) => (f.clone(), false),
                     None => {
+                        // Nothing in flight and YouTube said slow down: do not ask again. The
+                        // cache was already consulted above, so only a real request is refused.
+                        let lane = if foreground { Lane::Foreground } else { Lane::Background };
+                        if let Some(wait) = self.throttle().blocked(lane) {
+                            drop(flights);
+                            if foreground {
+                                self.note(format!("load held back: cooldown wait_s={}", wait.as_secs()));
+                            }
+                            note.src = "cooldown";
+                            return Outcome::Failed(Failure::Throttled, "cooldown");
+                        }
                         let f = Arc::new(Flight {
                             done: Mutex::new(None),
                             cv: Condvar::new(),
@@ -629,6 +747,7 @@ impl Inner {
             }
 
             let outcome = self.produce(video_id, &snapshot, &flight.foreground, job, note);
+            self.learn(&outcome, note);
             let produced = match &outcome {
                 Outcome::Ok(id) => {
                     if let Some(c) = &self.cache {
@@ -780,6 +899,7 @@ impl Inner {
             };
             note.src = if fast { "warm-fast" } else { "warm" };
             note.worker_ms = Some(sent.elapsed().as_millis() as u64);
+            note.throttled |= reply["throttled"] == true;
             note.client = reply["client"]
                 .as_str()
                 .map(|c| c.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').take(24).collect());
