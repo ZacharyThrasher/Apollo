@@ -166,13 +166,7 @@ pub fn progress(
     let controls = v.status == Status::Ready && v.has_track;
     // While skimming the bar is the skim window, not the song.
     let skim = v.skim;
-    let (position, duration) = match skim {
-        Some(s) => {
-            let (p, d) = s.in_window(v.position_ms);
-            (p, Some(d))
-        }
-        None => (v.position_ms, v.duration_ms),
-    };
+    let (position, duration) = v.progress_ms();
     let seekable = controls && duration.is_some_and(|d| d > 0);
     let scrub = state.read(cx).scrubbing();
     let shown_ms = match (scrub, duration) {

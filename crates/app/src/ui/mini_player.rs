@@ -846,8 +846,9 @@ impl MiniPlayer {
             ))
             .children(lyric);
 
-        let fraction = match v.duration_ms {
-            Some(total) if total > 0 => (v.position_ms as f32 / total as f32).clamp(0.0, 1.0),
+        let (position_ms, duration_ms) = v.progress_ms();
+        let fraction = match duration_ms {
+            Some(total) if total > 0 => (position_ms as f32 / total as f32).clamp(0.0, 1.0),
             _ => 0.0,
         };
         let progress = div()
@@ -1237,8 +1238,9 @@ impl MiniPlayer {
         });
 
         // The line along the bottom edge, drawn in by the corner radius so it clears the curve.
-        let fraction = match v.duration_ms {
-            Some(total) if total > 0 => (v.position_ms as f32 / total as f32).clamp(0.0, 1.0),
+        let (position_ms, duration_ms) = v.progress_ms();
+        let fraction = match duration_ms {
+            Some(total) if total > 0 => (position_ms as f32 / total as f32).clamp(0.0, 1.0),
             _ => 0.0,
         };
         let line = div()

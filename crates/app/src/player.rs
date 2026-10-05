@@ -161,6 +161,20 @@ pub struct PlayerView {
     pub skim: Option<SkimView>,
 }
 
+impl PlayerView {
+    /// The playhead and the length the progress bars show: the song's own, or while skimming
+    /// the skim window.
+    pub fn progress_ms(&self) -> (u64, Option<u64>) {
+        match self.skim {
+            Some(skim) => {
+                let (position, window) = skim.in_window(self.position_ms);
+                (position, Some(window))
+            }
+            None => (self.position_ms, self.duration_ms),
+        }
+    }
+}
+
 pub struct PlayerModel {
     status: Status,
     driver: Option<AppDriver>,
