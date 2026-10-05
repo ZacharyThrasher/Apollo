@@ -92,8 +92,8 @@ port, simulated source, InnerTube-backed `live` source behind the `provider` fea
   page; the button shows a spinner meanwhile. A page failure part-way shows "Couldn't load all
   tracks" with Retry and drops the pending request.
 - **Keyboard:** Up/Down/PageUp/PageDown/Home/End move one selection per list, Enter opens or
-  plays, Escape or Alt+Left goes back. Choosing Library in the nav while on it returns to the
-  lists.
+  plays, Escape or Alt+Left goes back (to the previous place in the window's history, see
+  `keyboard.md`). Choosing Library in the nav while on it returns to the lists.
 - **Real data:** `InnerTubeLibrary` builds a signed-in InnerTube session from the account
   service's cookie snapshot and returns rotated cookies through `offer_rotation`. Not yet verified
   against a live account: the selected channel's `page_id` is used as the data-sync id, and

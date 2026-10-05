@@ -27,8 +27,27 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | A | Add to the target playlist: the playing song (in the queue, Library, Search and Crate lists: the song under the cursor; with 2 or more picked, all of them). With no target set the picker opens to choose one. Settings > Playlists > "A adds to the target playlist" switches it off. See "The target playlist" |
 | Ctrl+Z | Undo the last queue change or playlist edit, whichever came last (see "Undo") |
 | Ctrl+Shift+Z or Ctrl+Y | Redo a queue change (playlist edits have no redo) |
+| Alt+Left / Alt+Right | Back / Forward through the places you have been (see "Back and Forward"). Work in text fields too |
+| Backspace | Back, except while a text field (Search, a filter, a rename) has the keys, and in the queue and the Crate, where it removes the row |
 | Esc | Close Now Playing |
 | F11 | Fullscreen while Now Playing is open (leaves fullscreen when Now Playing closes) |
+
+## Back and Forward
+
+Like a browser's. The window remembers the places it showed (Home, Explore, Search, a Library tab,
+a playlist, album or artist page, the Crate, Settings, Now Playing), up to 50, in memory only.
+
+- **Buttons:** the chevrons at the left of the title bar (grey when there is nowhere to go), the
+  keys above, and the mouse's side buttons (Back / Forward).
+- **Going back restores the page:** how far it was scrolled, what the Search field held and what a
+  playlist's or the Songs tab's filter box held. The page cache makes the page itself instant.
+- **A new place from the middle** drops the places that were ahead (the browser rule). Choosing
+  the nav item of the page you are already on adds nothing.
+- **Now Playing is a place:** Esc, the chevron and Back all close it by stepping back to the page
+  it was opened over; Forward reopens it.
+- **A mood page in Explore** closes first (Back from it shows the tiles), then Back leaves Explore.
+- **A popup or dialog open:** the keys and side buttons leave the screen alone.
+- A page's own Back button and Esc on a page do the same as Back.
 
 ## Picking several songs
 
