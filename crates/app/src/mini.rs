@@ -34,6 +34,7 @@ pub const PLACEMENT: Constraints = Constraints {
     default_size: (mini_player::WIDTH, mini_player::HEIGHT),
     min_size: (mini_player::WIDTH, mini_player::HEIGHT),
     home: Home::BottomRight,
+    fixed: true,
 };
 
 /// The HUD's window: the panel and nothing round it, parked in the same corner.
@@ -41,6 +42,7 @@ pub const HUD_PLACEMENT: Constraints = Constraints {
     default_size: (mini_player::HUD_WIDTH, mini_player::HUD_HEIGHT),
     min_size: (mini_player::HUD_WIDTH, mini_player::HUD_HEIGHT),
     home: Home::BottomRight,
+    fixed: true,
 };
 
 /// How long Apollo may be out of focus before an expanded main window collapses back.
@@ -255,7 +257,7 @@ pub fn open(cx: &mut App) {
             true
         });
         // Its position is remembered like the main window's.
-        let remembered = window_state::remember(window, cx, store, key, false);
+        let remembered = window_state::remember(window, cx, store, key, Some(placement.default_size));
         view.keep(remembered);
     });
     if cx.has_global::<Host>() {

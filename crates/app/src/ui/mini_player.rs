@@ -521,6 +521,7 @@ impl MiniPlayer {
     /// One look at the world: the pointer, the fade, and whether the window has been left
     /// somewhere it should snap from.
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.keep_its_size(window);
         let now = (self.clock)();
         let mut changed = false;
         let inside = (self.pointer)(window);
@@ -572,6 +573,19 @@ impl MiniPlayer {
         }
         if changed {
             cx.notify();
+        }
+    }
+
+    /// The window has exactly one size. Whatever stretched it (a bad saved place, a DPI change, a
+    /// stray resize) is undone here, so it can never sit on screen as a big empty window.
+    fn keep_its_size(&self, window: &mut Window) {
+        let size = if self.hud {
+            (HUD_WIDTH, HUD_HEIGHT)
+        } else {
+            (WIDTH, HEIGHT)
+        };
+        if window_state::size_is_off(&Rect::from_bounds(window.bounds()), size) {
+            window.resize(gpui::size(gpui::px(size.0), gpui::px(size.1)));
         }
     }
 

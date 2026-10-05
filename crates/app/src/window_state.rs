@@ -34,6 +34,9 @@ const SAVE_DELAY: Duration = Duration::from_millis(600);
 /// reachable: enough to grab and drag.
 const GRAB_WIDTH: f32 = 96.0;
 const GRAB_HEIGHT: f32 = 32.0;
+/// How far a fixed-size window's reported size may be from its size and still count as it
+/// (rounding between logical and physical pixels).
+const FIXED_SIZE_SLACK: f32 = 2.0;
 /// Gap from the monitor edge for a window parked in a corner (the taskbar sits in the bottom
 /// margin).
 const CORNER_MARGIN_X: f32 = 24.0;
@@ -150,6 +153,9 @@ pub struct Constraints {
     pub default_size: (f32, f32),
     pub min_size: (f32, f32),
     pub home: Home,
+    /// The window has one size and never maximizes (the mini player, the HUD): only its
+    /// position is remembered, and whatever size or maximized flag a record carries is ignored.
+    pub fixed: bool,
 }
 
 /// The place a window opens at: the saved one kept on a monitor, or its default on the primary.
@@ -174,10 +180,19 @@ pub fn place(
             maximized: false,
         };
     };
-    let size = (
-        saved.rect.w.max(c.min_size.0),
-        saved.rect.h.max(c.min_size.1),
-    );
+    // A fixed window keeps only the saved position; a record of any other size (a window that
+    // was once stretched or maximized) is no reason to open big.
+    let (size, maximized) = if c.fixed {
+        (c.default_size, false)
+    } else {
+        (
+            (
+                saved.rect.w.max(c.min_size.0),
+                saved.rect.h.max(c.min_size.1),
+            ),
+            saved.maximized,
+        )
+    };
     // The monitor that shows the most of the grabbable strip, if any shows enough.
     let strip = Rect::new(saved.rect.x, saved.rect.y, size.0, GRAB_HEIGHT.min(size.1));
     let target = displays
@@ -192,7 +207,7 @@ pub fn place(
     match target {
         Some(d) => SavedWindow {
             rect: fit_inside(Rect::new(saved.rect.x, saved.rect.y, size.0, size.1), &d, c),
-            maximized: saved.maximized,
+            maximized,
         },
         None => SavedWindow {
             // Its monitor is gone: the saved size, at home on the primary.
@@ -200,7 +215,7 @@ pub fn place(
                 Some(d) => home_rect(&d, (size.0, size.1), c),
                 None => Rect::new(saved.rect.x, saved.rect.y, size.0, size.1),
             },
-            maximized: saved.maximized,
+            maximized,
         },
     }
 }
@@ -344,7 +359,15 @@ pub fn restore(
         .map(|d| Rect::from_bounds(d.bounds()))
         .collect();
     let primary = cx.primary_display().map(|d| Rect::from_bounds(d.bounds()));
-    place(saved, &displays, primary, c)
+    let placed = place(saved, &displays, primary, c);
+    // A fixed window whose record said another size (or maximized) is put right on disk now, so
+    // the bad row does not wait for the window to move before it is replaced.
+    if let (true, Some(old), Some(store)) = (c.fixed, saved, store) {
+        if old.rect.w != placed.rect.w || old.rect.h != placed.rect.h || old.maximized {
+            store.set(key, &placed.encode());
+        }
+    }
+    placed
 }
 
 /// The monitors' usable areas for snapping: their bounds, with the primary's taskbar taken off
@@ -360,6 +383,27 @@ pub fn usable_displays(cx: &App, scale: f32) -> Vec<Rect> {
             _ => bounds,
         })
         .collect()
+}
+
+/// Whether a fixed-size window's `seen` rectangle is not its one `size` (beyond rounding).
+pub fn size_is_off(seen: &Rect, size: (f32, f32)) -> bool {
+    (seen.w - size.0).abs() > FIXED_SIZE_SLACK || (seen.h - size.1).abs() > FIXED_SIZE_SLACK
+}
+
+/// What the recorder writes down for a window now at `seen`, or `None` when it should write
+/// nothing. A fixed-size window is recorded at its one size, never maximized, and not at all
+/// when it is not that size right now.
+fn record_of(seen: SavedWindow, fixed: Option<(f32, f32)>) -> Option<SavedWindow> {
+    if !seen.rect.is_sane() {
+        return None;
+    }
+    let Some((w, h)) = fixed else {
+        return Some(seen);
+    };
+    (!size_is_off(&seen.rect, (w, h)) && !seen.maximized).then_some(SavedWindow {
+        rect: Rect::new(seen.rect.x, seen.rect.y, w, h),
+        maximized: false,
+    })
 }
 
 /// What the recorder has seen and not yet written.
@@ -380,14 +424,16 @@ impl Pending {
 }
 
 /// Records the window's place under `key` as it changes: a moment after it settles, and on quit.
-/// Keep the returned subscription alive for the life of the window. `track_maximized` is false
-/// for windows that never maximize (the mini player).
+/// Keep the returned subscription alive for the life of the window. `fixed` is the one size of a
+/// window that never resizes or maximizes (the mini player, the HUD): only its position is
+/// recorded, always with that size, and a moment where the window reports another size
+/// (mid-DPI-change, being torn down) is not recorded at all. `None` records size and maximized.
 pub fn remember<T: 'static>(
     window: &mut Window,
     cx: &mut Context<T>,
     store: Option<Arc<dyn SettingsBackend>>,
     key: &'static str,
-    track_maximized: bool,
+    fixed: Option<(f32, f32)>,
 ) -> Option<Subscription> {
     let store = store?;
     let pending = Rc::new(RefCell::new(Pending {
@@ -408,12 +454,10 @@ pub fn remember<T: 'static>(
         .detach();
     }
     Some(cx.observe_window_bounds(window, move |_, window, cx| {
-        let mut now = SavedWindow::of(window);
-        now.maximized &= track_maximized;
         // A window being minimized, hidden or torn down can report nonsense; never record it.
-        if !now.rect.is_sane() {
+        let Some(now) = record_of(SavedWindow::of(window), fixed) else {
             return;
-        }
+        };
         {
             let mut p = pending.borrow_mut();
             p.latest = Some(now);
@@ -448,11 +492,13 @@ mod tests {
         default_size: (1100.0, 720.0),
         min_size: (864.0, 480.0),
         home: Home::Center,
+        fixed: false,
     };
     const MINI: Constraints = Constraints {
         default_size: (360.0, 96.0),
         min_size: (360.0, 96.0),
         home: Home::BottomRight,
+        fixed: true,
     };
     const PRIMARY: Rect = Rect::new(0.0, 0.0, 1920.0, 1080.0);
     /// To the left of the primary, so its x is negative.
@@ -577,6 +623,53 @@ mod tests {
         let want = saved(100.0, 1200.0, 1000.0, 700.0, false);
         let p = place(want, &[PRIMARY], Some(PRIMARY), &MAIN);
         assert_eq!(p.rect, Rect::new(460.0, 190.0, 1000.0, 700.0));
+    }
+
+    #[test]
+    fn the_mini_player_ignores_a_saved_size_and_keeps_only_its_position() {
+        // The row that made it open full screen: a stretched, maximized record.
+        let want = saved(0.0, 0.0, 1535.0, 1100.0, true);
+        let p = place(want, &[PRIMARY], Some(PRIMARY), &MINI);
+        assert_eq!(p.rect, Rect::new(0.0, 0.0, 360.0, 96.0));
+        assert!(!p.maximized);
+        // Its position survives, nudged on screen as ever.
+        let want = saved(300.0, 200.0, 900.0, 600.0, false);
+        let p = place(want, &[PRIMARY], Some(PRIMARY), &MINI);
+        assert_eq!(p.rect, Rect::new(300.0, 200.0, 360.0, 96.0));
+        // Its monitor is gone and the size was huge: home, at the one size.
+        let want = saved(-2000.0, 20.0, 1535.0, 1100.0, true);
+        let p = place(want, &[PRIMARY], Some(PRIMARY), &MINI);
+        assert_eq!(p.rect, Rect::new(1536.0, 912.0, 360.0, 96.0));
+        assert!(!p.maximized);
+    }
+
+    #[test]
+    fn a_fixed_window_records_only_its_position_and_only_at_its_size() {
+        let at = |w: f32, h: f32, m: bool| SavedWindow {
+            rect: Rect::new(40.0, 50.0, w, h),
+            maximized: m,
+        };
+        let one = Some((360.0, 96.0));
+        // At its size (within rounding): recorded at exactly its size.
+        assert_eq!(
+            record_of(at(361.0, 95.0, false), one).map(|s| s.encode()),
+            Some("40,50,360,96,0".to_string())
+        );
+        // Stretched, maximized or nonsense: nothing is written.
+        assert_eq!(record_of(at(1535.0, 1100.0, false), one), None);
+        assert_eq!(record_of(at(360.0, 96.0, true), one), None);
+        assert_eq!(record_of(at(0.0, 0.0, false), one), None);
+        // A resizable window records whatever it is.
+        assert_eq!(record_of(at(1535.0, 1100.0, true), None), Some(at(1535.0, 1100.0, true)));
+    }
+
+    #[test]
+    fn a_fixed_window_notices_when_it_is_not_its_size() {
+        let size = (360.0, 96.0);
+        assert!(!size_is_off(&Rect::new(0.0, 0.0, 360.0, 96.0), size));
+        assert!(!size_is_off(&Rect::new(0.0, 0.0, 361.0, 95.0), size));
+        assert!(size_is_off(&Rect::new(0.0, 0.0, 1535.0, 1100.0), size));
+        assert!(size_is_off(&Rect::new(0.0, 0.0, 360.0, 400.0), size));
     }
 
     #[test]
