@@ -147,6 +147,15 @@ enum Write {
     Purge,
 }
 
+/// A song to put in the Crate with what the list it came from knew of it.
+#[derive(Clone, Debug)]
+pub struct NewSong {
+    pub track: Track,
+    pub thumbnail: Option<String>,
+    /// The "E" badge, when the list showed one.
+    pub explicit: bool,
+}
+
 /// The crate as the UI sees it.
 pub struct CrateModel {
     store: Option<Arc<dyn CrateStore>>,
@@ -532,6 +541,38 @@ impl CrateModel {
         added
     }
 
+    /// [`add_many`](Self::add_many) for songs a search or a paste found, which know whether the
+    /// service marks them explicit. One step for Ctrl+Z; the caller says what happened in the tip
+    /// pill (this says nothing).
+    pub fn add_found(&mut self, songs_in: Vec<NewSong>, cx: &mut Context<Self>) -> Vec<String> {
+        let before = self.items.clone();
+        let mut added: Vec<String> = Vec::new();
+        for song in songs_in {
+            let video = song.track.video_id.as_str().to_owned();
+            if self.contains(&video) {
+                continue;
+            }
+            let row = CrateRow {
+                explicit: song.explicit || crate::explicit_marks::is_explicit(&video),
+                track: song.track,
+                thumbnail: song.thumbnail,
+                added_ms: now_ms(),
+            };
+            if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
+                let _ = writer.send(Write::Add(key.clone(), Box::new(row.clone())));
+            }
+            self.items.push(row);
+            added.push(video);
+        }
+        if added.is_empty() {
+            return added;
+        }
+        self.record(before, format!("added {} to the Crate", songs(added.len())), cx);
+        cx.notify();
+        self.auto_swap(added.clone(), cx);
+        added
+    }
+
     /// Drop songs into the crate before what is at slot `slot` now (`len` or more means the
     /// bottom). A song already in the crate moves there instead of being added twice; the songs
     /// keep the order they are given in. Returns whether anything changed. One step for Ctrl+Z.
@@ -892,6 +933,16 @@ impl CrateModel {
     /// Use `throttle` in place of the process's own (tests).
     pub fn set_throttle(&mut self, throttle: Throttle) {
         self.throttle = throttle;
+    }
+
+    /// The search the Crate asks (the add box and a paste ask it too), once the backend is ready.
+    pub fn search_source(&self) -> Option<Arc<dyn SearchSource>> {
+        self.search.clone()
+    }
+
+    /// The process's record of YouTube being busy, as the Crate has it.
+    pub fn throttle(&self) -> Throttle {
+        self.throttle.clone()
     }
 
     /// Whether the service marks the song explicit, as far as the crate knows.
