@@ -1,6 +1,7 @@
 # Keyboard shortcuts
 
-The list is here, not in the app (Settings shows only the Global hotkeys switch).
+The list is here, and in the app: press **?** (anywhere except a text field) for the cheat sheet,
+Settings > Keyboard for the switches. See "Learning the keys" below.
 
 ## In the window
 
@@ -18,6 +19,7 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Shift+Left / Shift+Right | Previous / next track |
 | Ctrl+Left / Ctrl+Right | Previous / next track (older binding, kept) |
 | Ctrl+F or Ctrl+K | Open Search with the caret in the field (these work in text fields too) |
+| ? (Shift+/) | Cheat sheet: every key, grouped by Play / Collect / Navigate / Window. Esc, ?, Enter or Space close it; the other keys stand down while it is open |
 | Ctrl+L | Show / hide lyrics (opens Now Playing) |
 | L | Like / unlike the playing song |
 | C | Set the playing song aside in the Crate (in the queue, Library and Search lists: the song under the cursor) |
@@ -53,6 +55,45 @@ the old song come back, paused where it was. A small "Queue restored" pill shows
 
 Media keys are the OS's (SMTC) and are untouched.
 
+## Learning the keys
+
+The help reads the live keymap (never a copy of it), so a key bound anywhere shows up in all of
+these without further work:
+
+- **Tooltips end with their key**: "Add to Crate  C", "Mute  M", "Next  Shift+→". A button in the
+  player bar or Now Playing shows only keys that work wherever focus is; a row's actions also
+  show their list's key (L, C, P in Search, Library, Queue and the Crate).
+- **Context-menu rows show the key** at their right edge (11px caption, text.secondary): Like,
+  Add to Crate, Add to playlist, Remove.
+- **`?` cheat sheet** (`ui/cheat_sheet.rs`): bg.overlay panel, key caps as bg.raised pills. When
+  Global hotkeys are on, the Ctrl+Alt keys are listed under Window.
+- **Hold Ctrl for about 0.6 s** and the buttons that have a single-key shortcut (Play, Mute, Like,
+  Add to playlist) wear a small badge with the key, like Office key tips; letting go, switching
+  windows or pressing any other key puts them away.
+- **A nudge, once per command**: the third time a command that has a key is done with the mouse
+  (a button, a row action or a menu row; keyboard use never counts), a one-line "Tip: press C"
+  shows in the pill above the player bar for 4 s. Each command's tip shows once ever (the counts
+  are kept in the settings table under `shortcut_hint_state`).
+
+Settings > Keyboard: **Show shortcut hints** (on) covers the tooltips, the menu keys and the
+nudge; **Hold Ctrl for key badges** (on) covers the badges. The cheat sheet is always there.
+The mini player and the HUD show none of this (their keys are a subset).
+
+### Adding a key
+
+Bind it as usual. A plain letter whose action no entry names appears in the cheat sheet's
+"More" group, named after its action. For a proper label, group, tooltip and menu key, add one
+line to `ENTRIES` in `crates/app/src/shortcuts.rs`: an id, a label, a group, the short action
+names (one per page that binds the key) and the tooltip labels that mean the command. A menu
+row gets its key from `shortcut_of` in `ui/track_menu.rs`.
+
+### Why the letters are what they are
+
+One letter, one meaning, the same in every list: **L**ike, **C**rate, **P**laylist, **M**ute; the
+planned **K**eep (Skim) and **A**dd (target playlist) follow the same rule. Chords for what
+reaches further: Ctrl+K / Ctrl+F search, Ctrl+L lyrics, Ctrl+Z / Ctrl+Y queue undo and redo.
+Space, the arrows, Esc and F11 are the ones every player has.
+
 ## Global hotkeys
 
 Settings > Keyboard > **Global hotkeys** (off by default). While on, these work when Apollo is
@@ -75,4 +116,6 @@ registered hotkey while the keys are held, so each press is one step.
   apply) and what each global hotkey does.
 - `crates/app/src/hotkeys_win.rs`: registers the global hotkeys with Windows (`global-hotkey` on
   GPUI's own message loop, like the tray) while the switch is on.
+- `crates/app/src/shortcuts.rs`: reads the keymap for the tooltips, menu keys, cheat sheet rows,
+  badges and the third-use nudge (`HintLedger`).
 - `crates/app/src/ui/shell.rs`: the action handlers. `tests/keyboard.rs` drives them.

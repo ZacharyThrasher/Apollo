@@ -697,6 +697,7 @@ impl MiniPlayer {
         };
         let button = |id: &'static str, focus: &FocusHandle, icon: Icon, label: &str, size: f32| {
             IconButton::new(id, focus, icon, label.to_owned(), accent)
+                .no_key_hint()
                 .size(size)
                 .enabled(controls)
         };
@@ -1172,6 +1173,7 @@ impl MiniPlayer {
         };
         let button = |id: &'static str, focus: &FocusHandle, icon: Icon, label: &str| {
             IconButton::new(id, focus, icon, label.to_owned(), accent)
+                .no_key_hint()
                 .size(HUD_BUTTON)
                 .icon_color(color::text_primary())
                 .enabled(controls)

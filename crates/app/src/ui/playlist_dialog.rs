@@ -28,11 +28,13 @@ use gpui::{
     IntoElement, KeyBinding, MouseButton, ParentElement, Render, SharedString, Styled, Window,
 };
 
+use crate::crate_list;
 use crate::library::edits::{Edit, EditEvent, LibraryEdits};
 use crate::player::PlayerModel;
 use crate::style::{self, color};
 use crate::ui::anchor;
 use crate::ui::choice_menu::{self, Choice};
+use crate::ui::switch::LabeledSwitch;
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{self, TextField, TextFieldEvent};
 
@@ -55,6 +57,9 @@ pub fn bind_keys(cx: &mut App) {
 
 pub const PANEL_WIDTH: f32 = 360.0;
 
+/// The name a playlist made from the Crate starts with.
+pub const CRATE_PLAYLIST_NAME: &str = "My Crate";
+
 /// Rows of the description field.
 const DESCRIPTION_ROWS: usize = 3;
 /// Where the visibility popover hangs from, and how wide it is.
@@ -71,6 +76,12 @@ pub enum Mode {
         name: String,
         video_ids: Vec<String>,
     },
+    /// Save the Crate: a new playlist that holds `video_ids` (the Crate's order), `name` being the
+    /// one it starts with. Offers to clear those songs from the Crate afterwards.
+    FromCrate {
+        name: String,
+        video_ids: Vec<String>,
+    },
     /// Change a playlist's name, description and visibility.
     Edit(Collection),
     Delete(Collection),
@@ -79,7 +90,7 @@ pub enum Mode {
 impl Mode {
     pub fn title(&self) -> &'static str {
         match self {
-            Mode::Create { .. } | Mode::FromQueue { .. } => "New playlist",
+            Mode::Create { .. } | Mode::FromQueue { .. } | Mode::FromCrate { .. } => "New playlist",
             Mode::Edit(_) => "Edit playlist",
             Mode::Delete(_) => "Delete playlist?",
         }
@@ -87,7 +98,7 @@ impl Mode {
 
     pub fn action(&self) -> &'static str {
         match self {
-            Mode::Create { .. } | Mode::FromQueue { .. } => "Create",
+            Mode::Create { .. } | Mode::FromQueue { .. } | Mode::FromCrate { .. } => "Create",
             Mode::Edit(_) => "Save",
             Mode::Delete(_) => "Delete",
         }
@@ -98,6 +109,7 @@ impl Mode {
         match self {
             Mode::Create { .. } => Edit::Create,
             Mode::FromQueue { .. } => Edit::SaveQueue,
+            Mode::FromCrate { .. } => Edit::SaveCrate,
             Mode::Edit(_) => Edit::Update,
             Mode::Delete(_) => Edit::Delete,
         }
@@ -114,6 +126,7 @@ enum Stop {
     Field,
     Description,
     Privacy,
+    ClearCrate,
     Cancel,
     Action,
 }
@@ -127,6 +140,8 @@ struct Open {
     /// (nothing to choose then).
     synced: bool,
     privacy: Option<Privacy>,
+    /// Save the Crate: take the saved songs out of the Crate once the playlist exists.
+    clear_crate: bool,
     /// The edit succeeded: the dialog closes on the next frame (events carry no window).
     done: bool,
     /// Where keyboard focus returns to when the dialog closes.
@@ -154,6 +169,7 @@ pub struct PlaylistDialog {
     field: Entity<TextField>,
     description: Entity<TextField>,
     privacy_focus: FocusHandle,
+    clear_crate_focus: FocusHandle,
     cancel_focus: FocusHandle,
     action_focus: FocusHandle,
     open: Option<Open>,
@@ -197,6 +213,7 @@ impl PlaylistDialog {
             field,
             description,
             privacy_focus: cx.focus_handle().tab_stop(true),
+            clear_crate_focus: cx.focus_handle().tab_stop(true),
             cancel_focus: cx.focus_handle().tab_stop(true),
             action_focus: cx.focus_handle().tab_stop(true),
             open: None,
@@ -243,7 +260,7 @@ impl PlaylistDialog {
             .or_else(|| window.focused(cx));
         let initial = match &mode {
             Mode::Edit(collection) => collection.title.clone(),
-            Mode::FromQueue { name, .. } => name.clone(),
+            Mode::FromQueue { name, .. } | Mode::FromCrate { name, .. } => name.clone(),
             _ => String::new(),
         };
         self.field.update(cx, |f, cx| {
@@ -261,6 +278,7 @@ impl PlaylistDialog {
             busy: false,
             synced: false,
             privacy: None,
+            clear_crate: false,
             done: false,
             return_focus,
         });
@@ -350,6 +368,11 @@ impl PlaylistDialog {
                 self.edits
                     .update(cx, |e, cx| e.create_with_songs(title, video_ids, cx));
             }
+            (Mode::FromCrate { video_ids, .. }, Some(title)) => {
+                self.start(cx);
+                self.edits
+                    .update(cx, |e, cx| e.create_with_crate(title, video_ids, cx));
+            }
             (Mode::Edit(collection), Some(title)) => {
                 let change = self.change(&collection, title, cx);
                 if change.is_empty() {
@@ -420,6 +443,18 @@ impl PlaylistDialog {
         );
     }
 
+    /// Whether the Crate is to be cleared once the playlist is made (Save the Crate only).
+    pub fn clear_crate(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.clear_crate)
+    }
+
+    pub fn set_clear_crate(&mut self, clear: bool, cx: &mut Context<Self>) {
+        if let Some(open) = self.open.as_mut().filter(|o| !o.busy) {
+            open.clear_crate = clear;
+            cx.notify();
+        }
+    }
+
     pub fn set_privacy(&mut self, privacy: Privacy, cx: &mut Context<Self>) {
         if let Some(open) = self.open.as_mut().filter(|o| o.privacy.is_some() && !o.busy) {
             open.privacy = Some(privacy);
@@ -447,12 +482,26 @@ impl PlaylistDialog {
             return;
         };
         let mine = match (event, &open.mode) {
-            (EditEvent::Created(_), Mode::Create { .. } | Mode::FromQueue { .. }) => true,
+            (
+                EditEvent::Created(_),
+                Mode::Create { .. } | Mode::FromQueue { .. } | Mode::FromCrate { .. },
+            ) => true,
             (EditEvent::Edited(c), Mode::Edit(asked)) => c.library_key() == asked.library_key(),
             (EditEvent::Deleted(c), Mode::Delete(asked)) => c.library_key() == asked.library_key(),
             _ => false,
         };
         if mine {
+            // The songs are in the playlist now: the ones saved leave the Crate, if asked.
+            if let (true, Mode::FromCrate { video_ids, .. }) = (open.clear_crate, &open.mode) {
+                if let Some(model) = crate_list::handle(cx) {
+                    let video_ids = video_ids.clone();
+                    model.update(cx, |m, cx| {
+                        for video in &video_ids {
+                            m.remove(video, cx);
+                        }
+                    });
+                }
+            }
             self.finish(cx);
         } else if let EditEvent::Failed(edit) = event {
             if *edit == open.mode.edit() {
@@ -473,6 +522,9 @@ impl PlaylistDialog {
         if open.mode.has_field() {
             stops.push(Stop::Field);
         }
+        if matches!(open.mode, Mode::FromCrate { .. }) {
+            stops.push(Stop::ClearCrate);
+        }
         if open.synced {
             stops.push(Stop::Description);
             if open.privacy.is_some() {
@@ -490,6 +542,8 @@ impl PlaylistDialog {
             Some(Stop::Description)
         } else if self.privacy_focus.is_focused(window) {
             Some(Stop::Privacy)
+        } else if self.clear_crate_focus.is_focused(window) {
+            Some(Stop::ClearCrate)
         } else if self.cancel_focus.is_focused(window) {
             Some(Stop::Cancel)
         } else if self.action_focus.is_focused(window) {
@@ -515,6 +569,7 @@ impl PlaylistDialog {
             Stop::Field => text_field::focus(&self.field, window, cx),
             Stop::Description => text_field::focus(&self.description, window, cx),
             Stop::Privacy => window.focus(&self.privacy_focus, cx),
+            Stop::ClearCrate => window.focus(&self.clear_crate_focus, cx),
             Stop::Cancel => window.focus(&self.cancel_focus, cx),
             Stop::Action => window.focus(&self.action_focus, cx),
         }
@@ -591,6 +646,25 @@ impl Render for PlaylistDialog {
                         .child(description)
                         .children(privacy)
                 });
+                let clear_crate = matches!(mode, Mode::FromCrate { .. }).then(|| {
+                    let entity = entity.clone();
+                    let on = open.clear_crate;
+                    div()
+                        .debug_selector(|| "playlist-dialog-clear-crate".into())
+                        .child(
+                            LabeledSwitch::new(
+                                "playlist-dialog-clear-crate",
+                                &self.clear_crate_focus,
+                                "Clear Crate after saving",
+                                on,
+                                accent,
+                            )
+                            .enabled(!busy)
+                            .on_toggle(move |_, cx| {
+                                entity.update(cx, |d, cx| d.set_clear_crate(!on, cx))
+                            }),
+                        )
+                });
                 div()
                     .flex()
                     .flex_col()
@@ -601,6 +675,7 @@ impl Render for PlaylistDialog {
                             .child(self.field.clone()),
                     )
                     .children(details)
+                    .children(clear_crate)
                     .into_any_element()
             }
         };

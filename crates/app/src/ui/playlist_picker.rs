@@ -509,6 +509,24 @@ impl PlaylistPicker {
         self.open_songs(vec![PickerSong::new(video_id, title)], anchor, window, cx);
     }
 
+    /// Open the panel to add all of `video_ids` (in order) to one playlist, the caption saying
+    /// `title` (the Crate's "Add all to\u{2026}"). Nothing opens for an empty list.
+    pub fn open_many(
+        &mut self,
+        video_ids: Vec<String>,
+        title: impl Into<SharedString>,
+        anchor: Option<Bounds<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = title.into();
+        let songs = video_ids
+            .into_iter()
+            .map(|id| PickerSong::new(id, title.clone()))
+            .collect();
+        self.open_songs(songs, anchor, window, cx);
+    }
+
     /// Open the panel for one or more songs (none does nothing).
     pub fn open_songs(
         &mut self,
@@ -776,15 +794,18 @@ impl PlaylistPicker {
         let targets: Vec<PlaylistTarget> =
             plan.add.iter().filter_map(|&ix| list.get(ix).cloned()).collect();
         for target in &targets {
-            self.writes
-                .update(cx, |w, cx| w.add_songs_to_playlist(target, &videos, cx));
+            // Several songs go as one request; one song as the usual single add.
+            self.writes.update(cx, |w, cx| match videos.as_slice() {
+                [video] => w.add_to_playlist(target, video, cx),
+                _ => w.add_many_to_playlist(target, &videos, cx),
+            });
         }
         let ids: Vec<String> = targets.iter().map(|t| t.id.clone()).collect();
         self.remember(&ids, cx);
         if let Some(name) = plan.create {
             self.awaiting_create = Some(name.clone());
             self.edits
-                .update(cx, |e, cx| e.create_holding(name, videos, Edit::Create, cx));
+                .update(cx, |e, cx| e.create_songs(Edit::Create, name, videos, cx));
         }
         if self.stay_open(cx) {
             // Ready for the next playlist: marks and filter cleared, the checks stay.

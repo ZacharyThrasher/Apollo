@@ -227,6 +227,18 @@ pub trait LibrarySource: Send + Sync {
         Err(WriteFailure::Unsupported)
     }
 
+    /// Add several tracks to a playlist the account owns, in order, skipping any it holds. A source
+    /// that can send them as one request should; this default adds them one by one.
+    fn add_many_to_playlist(
+        &self,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<(), WriteFailure> {
+        video_ids
+            .iter()
+            .try_for_each(|video| self.add_to_playlist(playlist_id, video))
+    }
+
     // ---- playlist editing -------------------------------------------------------------------
     // None of these is retried by the source: a timeout is an unknown outcome
     // ([`WriteFailure::Unknown`]) and `library::edits` reads the state back to settle it.

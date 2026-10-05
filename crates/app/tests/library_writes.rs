@@ -906,7 +906,7 @@ fn escape_closes_even_with_text_in_the_filter(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn several_songs_go_into_a_playlist_one_after_another(cx: &mut TestAppContext) {
+fn several_songs_go_into_a_playlist_as_one_request(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     let songs = vec![
         playlist_picker::PickerSong::new(PLAIN, "Plain Song"),
@@ -922,25 +922,18 @@ fn several_songs_go_into_a_playlist_one_after_another(cx: &mut TestAppContext) {
         _ => unreachable!(),
     });
     vcx.simulate_keystrokes("enter"); // Road Trip
+    assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
+    assert_eq!(
+        log(&page),
+        [entry("add-many:PLsimroad", &[PLAIN, "otherTrk01", "otherTrk02"].join(","))]
+    );
     assert!(
         page.writes.read_with(vcx, |w, _| {
             w.holds(&target, PLAIN)
                 && w.added_here(&target, "otherTrk01")
                 && w.added_here(&target, "otherTrk02")
         }),
-        "every song shows as held at once"
-    );
-    assert_eq!(page.sim.added().len(), 1, "but the writes are paced: one has gone out");
-    for _ in 0..2 {
-        vcx.executor()
-            .advance_clock(apollo_app::library::writes::ADD_PACE);
-        vcx.run_until_parked();
-    }
-    assert_eq!(
-        page.sim.added(),
-        [PLAIN, "otherTrk01", "otherTrk02"]
-            .map(|v| ("PLsimroad".to_owned(), v.to_owned()))
-            .to_vec()
+        "every song shows as held"
     );
     assert_eq!(notice(&page, vcx), None);
 }
