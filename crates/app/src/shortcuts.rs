@@ -133,7 +133,7 @@ pub const ENTRIES: &[Entry] = &[
         "crate",
         "Add to Crate",
         Group::Collect,
-        &["CrateCurrent", "CrateSelected", "CrateRow", "CrateCursor"],
+        &["CrateCurrent", "CrateSelected", "CrateRow", "CrateCursor", "CrateSong"],
     )
     .tips(&["Add to Crate"]),
     entry(

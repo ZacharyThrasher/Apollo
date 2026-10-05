@@ -491,6 +491,22 @@ impl CrateStore for Memory {
             .unwrap()
             .retain(|(k, r)| !(k == key && r.track.video_id.as_str() == video_id));
     }
+    fn swap(&self, key: &str, old_video_id: &str, row: &CrateRow) {
+        let mut rows = self.rows.lock().unwrap();
+        let taken = row.track.video_id.as_str() != old_video_id
+            && rows
+                .iter()
+                .any(|(k, r)| k == key && r.track.video_id == row.track.video_id);
+        if taken {
+            return;
+        }
+        if let Some((_, r)) = rows
+            .iter_mut()
+            .find(|(k, r)| k == key && r.track.video_id.as_str() == old_video_id)
+        {
+            *r = row.clone();
+        }
+    }
     fn clear(&self, key: &str) {
         self.rows.lock().unwrap().retain(|(k, _)| k != key);
     }

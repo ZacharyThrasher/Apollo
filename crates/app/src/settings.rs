@@ -102,6 +102,9 @@ pub const CRATE_FILE_AND_FORGET: BoolSetting = BoolSetting::new("crate_file_and_
 /// carry a small check, and "Hide filed" can hide them. Off: no marks, and the target's songs are
 /// never read for it.
 pub const CRATE_MARK_FILED: BoolSetting = BoolSetting::new("crate_mark_filed", true);
+/// Playlists > Prefer explicit versions: a clean song added to the Crate is swapped for its
+/// explicit version at once, when the service has one. Off until the owner asks for it.
+pub const PREFER_EXPLICIT: BoolSetting = BoolSetting::new("prefer_explicit", false);
 /// Window > Close to tray: the close button hides the window and playback continues.
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
@@ -189,6 +192,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     AUTO_ADVANCE.key,
     CRATE_FILE_AND_FORGET.key,
     CRATE_MARK_FILED.key,
+    PREFER_EXPLICIT.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
     PAUSE_ON_OTHER_AUDIO.key,

@@ -698,6 +698,8 @@ impl LibraryView {
                         selection::count_slot(self.selection.len(), cx)
                             .debug_selector(|| "library-selected-count".into()),
                     )
+                    // Add all to Crate lives in this menu.
+                    .child(more_slot("songs-more", true, Subject::Songs))
             }))
             .child(div().flex_1().min_h_0().child(body))
             .into_any_element()

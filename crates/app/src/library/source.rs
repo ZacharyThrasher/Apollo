@@ -32,6 +32,7 @@ pub struct TrackRow {
 
 impl From<ListedTrack> for TrackRow {
     fn from(listed: ListedTrack) -> Self {
+        crate::explicit_marks::note(listed.track.video_id.as_str(), listed.explicit);
         Self {
             track: listed.track,
             occurrence: listed.occurrence,
