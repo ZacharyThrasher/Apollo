@@ -2173,6 +2173,8 @@ impl RenderOnce for SongRow {
             .child(playlist)
             .child(add)
             .child(more);
+        // Drag the song (or every picked song) to the docked Crate.
+        let row = crate::ui::song_drag::draggable(row, &menu);
         track_menu::on_context_menu(row, menu)
     }
 }

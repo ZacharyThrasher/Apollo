@@ -9,6 +9,11 @@
 //! lands; a footer after the last row takes a drop at the end), or Alt+Up / Alt+Down moves the
 //! row under the cursor one place. Save as playlist and Add all follow the order shown.
 //!
+//! The same list also lives docked on the right of the main window ([`Layout::Dock`]): 320px
+//! wide, kept open while you move between pages, with Save as playlist… and Add all to… in its
+//! header. It takes songs dragged in from any list (the drop point is where they land; C still
+//! adds at the bottom) and arranges, picks, removes and plays like the page.
+//!
 //! The list is virtual and keyboard-first like the queue panel's: one tab stop, an arrow-key
 //! cursor, Enter plays, L likes, Delete removes.
 //!
@@ -39,6 +44,9 @@ use crate::player::{format_time, PlayerModel};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler};
+use crate::ui::dock_tabs::{Dock, DockFocus, DockTabs, OnPick as DockPick};
+use crate::ui::library::DraggedRow as LibraryRow;
+use crate::ui::song_drag::SongDrag;
 use crate::ui::player_bar::text_line;
 use crate::ui::playing_row;
 use crate::ui::row_actions::{heart_action, more_slot, row_action, ACTION_SIZE};
@@ -87,6 +95,15 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// Where the list is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// The Crate page, with its wide header.
+    Page,
+    /// The docked panel on the right of the main window.
+    Dock,
+}
+
 /// Same 56px rows as every other song list, with the focus ring's room around the content.
 const ROW_HEIGHT: f32 = 56.0;
 const ROW_INSET: f32 = spacing::S1;
@@ -107,8 +124,15 @@ const TAB_CLEAR: isize = 11;
 const TAB_LIST: isize = 12;
 const TAB_SEARCH: isize = 13;
 
+/// The docked panel's tab stops: its controls sit in the queue panel's slots (13-17), after the
+/// Queue · Crate control.
+const DOCK_TAB_SAVE: isize = 14;
+const DOCK_TAB_ADD_TO: isize = 15;
+const DOCK_TAB_LIST: isize = 17;
+
 /// Where the "Add all to…" popover hangs from.
 const ADD_TO_ANCHOR: &str = "crate-add-to-playlist";
+const DOCK_ADD_TO_ANCHOR: &str = "crate-dock-add-to-playlist";
 
 struct Focus {
     play: FocusHandle,
@@ -171,7 +195,7 @@ impl Render for DragGhost {
 }
 
 /// The line (text.secondary, like the queue's and the playlist page's) a dragged row shows above the row it would land before.
-fn drop_line(group: SharedString) -> impl IntoElement {
+fn drop_line(group: SharedString, dock: bool) -> impl IntoElement {
     div()
         .absolute()
         .top_0()
@@ -181,7 +205,12 @@ fn drop_line(group: SharedString) -> impl IntoElement {
         .rounded_full()
         .bg(color::text_secondary())
         .opacity(0.0)
-        .group_drag_over::<DraggedRow>(group, |s| s.opacity(1.0))
+        .group_drag_over::<DraggedRow>(group.clone(), |s| s.opacity(1.0))
+        // The docked list also takes songs from the other lists.
+        .when(dock, |d| {
+            d.group_drag_over::<SongDrag>(group.clone(), |s| s.opacity(1.0))
+                .group_drag_over::<LibraryRow>(group, |s| s.opacity(1.0))
+        })
 }
 
 /// A header button wrapped so tests (and the layout) can find it by name.
@@ -217,6 +246,9 @@ pub struct CratePage {
     rows: Vec<CrateRow>,
     accent: Accent,
     on_search: Rc<Handler>,
+    layout: Layout,
+    /// The Queue · Crate control, drawn above the docked header.
+    dock_tabs: Option<(DockFocus, DockPick)>,
 }
 
 impl CratePage {
@@ -237,6 +269,29 @@ impl CratePage {
         on_search: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::build(Layout::Page, crate_, player, writes, picker, on_search, cx)
+    }
+
+    /// The docked panel over the same crate (see the module docs).
+    pub fn dock(
+        crate_: Entity<CrateModel>,
+        player: Entity<PlayerModel>,
+        writes: Entity<LibraryWrites>,
+        picker: Entity<PlaylistPicker>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(Layout::Dock, crate_, player, writes, picker, |_, _| {}, cx)
+    }
+
+    fn build(
+        layout: Layout,
+        crate_: Entity<CrateModel>,
+        player: Entity<PlayerModel>,
+        writes: Entity<LibraryWrites>,
+        picker: Entity<PlaylistPicker>,
+        on_search: impl Fn(&mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let stop = |cx: &mut Context<Self>, index: isize| {
             cx.focus_handle().tab_index(index).tab_stop(true)
         };
@@ -249,18 +304,21 @@ impl CratePage {
         .detach();
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
+        let dock = layout == Layout::Dock;
+        // The docked panel's stops are in the queue panel's slots; the page's own are as before.
+        let at = |page: isize, docked: isize| if dock { docked } else { page };
         let focus = Focus {
-            play: stop(cx, TAB_PLAY),
-            shuffle: stop(cx, TAB_SHUFFLE),
-            add_all: stop(cx, TAB_ADD_ALL),
-            save: stop(cx, TAB_SAVE),
-            add_to: stop(cx, TAB_ADD_TO),
-            clear: stop(cx, TAB_CLEAR),
+            play: stop(cx, at(TAB_PLAY, DOCK_TAB_SAVE)),
+            shuffle: stop(cx, at(TAB_SHUFFLE, DOCK_TAB_SAVE)),
+            add_all: stop(cx, at(TAB_ADD_ALL, DOCK_TAB_SAVE)),
+            save: stop(cx, at(TAB_SAVE, DOCK_TAB_SAVE)),
+            add_to: stop(cx, at(TAB_ADD_TO, DOCK_TAB_ADD_TO)),
+            clear: stop(cx, at(TAB_CLEAR, DOCK_TAB_ADD_TO)),
             // The confirmation takes the Clear button's place in the tab order.
-            confirm: stop(cx, TAB_CLEAR),
-            cancel: stop(cx, TAB_CLEAR),
-            list: stop(cx, TAB_LIST),
-            search: stop(cx, TAB_SEARCH),
+            confirm: stop(cx, at(TAB_CLEAR, DOCK_TAB_ADD_TO)),
+            cancel: stop(cx, at(TAB_CLEAR, DOCK_TAB_ADD_TO)),
+            list: stop(cx, at(TAB_LIST, DOCK_TAB_LIST)),
+            search: stop(cx, at(TAB_SEARCH, DOCK_TAB_LIST)),
         };
         Self {
             crate_,
@@ -276,7 +334,18 @@ impl CratePage {
             rows: Vec::new(),
             accent: Accent::fallback(),
             on_search: Rc::new(Box::new(on_search)),
+            layout,
+            dock_tabs: None,
         }
+    }
+
+    /// The control that swaps the docked panel for the queue.
+    pub fn set_dock_tabs(&mut self, focus: DockFocus, on_pick: DockPick) {
+        self.dock_tabs = Some((focus, on_pick));
+    }
+
+    fn docked(&self) -> bool {
+        self.layout == Layout::Dock
     }
 
     pub fn cursor(&self) -> Option<&str> {
@@ -368,9 +437,17 @@ impl CratePage {
             return;
         }
         let title = count_text(video_ids.len());
-        let at = anchor::bounds_of(ADD_TO_ANCHOR, cx);
+        let at = anchor::bounds_of(self.add_to_anchor(), cx);
         self.picker
             .update(cx, |p, cx| p.open_many(video_ids, title, at, window, cx));
+    }
+
+    fn add_to_anchor(&self) -> &'static str {
+        if self.docked() {
+            DOCK_ADD_TO_ANCHOR
+        } else {
+            ADD_TO_ANCHOR
+        }
     }
 
     /// Clear was pressed: ask first.
@@ -509,6 +586,47 @@ impl CratePage {
             }
             cx.notify();
         }
+    }
+
+    /// Songs let go on the docked list before slot `slot` (`len` is the end): each lands there in
+    /// the order dragged, and one the crate already holds moves there instead.
+    fn drop_songs(&mut self, songs: &[TrackSubject], slot: usize, cx: &mut Context<Self>) {
+        let songs: Vec<(apollo_domain::model::Track, Option<String>)> = songs
+            .iter()
+            .map(|s| {
+                let thumbnail = s
+                    .thumbnail
+                    .clone()
+                    .or_else(|| self.player.read(cx).art_url(s.track.video_id.as_str()));
+                (s.track.clone(), thumbnail)
+            })
+            .collect();
+        self.crate_.update(cx, |m, cx| m.insert_at(songs, slot, cx));
+        cx.notify();
+    }
+
+    /// Make `el` take dropped songs before slot `slot`: a row of the crate (arranging), and in the
+    /// docked list a song dragged from a playlist, an album, the Songs tab or Search.
+    fn with_drops<E: InteractiveElement>(
+        &self,
+        el: E,
+        slot: usize,
+        cx: &mut Context<Self>,
+    ) -> E {
+        let el = el.on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
+            this.drop_row(dragged.from, slot, cx)
+        }));
+        if !self.docked() {
+            return el;
+        }
+        el.on_drop(cx.listener(move |this, dragged: &SongDrag, _, cx| {
+            this.drop_songs(&dragged.songs, slot, cx)
+        }))
+        .on_drop(cx.listener(move |this, dragged: &LibraryRow, _, cx| {
+            if let Some(song) = &dragged.song {
+                this.drop_songs(&song.songs, slot, cx)
+            }
+        }))
     }
 
     fn remove_cursor(&mut self, cx: &mut Context<Self>) {
@@ -726,23 +844,27 @@ impl CratePage {
     /// The empty slot after the last row: a row dropped here goes to the bottom.
     fn end_slot(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let group: SharedString = format!("crate-drop-{ix}").into();
-        div()
+        let slot = div()
             .debug_selector(|| "crate-end".into())
             .relative()
             .h(px(ROW_HEIGHT))
             .w_full()
             .flex_none()
             .group(group.clone())
-            .child(drop_line(group))
-            .on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
-                this.drop_row(dragged.from, ix, cx)
-            }))
-            .into_any_element()
+            .child(drop_line(group, self.docked()));
+        self.with_drops(slot, ix, cx).into_any_element()
     }
 
     fn row(&self, ix: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
             return self.end_slot(ix, cx);
+        };
+        let docked = self.docked();
+        // Names that tell the docked list's rows from the page's, so tests find the right ones.
+        let (name, row_id, like_id, remove_id) = if docked {
+            ("dock", "dock-row", "dock-like", "dock-remove")
+        } else {
+            ("crate", "crate-row", "crate-like", "crate-remove")
         };
         let video: String = row.track.video_id.as_str().to_owned();
         let playing = self.player.read(cx).current_video().as_deref() == Some(video.as_str());
@@ -752,7 +874,7 @@ impl CratePage {
         let accent = color::accent(self.accent);
         let tint = selection::row_tint(self.accent);
         let selected = playing || at_cursor;
-        let group: SharedString = format!("crate-row-{ix}").into();
+        let group: SharedString = format!("{name}-row-{ix}").into();
         let thumb = self.player.read(cx).thumb(&video);
         let liked = self.writes.read(cx).is_liked(&video);
         let title: SharedString = row.track.title.clone().into();
@@ -775,13 +897,13 @@ impl CratePage {
         // Room for every action is always reserved; they show on hover or under the cursor,
         // and the heart stays once the song is liked.
         let heart = div()
-            .debug_selector(move || format!("crate-like-{ix}"))
+            .debug_selector(move || format!("{name}-like-{ix}"))
             .flex_none()
             .size(px(ACTION_SIZE))
             .when(!(liked || at_cursor), |d| {
                 d.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
             })
-            .child(heart_action(("crate-like", ix), liked, {
+            .child(heart_action((like_id, ix), liked, {
                 let (writes, video) = (self.writes.clone(), video.clone());
                 move |_, cx| writes.update(cx, |w, cx| w.toggle_like(&video, cx))
             }));
@@ -791,19 +913,19 @@ impl CratePage {
             Some(bulk) if picked => bulk.clone(),
             _ => Subject::track(row.track.clone(), row.thumbnail.clone()),
         };
-        let more = more_slot(format!("crate-more-{ix}"), true, subject.clone())
+        let more = more_slot(format!("{name}-more-{ix}"), true, subject.clone())
             .when(!at_cursor, |d| {
                 d.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
             });
         let remove = div()
-            .debug_selector(move || format!("crate-remove-{ix}"))
+            .debug_selector(move || format!("{name}-remove-{ix}"))
             .flex_none()
             .size(px(ACTION_SIZE))
             .when(!at_cursor, |d| {
                 d.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
             })
             .child(row_action(
-                ("crate-remove", ix),
+                (remove_id, ix),
                 Icon::Dismiss,
                 "Remove from Crate",
                 color::text_secondary(),
@@ -818,9 +940,75 @@ impl CratePage {
                 },
             ));
 
+        // The docked list, like the queue panel, shows More and Remove in the place of the
+        // duration (and only while the pointer or the cursor is on the row), so the title keeps
+        // its width in 320px.
+        let row_tint = if picked {
+            tint
+        } else if selected {
+            playing_row::tint()
+        } else {
+            color::state_hover()
+        };
+        let duration_cell = if docked {
+            let duration = style::tabular(style::text_style(div(), typography::CAPTION, cx))
+                .absolute()
+                .right_0()
+                .h(px(ACTION_SIZE))
+                .flex()
+                .items_center()
+                .text_color(color::text_tertiary())
+                .when(!at_cursor, |d| d.group_hover(group.clone(), |s| s.opacity(0.0)))
+                .when(at_cursor, |d| d.opacity(0.0))
+                .child(duration);
+            let actions = div()
+                .absolute()
+                .right_0()
+                .flex()
+                .flex_row()
+                .rounded(px(radius::SMALL))
+                // Opaque, so the title never shows through the buttons.
+                .bg(color::bg_raised())
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .rounded(px(radius::SMALL))
+                        .bg(row_tint)
+                        .child(more)
+                        .child(remove),
+                );
+            vec![div()
+                .relative()
+                .flex_none()
+                .w(px(DURATION_WIDTH))
+                .h(px(ACTION_SIZE))
+                .child(duration)
+                .child(actions)
+                .into_any_element()]
+        } else {
+            vec![
+                div()
+                    .w(px(DURATION_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .child(text_line(
+                        "duration",
+                        duration,
+                        typography::CAPTION,
+                        color::text_tertiary(),
+                        cx,
+                    ))
+                    .into_any_element(),
+                more.into_any_element(),
+                remove.into_any_element(),
+            ]
+        };
+
         let surface = div()
-            .id(("crate-row", ix))
-            .debug_selector(move || format!("crate-row-{ix}"))
+            .id((row_id, ix))
+            .debug_selector(move || format!("{name}-row-{ix}"))
             .group(group.clone())
             .relative()
             .flex()
@@ -888,22 +1076,7 @@ impl CratePage {
                     )),
             )
             .child(heart)
-            .child(
-                div()
-                    .w(px(DURATION_WIDTH))
-                    .flex_none()
-                    .flex()
-                    .justify_end()
-                    .child(text_line(
-                        "duration",
-                        duration,
-                        typography::CAPTION,
-                        color::text_tertiary(),
-                        cx,
-                    )),
-            )
-            .child(more)
-            .child(remove)
+            .children(duration_cell)
             .when(ring, |d| d.child(focus_ring(accent, radius::SMALL)))
             .on_drag(
                 DraggedRow {
@@ -917,19 +1090,17 @@ impl CratePage {
         let surface = track_menu::on_context_menu(surface, subject);
         // Any row takes a dragged row's place: the line above it shows where it would land.
         let drop_group: SharedString = format!("crate-drop-{ix}").into();
-        div()
+        let wrapper = div()
             .relative()
             .h(px(ROW_HEIGHT))
             .w_full()
             .flex_none()
             .py(px(ROW_INSET))
+            .when(docked, |d| d.px(px(spacing::S2)))
             .group(drop_group.clone())
-            .child(drop_line(drop_group))
-            .child(surface)
-            .on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
-                this.drop_row(dragged.from, ix, cx)
-            }))
-            .into_any_element()
+            .child(drop_line(drop_group, docked))
+            .child(surface);
+        self.with_drops(wrapper, ix, cx).into_any_element()
     }
 
     // ---- page --------------------------------------------------------------------------
@@ -1078,6 +1249,101 @@ impl CratePage {
             .into_any_element()
     }
 
+    /// The docked panel's top: the Queue · Crate control, then Save as playlist… and Add all
+    /// to… (and how many songs are picked, at the right end).
+    fn dock_header(&self, count: usize, accent: Accent, cx: &mut Context<Self>) -> AnyElement {
+        let page = cx.entity();
+        let has_rows = count > 0;
+        let tabs = self
+            .dock_tabs
+            .clone()
+            .map(|(focus, on_pick)| DockTabs::new(Dock::Crate, &focus, accent, on_pick));
+        let actions = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none()
+            .gap(px(spacing::S1))
+            .h(px(layout::MIN_HIT_TARGET + spacing::S2))
+            .px(px(spacing::S3))
+            .child(named(
+                "dock-save-playlist",
+                TextButton::new(
+                    "dock-save-playlist",
+                    &self.focus.save,
+                    "Save as playlist\u{2026}",
+                    accent,
+                )
+                .enabled(has_rows)
+                .on_click({
+                    let page = page.clone();
+                    move |window, cx| page.update(cx, |p, cx| p.save_as_playlist(window, cx))
+                }),
+            ))
+            .child(named(
+                "dock-add-to-playlist",
+                anchor::anchored(
+                    DOCK_ADD_TO_ANCHOR,
+                    TextButton::new(
+                        "dock-add-to-playlist",
+                        &self.focus.add_to,
+                        "Add all to\u{2026}",
+                        accent,
+                    )
+                    .enabled(has_rows)
+                    .on_click({
+                        let page = page.clone();
+                        move |window, cx| {
+                            page.update(cx, |p, cx| p.add_all_to_playlist(window, cx))
+                        }
+                    }),
+                ),
+            ))
+            .child(
+                div()
+                    .ml_auto()
+                    .debug_selector(|| "dock-selected-count".into())
+                    .child(selection::count_slot(self.selection.len(), cx)),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .children(tabs)
+            .child(actions)
+            .into_any_element()
+    }
+
+    /// The docked list with nothing in it: the hint, and a place to drop the first song.
+    fn dock_empty(&self, cx: &mut Context<Self>) -> AnyElement {
+        let hover = |s: gpui::StyleRefinement| s.bg(color::state_hover());
+        let body = div()
+            .id("crate-dock-empty")
+            .debug_selector(|| "crate-dock-empty".into())
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .px(px(spacing::S4))
+            .pt(px(spacing::S3))
+            .flex()
+            .flex_col()
+            .gap(px(spacing::S1))
+            .drag_over::<DraggedRow>(move |s, _, _, _| hover(s))
+            .drag_over::<SongDrag>(move |s, _, _, _| hover(s))
+            .drag_over::<LibraryRow>(move |s, _, _, _| hover(s))
+            .child(
+                style::text_style(div(), typography::BODY, cx)
+                    .text_color(color::text_secondary())
+                    .child("Nothing set aside yet"),
+            )
+            .child(
+                style::text_style(div(), typography::BODY, cx)
+                    .text_color(color::text_tertiary())
+                    .child("Drag songs here, or press C."),
+            );
+        self.with_drops(body, 0, cx).into_any_element()
+    }
+
     fn empty(&self, accent: Accent, cx: &mut Context<Self>) -> AnyElement {
         let on_search = self.on_search.clone();
         div()
@@ -1117,12 +1383,19 @@ impl Render for CratePage {
         let accent = self.accent;
         let count = self.rows.len();
 
-        let header = self.header(count, accent, cx);
-        let body: AnyElement = if count == 0 {
+        let docked = self.docked();
+        let header = if docked {
+            self.dock_header(count, accent, cx)
+        } else {
+            self.header(count, accent, cx)
+        };
+        let body: AnyElement = if count == 0 && docked {
+            self.dock_empty(cx)
+        } else if count == 0 {
             self.empty(accent, cx)
         } else {
             div()
-                .id("crate-list")
+                .id(if docked { "crate-dock-list" } else { "crate-list" })
                 .key_context(KEY_CONTEXT)
                 .track_focus(&self.focus.list)
                 .role(gpui::Role::List)
@@ -1154,7 +1427,7 @@ impl Render for CratePage {
                 .size_full()
                 .child(
                     uniform_list(
-                        "crate-rows",
+                        if docked { "crate-dock-rows" } else { "crate-rows" },
                         // One more than the songs: the slot a row can be dropped into at the end.
                         count + 1,
                         cx.processor(|this, range: Range<usize>, window, cx| {
@@ -1167,6 +1440,23 @@ impl Render for CratePage {
                 .into_any_element()
         };
 
+        if docked {
+            return div()
+                .id("crate-dock")
+                .debug_selector(|| "crate-dock".into())
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w(px(layout::QUEUE_PANEL_WIDTH))
+                .h_full()
+                .min_h_0()
+                .bg(color::bg_raised())
+                .border_l_1()
+                .border_color(color::border_subtle())
+                .child(header)
+                .child(div().flex_1().min_h_0().child(body))
+                .into_any_element();
+        }
         div()
             .id("crate-page")
             .debug_selector(|| "crate-page".into())
@@ -1176,6 +1466,7 @@ impl Render for CratePage {
             .min_h_0()
             .child(header)
             .child(div().flex_1().min_h_0().mt(px(spacing::S4)).child(body))
+            .into_any_element()
     }
 }
 

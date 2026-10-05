@@ -18,7 +18,7 @@ use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
     AddCurrentToPlaylist, AddCurrentToTarget, CrateCurrent, GoBack, GoForward, LikeCurrent, RedoQueue,
-    SeekBack, SeekForward,
+    SeekBack, SeekForward, ToggleCrateDock,
     ShowShortcuts, SkimCancel, SkimCrate, SkimKeep, ToggleFullscreen, ToggleLyrics, ToggleMute,
     UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
@@ -33,12 +33,13 @@ use crate::player::PlayerModel;
 use crate::related::RelatedModel;
 use crate::search::{SearchModel, SearchSource};
 use crate::settings::{SettingsModel, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES};
-use crate::settings::{LibrarySortStore, LyricsOpenStore, RelatedOpenStore};
+use crate::settings::{LibrarySortStore, LyricsOpenStore, RelatedOpenStore, SettingsBackend};
 use crate::style::{self, color};
 use crate::assets::Icon;
 use crate::ui::account_page::AccountPage;
 use crate::ui::button::IconButton;
 use crate::ui::crate_page::{self, CratePage};
+use crate::ui::dock_tabs::{Dock, DockFocus};
 use crate::ui::explore_page::{self, ExploreView};
 use crate::ui::home_page::{self, HomeView};
 use crate::ui::library::{self, LibraryView};
@@ -88,6 +89,10 @@ pub const BADGE_AFTER: std::time::Duration = std::time::Duration::from_millis(60
 
 /// Key context of the root view; global shortcuts bind here.
 pub const KEY_CONTEXT: &str = "Shell";
+/// Where the docked Crate's open state is kept.
+const KEY_CRATE_DOCK: &str = "crate_dock_open";
+/// Below this window width the docked Crate overlays the page instead of squeezing it.
+pub const DOCK_OVERLAY_BELOW: f32 = 1100.0;
 /// The root's context while Skim runs: the shell's, plus `Skimming`.
 const SKIMMING_CONTEXT: &str = "Shell Skimming";
 
@@ -231,6 +236,11 @@ pub struct Shell {
     nav_toggled: bool,
     queue: PanelSlide,
     queue_panel: Entity<QueuePanel>,
+    /// The Crate docked on the right of the main window. It shares that slot with the queue
+    /// (never both open) and is remembered across restarts.
+    crate_dock: PanelSlide,
+    crate_dock_panel: Entity<CratePage>,
+    crate_dock_store: Option<Arc<dyn SettingsBackend>>,
     /// Lyrics of the playing track, and the pane that shows them in Now Playing.
     lyrics: Entity<LyricsModel>,
     lyrics_pane: Entity<LyricsPane>,
@@ -313,6 +323,7 @@ impl Shell {
             mini: stop(cx, 29),
             lyrics: stop(cx, 29),
             queue: stop(cx, 29),
+            crate_dock: stop(cx, 29),
             // Under the artist, in the block of the Now Playing button.
             target: stop(cx, 19),
         };
@@ -451,6 +462,25 @@ impl Shell {
                 cx,
             )
         });
+        let crate_dock_panel = cx.new(|cx| {
+            CratePage::dock(
+                crate_model.clone(),
+                player.clone(),
+                writes.clone(),
+                picker.clone(),
+                cx,
+            )
+        });
+        // The Queue · Crate control, shared by the two panels that take the main window's right side.
+        let dock_focus = DockFocus::new(cx);
+        let on_dock_pick: crate::ui::dock_tabs::OnPick = Rc::new({
+            let weak = weak.clone();
+            move |dock, _, cx| {
+                let _ = weak.update(cx, |s, cx| s.show_dock(dock, cx));
+            }
+        });
+        queue_panel.update(cx, |p, _| p.set_dock_tabs(dock_focus.clone(), on_dock_pick.clone()));
+        crate_dock_panel.update(cx, |p, _| p.set_dock_tabs(dock_focus.clone(), on_dock_pick.clone()));
         let lyrics = cx.new(|cx| LyricsModel::new(player.clone(), cx));
         let lyrics_pane = cx.new(|cx| LyricsPane::new(player.clone(), lyrics.clone(), cx));
         cx.observe(&lyrics_pane, |_, _, cx| cx.notify()).detach();
@@ -712,6 +742,9 @@ impl Shell {
             nav_toggled: false,
             queue: PanelSlide::default(),
             queue_panel,
+            crate_dock: PanelSlide::default(),
+            crate_dock_panel,
+            crate_dock_store: None,
             lyrics,
             lyrics_pane,
             related,
@@ -850,6 +883,7 @@ impl Shell {
             ("bar-mini", bar.mini.clone()),
             ("bar-lyrics", bar.lyrics.clone()),
             ("bar-queue", bar.queue.clone()),
+            ("bar-crate", bar.crate_dock.clone()),
         ]);
         stops
     }
@@ -1334,6 +1368,7 @@ impl Shell {
         match pane {
             Pane::UpNext => {
                 if !self.queue.is_open() {
+                    self.queue_takes_the_slot(cx);
                     self.queue.set(true, Instant::now(), !cx.reduce_motion());
                     self.queue_panel.update(cx, |p, cx| p.reveal_current(cx));
                 }
@@ -1649,6 +1684,7 @@ impl Shell {
             self.lyrics_pane.update(cx, |p, cx| p.set_open(false, cx));
             self.related_pane.update(cx, |p, cx| p.set_open(false, cx));
             if !self.queue.is_open() {
+                self.queue_takes_the_slot(cx);
                 self.queue.set(true, Instant::now(), !cx.reduce_motion());
                 self.queue_panel.update(cx, |p, cx| p.reveal_current(cx));
             }
@@ -1656,11 +1692,103 @@ impl Shell {
             return;
         }
         let open = !self.queue.is_open();
+        if open {
+            self.queue_takes_the_slot(cx);
+        }
         self.queue.set(open, Instant::now(), !cx.reduce_motion());
         if open {
             self.queue_panel.update(cx, |p, cx| p.reveal_current(cx));
         }
         cx.notify();
+    }
+
+    // ---- the docked Crate ------------------------------------------------------------------
+
+    /// Whether the docked Crate is open. It shows while no page takes the whole window (Now
+    /// Playing) and the Crate page itself is not on screen.
+    pub fn crate_dock_open(&self) -> bool {
+        self.crate_dock.is_open()
+    }
+
+    pub fn crate_dock_panel(&self) -> &Entity<CratePage> {
+        &self.crate_dock_panel
+    }
+
+    /// The Crate button and Ctrl+Shift+C.
+    pub fn toggle_crate_dock(&mut self, cx: &mut Context<Self>) {
+        let open = !self.crate_dock.is_open();
+        self.set_crate_dock(open, cx);
+    }
+
+    /// Open or close the docked Crate. Opening it takes the slot from the queue panel (and
+    /// leaves Now Playing, which fills the window); the choice is remembered.
+    pub fn set_crate_dock(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.crate_dock.is_open() == open {
+            return;
+        }
+        let animate = !cx.reduce_motion();
+        self.crate_dock.set(open, Instant::now(), animate);
+        if open {
+            self.queue.set(false, Instant::now(), animate);
+            if self.now_playing_open {
+                self.set_now_playing(false, cx);
+            }
+        }
+        self.save_crate_dock(open, cx);
+        cx.notify();
+    }
+
+    /// The Queue · Crate control: the other panel takes the slot.
+    pub fn show_dock(&mut self, dock: Dock, cx: &mut Context<Self>) {
+        match dock {
+            Dock::Crate => self.set_crate_dock(true, cx),
+            Dock::Queue => {
+                self.set_crate_dock(false, cx);
+                if !self.queue.is_open() {
+                    self.queue.set(true, Instant::now(), !cx.reduce_motion());
+                    self.queue_panel.update(cx, |p, cx| p.reveal_current(cx));
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// The queue was opened: it has the slot, so the Crate gives it up.
+    fn queue_takes_the_slot(&mut self, cx: &mut Context<Self>) {
+        self.set_crate_dock(false, cx);
+    }
+
+    fn save_crate_dock(&self, open: bool, cx: &mut Context<Self>) {
+        let Some(store) = self.crate_dock_store.clone() else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move { store.set(KEY_CRATE_DOCK, if open { "on" } else { "off" }) })
+            .detach();
+    }
+
+    /// Where the docked Crate's open/closed state is remembered, and the saved state applied.
+    pub fn install_crate_dock(
+        &mut self,
+        store: Option<Arc<dyn SettingsBackend>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.crate_dock_store = store.clone();
+        let Some(store) = store else { return };
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_executor()
+                .spawn(async move { store.get(KEY_CRATE_DOCK) })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                // A choice made while this was loading wins over the saved one.
+                if saved.as_deref() == Some("on") && !s.crate_dock.is_open() && !s.queue.is_open() {
+                    s.crate_dock.set(true, Instant::now(), false);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The backend is ready: search and artwork start answering (a query typed earlier goes out).
@@ -1946,7 +2074,12 @@ impl Render for Shell {
             }
         });
 
-        let page = div().id("page").flex_1().min_w_0().h_full();
+        let page = div()
+            .id("page")
+            .debug_selector(|| "page".into())
+            .flex_1()
+            .min_w_0()
+            .h_full();
         let page = if self.now_playing_open {
             page.child(self.now_playing.clone())
         } else if self.route == Route::Crate {
@@ -2015,6 +2148,37 @@ impl Render for Shell {
                 )
         });
 
+        // The docked Crate slides in the same way, in the queue's place. It stays out of the way
+        // of Now Playing (which fills the window) and of the Crate page (which is the same list).
+        let (dock_level, dock_moving) = self.crate_dock.level(Instant::now());
+        if dock_moving {
+            window.request_animation_frame();
+        }
+        let dock_shown =
+            dock_level > 0.0 && !self.now_playing_open && self.route != Route::Crate;
+        // Narrow windows give the page all the width: the panel overlays its right edge instead.
+        let dock_overlays = f32::from(window.viewport_size().width) < DOCK_OVERLAY_BELOW;
+        let crate_dock = dock_shown.then(|| {
+            let slot = div()
+                .id("crate-dock-slot")
+                .h_full()
+                .w(px(layout::QUEUE_PANEL_WIDTH * dock_level))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .child(self.crate_dock_panel.clone()),
+                );
+            if dock_overlays {
+                slot.absolute().top_0().bottom_0().right_0()
+            } else {
+                slot.relative().flex_none()
+            }
+        });
+
         let page = match self.route {
             Route::Search if !self.now_playing_open => self.search.clone().into_any_element(),
             Route::Home if !self.now_playing_open => self.home_page.clone().into_any_element(),
@@ -2035,6 +2199,11 @@ impl Render for Shell {
             progress: self.progress.clone(),
             volume: self.volume.clone(),
             queue_open: self.queue.is_open() && !other_pane,
+            crate_open: self.crate_dock.is_open(),
+            on_crate_toggle: Rc::new(Box::new({
+                let shell = shell.clone();
+                move |_, cx| shell.update(cx, |s, cx| s.toggle_crate_dock(cx))
+            })),
             lyrics_open: lyrics_showing,
             on_lyrics_toggle: Rc::new(Box::new({
                 let shell = shell.clone();
@@ -2216,6 +2385,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_lyrics(cx)))
             .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| this.like_current(cx)))
             .on_action(cx.listener(|this, _: &CrateCurrent, _, cx| this.crate_current(cx)))
+            .on_action(cx.listener(|this, _: &ToggleCrateDock, _, cx| this.toggle_crate_dock(cx)))
             .on_action(cx.listener(|this, _: &AddCurrentToPlaylist, window, cx| {
                 this.add_current_to_playlist(window, cx)
             }))
@@ -2254,9 +2424,11 @@ impl Render for Shell {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .child(nav)
                     .child(page)
-                    .children(queue),
+                    .children(queue)
+                    .children(crate_dock),
             )
             .child(bar)
             .children(toast)
