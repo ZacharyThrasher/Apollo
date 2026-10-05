@@ -1036,10 +1036,12 @@ impl TrackMenu {
             }
             (Command::RemoveFromCrate, Subject::Tracks(songs)) => {
                 if let Some(model) = crate::crate_list::handle(cx) {
+                    let ids: Vec<String> = songs
+                        .iter()
+                        .map(|s| s.track.video_id.as_str().to_owned())
+                        .collect();
                     model.update(cx, |m, cx| {
-                        for song in &songs {
-                            m.remove(song.track.video_id.as_str(), cx);
-                        }
+                        m.remove_many(&ids, cx);
                     });
                 }
             }

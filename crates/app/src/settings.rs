@@ -94,6 +94,10 @@ pub const INSTANT_PLAYLISTS: BoolSetting = BoolSetting::new("instant_playlists",
 /// row (Search, Library, queue, playlist, album, Crate) the cursor steps to the next row; Skim's
 /// K goes on to the next song. Picked songs keep the cursor where it is. Off leaves it be.
 pub const AUTO_ADVANCE: BoolSetting = BoolSetting::new("auto_advance", true);
+/// Playlists > Take songs out of the Crate once filed: a song the service confirms is in a playlist
+/// (A, the P picker, "Add all to…") leaves the Crate. Ctrl+Z puts it back. Off: a song can belong
+/// in two playlists, so nothing leaves unasked.
+pub const CRATE_FILE_AND_FORGET: BoolSetting = BoolSetting::new("crate_file_and_forget", false);
 /// Window > Close to tray: the close button hides the window and playback continues.
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
@@ -179,6 +183,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     CONFIRM_ADDS.key,
     INSTANT_PLAYLISTS.key,
     AUTO_ADVANCE.key,
+    CRATE_FILE_AND_FORGET.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
     PAUSE_ON_OTHER_AUDIO.key,

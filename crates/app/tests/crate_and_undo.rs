@@ -425,7 +425,7 @@ fn the_crate_page_lists_plays_and_queues_the_crate(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn clear_asks_first_and_cancel_keeps_everything(cx: &mut TestAppContext) {
+fn clear_asks_nothing_and_ctrl_z_brings_the_songs_back(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     fill(&page, vcx, &["crateAAAA01", "crateBBBB02"]);
     page.shell
@@ -433,19 +433,13 @@ fn clear_asks_first_and_cancel_keeps_everything(cx: &mut TestAppContext) {
     vcx.run_until_parked();
 
     click(vcx, "crate-clear");
-    assert_eq!(crate_ids(&page, vcx).len(), 2, "pressing Clear alone clears nothing");
-    let crate_page = page.shell.read_with(vcx, |s, _| s.crate_page().clone());
-    assert!(crate_page.read_with(vcx, |p, _| p.confirming()));
-
-    click(vcx, "crate-clear-no");
-    assert_eq!(crate_ids(&page, vcx).len(), 2);
-    assert!(!crate_page.read_with(vcx, |p, _| p.confirming()));
-
-    click(vcx, "crate-clear");
-    click(vcx, "crate-clear-yes");
-    assert!(crate_ids(&page, vcx).is_empty());
-    assert!(!crate_page.read_with(vcx, |p, _| p.confirming()));
+    assert!(crate_ids(&page, vcx).is_empty(), "Clear needs no second click");
+    assert!(vcx.debug_bounds("crate-clear-yes").is_none(), "no question is asked");
     assert!(vcx.debug_bounds("crate-search").is_some(), "the empty page offers Search");
+
+    page.shell.update(vcx, |s, cx| s.undo(cx));
+    vcx.run_until_parked();
+    assert_eq!(crate_ids(&page, vcx), ["crateAAAA01", "crateBBBB02"]);
 }
 
 #[gpui::test]
