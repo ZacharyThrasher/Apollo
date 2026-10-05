@@ -597,10 +597,13 @@ fn a_shelf_is_one_tab_stop_that_remembers_where_you_were(cx: &mut TestAppContext
         "and comes back to the item you left"
     );
 
-    // The arrows stay inside the shelf.
+    // Left stops at the first item's column and then hands over to the nav rail.
     vcx.update(|window, cx| window.focus(&first, cx));
     vcx.simulate_keystrokes("left");
-    assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(first));
+    let home_button = page
+        .shell
+        .read_with(vcx, |s, _| s.tab_stops().into_iter().find(|(n, _)| *n == "nav-home").unwrap().1);
+    assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(home_button));
 }
 
 /// Records which tracks were asked to be resolved ahead of time.
