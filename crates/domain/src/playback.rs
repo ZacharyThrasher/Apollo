@@ -96,6 +96,14 @@ pub enum Event {
         tracks: Vec<Track>,
         start: usize,
     },
+    /// [`Event::PlayContext`] that opens the first track at `position_ms` instead of the start
+    /// (Skim plays each song from a third of the way in). A track already lined up opens there
+    /// directly, so nothing of its beginning is heard.
+    PlayContextAt {
+        tracks: Vec<Track>,
+        start: usize,
+        position_ms: u64,
+    },
     /// The user picked an entry in the queue.
     PlayEntry {
         id: QueueEntryId,
@@ -103,6 +111,10 @@ pub enum Event {
     Play,
     Pause,
     Next,
+    /// [`Event::Next`] that opens the next track at `position_ms` instead of the start.
+    NextAt {
+        position_ms: u64,
+    },
     Previous,
     Seek {
         position_ms: u64,
@@ -342,6 +354,14 @@ impl Coordinator {
                 Some(id) => self.user_start(id, &mut fx),
                 None => self.stop_all(&mut fx),
             },
+            Event::PlayContextAt {
+                tracks,
+                start,
+                position_ms,
+            } => match self.queue.play_context(tracks, start) {
+                Some(id) => self.user_start_at(id, position_ms, &mut fx),
+                None => self.stop_all(&mut fx),
+            },
             Event::PlayEntry { id } => {
                 if self.queue.jump_to(id) {
                     self.user_start(id, &mut fx);
@@ -352,6 +372,11 @@ impl Coordinator {
             Event::Next => {
                 if let Advance::Started(id) = self.queue.advance(AdvanceKind::Explicit) {
                     self.user_start(id, &mut fx);
+                }
+            }
+            Event::NextAt { position_ms } => {
+                if let Advance::Started(id) = self.queue.advance(AdvanceKind::Explicit) {
+                    self.user_start_at(id, position_ms, &mut fx);
                 }
             }
             Event::Previous => match self.queue.previous(self.position_ms) {
@@ -404,11 +429,16 @@ impl Coordinator {
 
     /// A direct user navigation (play context / next / previous-to-entry):
     /// implies play, resets the automatic-failure budget and clears errors.
-    fn user_start(&mut self, _id: QueueEntryId, fx: &mut Vec<Effect>) {
+    fn user_start(&mut self, id: QueueEntryId, fx: &mut Vec<Effect>) {
+        self.user_start_at(id, 0, fx);
+    }
+
+    /// [`Self::user_start`] opening the track at `position_ms`.
+    fn user_start_at(&mut self, _id: QueueEntryId, position_ms: u64, fx: &mut Vec<Effect>) {
         self.intent = Intent::Playing;
         self.failures = 0;
         self.skipped.clear();
-        self.start_load(false, 0, fx);
+        self.start_load(false, position_ms, fx);
     }
 
     /// Begin loading the queue's current entry, invalidating any previous load.
@@ -1319,6 +1349,57 @@ mod tests {
             },
         });
         assert_eq!(c.duration_ms(), Some(187_000));
+    }
+
+    #[test]
+    fn next_at_opens_a_lined_up_track_at_the_position_with_nothing_of_its_start() {
+        let mut c = Coordinator::default();
+        let (_, pre) = preloaded_ready(&mut c);
+        let fx = c.handle(Event::NextAt { position_ms: 60_000 });
+        assert_eq!(cur(&c), "b");
+        assert!(
+            fx.iter().any(|e| matches!(
+                e,
+                Effect::Open { load, start_ms: 60_000, .. } if *load == pre
+            )),
+            "{fx:?}"
+        );
+        assert_eq!(c.position_ms(), 60_000);
+        assert_eq!(c.intent(), Intent::Playing);
+    }
+
+    #[test]
+    fn next_at_on_a_track_still_resolving_carries_the_position_to_the_open() {
+        let mut c = Coordinator::default();
+        let (_, fx) = start_playing(&mut c, &["a", "b", "c"]);
+        // "b" is being resolved ahead; Next adopts that load and its open starts at the position.
+        let pre = preload_load(&fx).unwrap();
+        c.handle(Event::NextAt { position_ms: 45_000 });
+        assert_eq!(c.phase(), Phase::Resolving);
+        let fx = c.handle(Event::Resolved {
+            load: pre,
+            result: Ok(LeaseId(9)),
+        });
+        assert!(
+            fx.iter()
+                .any(|e| matches!(e, Effect::Open { start_ms: 45_000, .. })),
+            "{fx:?}"
+        );
+    }
+
+    #[test]
+    fn play_context_at_starts_the_first_track_at_the_position() {
+        let mut c = Coordinator::default();
+        let fx = c.handle(Event::PlayContextAt {
+            tracks: tracks(&["a", "b"]),
+            start: 0,
+            position_ms: 30_000,
+        });
+        assert!(fx
+            .iter()
+            .any(|e| matches!(e, Effect::Resolve { resume_ms: 30_000, .. })));
+        assert_eq!(c.position_ms(), 30_000);
+        assert_eq!(cur(&c), "a");
     }
 
     #[test]

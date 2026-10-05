@@ -161,6 +161,7 @@ impl LibraryModel {
                 let request = PlayRequest {
                     start: Some(0),
                     shuffle: None,
+                    skim: false,
                 };
                 let source = self.artist_mut(id).map(|d| queue_source::radio(d.name()));
                 self.play_tracks(rows, request, source, cx);

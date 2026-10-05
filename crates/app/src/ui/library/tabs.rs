@@ -678,7 +678,7 @@ impl LibraryView {
         // Once there are rows, or they are on their way; a failure or an empty library has
         // nothing to play.
         let buttons = (items > 0 || loading)
-            .then(|| self.play_buttons(true, pending, "songs", accent));
+            .then(|| self.play_buttons(true, pending, "songs", accent, cx));
         let body = self.songs_body(accent, window, cx);
         div()
             .flex()
