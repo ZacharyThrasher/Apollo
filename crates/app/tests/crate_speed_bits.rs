@@ -497,6 +497,10 @@ fn an_empty_crate_opens_the_dock_without_taking_the_keyboard(cx: &mut TestAppCon
     assert!(dock_open(&page, vcx), "it opens");
     assert!(!focused_dock(&page, vcx), "there is no list to land on");
     assert!(focused(vcx) == Some(before));
+    // With nothing to jump into the key is a plain toggle, so the dock is never stuck open.
+    vcx.simulate_keystrokes("ctrl-shift-c");
+    vcx.run_until_parked();
+    assert!(!dock_open(&page, vcx));
 }
 
 #[gpui::test]

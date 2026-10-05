@@ -1775,9 +1775,11 @@ impl Shell {
     /// Ctrl+Shift+C: open the docked Crate and put the cursor in it, on the row it was last on
     /// (else the first); Esc goes back to where the keyboard was. With the dock already open and
     /// focused it closes instead, and focus goes back too. On the Crate page, which is the same
-    /// list, the key only opens or closes the dock as before.
+    /// list, or with an empty Crate, the key only opens or closes the dock as before.
     pub fn jump_crate_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.route == Route::Crate {
+        // With no list to land on (the Crate page is the same list; an empty Crate shows only its
+        // hint) there is nothing to jump into, so the key just opens or closes the dock.
+        if self.route == Route::Crate || self.crate_model.read(cx).is_empty() {
             self.toggle_crate_dock(cx);
             return;
         }

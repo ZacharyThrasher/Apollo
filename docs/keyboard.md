@@ -69,7 +69,7 @@ and **Add all to…**.
 
 **Jumping in and out:** **Ctrl+Shift+C** opens the dock and lands the keyboard in its list, on
 the row the cursor was last on (the first row the first time; nothing to land on while the Crate
-is empty). **Esc** puts the keyboard back where it was before the jump (picked songs clear
+is empty, when the key only opens or closes the dock). **Esc** puts the keyboard back where it was before the jump (picked songs clear
 first: Esc once for them, once to leave). With the dock open and focused, Ctrl+Shift+C closes it
 and goes back the same way; open but with the keyboard elsewhere, it just takes the keyboard in.
 On the Crate page itself (the same list) the key only opens or closes the dock.
