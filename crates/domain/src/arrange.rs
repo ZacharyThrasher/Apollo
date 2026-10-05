@@ -123,6 +123,20 @@ pub fn steps(current: &[String], desired: &[String]) -> Vec<MoveStep> {
     out
 }
 
+/// The order `current` should have to put a playlist back as `wanted` had it (an earlier order
+/// of its rows, by token): the rows of `wanted` that are still there, in its order, then any row
+/// `wanted` did not know (added since), in the order they have now.
+pub fn back_to(current: &[String], wanted: &[String]) -> Vec<String> {
+    let here: HashSet<&str> = current.iter().map(String::as_str).collect();
+    let known: HashSet<&str> = wanted.iter().map(String::as_str).collect();
+    wanted
+        .iter()
+        .filter(|t| here.contains(t.as_str()))
+        .chain(current.iter().filter(|t| !known.contains(t.as_str())))
+        .cloned()
+        .collect()
+}
+
 /// Which entries of `seq` (all different) make up a longest strictly rising subsequence: their
 /// indices into `seq`, in order.
 fn longest_rising(seq: &[usize]) -> Vec<usize> {
@@ -315,5 +329,19 @@ mod tests {
         assert_eq!(repeats(["a", "b", "a", "c", "b", "a"]), vec![(2, 0), (4, 1), (5, 0)]);
         assert!(repeats(["a", "b", "c"]).is_empty());
         assert!(repeats(Vec::<&str>::new()).is_empty());
+    }
+
+    #[test]
+    fn back_to_keeps_what_is_still_there_in_the_old_order_and_new_rows_after() {
+        let wanted = tokens("abcd");
+        // d was removed, e was added, the rest were shuffled.
+        let current = tokens("cbae");
+        assert_eq!(back_to(&current, &wanted), tokens("abce"));
+        assert_eq!(back_to(&tokens("abc"), &tokens("abc")), tokens("abc"));
+        assert!(back_to(&[], &wanted).is_empty());
+        // Whatever it returns can be reached with moves.
+        let desired = back_to(&current, &wanted);
+        let moves = steps(&current, &desired);
+        assert_eq!(replay(&current, &moves), desired);
     }
 }

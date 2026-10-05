@@ -552,3 +552,174 @@ fn every_page_of_the_songs_list_is_read_for_a_read_back() {
     let rows = all_song_rows(&sim).expect("whole list");
     assert_eq!(rows.len(), crate::library::sim::LONG_SONGS);
 }
+
+// ---- undo ------------------------------------------------------------------------------------
+
+fn videos_of(sim: &SimLibrary, collection: &Collection) -> Vec<String> {
+    all_rows(sim, collection)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.track.video_id.as_str().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_restored_song_goes_in_front_of_its_anchor_and_a_gone_anchor_means_the_end() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b", "c"]);
+    let list = playlist("PLsimempty", "x");
+    let tokens = sim.occurrences("PLsimempty");
+    remove(&sim, &none(), &list, "a", &tokens[0]).unwrap();
+    remove(&sim, &none(), &list, "b", &tokens[1]).unwrap();
+    // "a" sat in front of "b" (now gone), "b" in front of "c".
+    let placed = restore(
+        &sim,
+        &none(),
+        &list,
+        &[("b".into(), Some(tokens[2].clone())), ("a".into(), Some(tokens[1].clone()))],
+    )
+    .unwrap();
+    assert_eq!(placed, Restored { in_place: 1, at_end: 1 });
+    assert_eq!(videos_of(&sim, &list), ["b", "c", "a"]);
+}
+
+#[test]
+fn a_restored_song_with_no_anchor_is_where_it_was_at_the_end() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b"]);
+    let list = playlist("PLsimempty", "x");
+    let tokens = sim.occurrences("PLsimempty");
+    remove(&sim, &none(), &list, "b", &tokens[1]).unwrap();
+    let placed = restore(&sim, &none(), &list, &[("b".into(), None)]).unwrap();
+    assert_eq!(placed, Restored { in_place: 1, at_end: 0 });
+    assert_eq!(videos_of(&sim, &list), ["a", "b"]);
+}
+
+#[test]
+fn a_restore_with_a_lost_reply_is_settled_by_reading_the_playlist() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b", "c"]);
+    let list = playlist("PLsimempty", "x");
+    let tokens = sim.occurrences("PLsimempty");
+    remove(&sim, &none(), &list, "a", &tokens[0]).unwrap();
+    sim.set_write_behaviour(WriteBehaviour::LandsReplyLost);
+    // The add and the move both land and both lose their reply.
+    let placed = restore(&sim, &none(), &list, &[("a".into(), Some(tokens[1].clone()))]).unwrap();
+    assert_eq!(placed, Restored { in_place: 1, at_end: 0 });
+    assert_eq!(videos_of(&sim, &list), ["a", "b", "c"]);
+    assert_eq!(
+        sim.write_log().iter().filter(|(what, _)| what.starts_with("add-again")).count(),
+        1,
+        "the add went out once"
+    );
+}
+
+#[test]
+fn a_refused_restore_adds_nothing_and_a_wrong_account_sends_nothing() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b"]);
+    let list = playlist("PLsimempty", "x");
+    sim.set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Rejected));
+    assert_eq!(
+        restore(&sim, &none(), &list, &[("c".into(), None)]),
+        Err(WriteFailure::Rejected)
+    );
+    sim.set_write_behaviour(WriteBehaviour::Succeed);
+    assert_eq!(videos_of(&sim, &list), ["a", "b"]);
+
+    sim.set_account(Some("one"));
+    let log_before = sim.write_log().len();
+    assert_eq!(
+        restore(&sim, &Some("other".into()), &list, &[("c".into(), None)]),
+        Err(WriteFailure::Rejected)
+    );
+    assert_eq!(sim.write_log().len(), log_before, "nothing was sent");
+}
+
+#[test]
+fn a_made_playlist_is_deleted_when_it_holds_only_what_it_was_made_with() {
+    let sim = SimLibrary::instant();
+    let videos: Vec<String> = vec!["a".into(), "b".into()];
+    let id = create_with(
+        &sim,
+        &none(),
+        &known(&sim),
+        "Gym Mix",
+        Privacy::Private,
+        &videos,
+    )
+    .unwrap();
+    let list = playlist(&id, "Gym Mix");
+    assert_eq!(undo_created(&sim, &none(), &list, &videos), Ok(true));
+    assert!(!sim.owned_ids().contains(&id));
+}
+
+#[test]
+fn a_made_playlist_that_has_grown_only_gives_back_what_it_was_made_with() {
+    let sim = SimLibrary::instant();
+    let videos: Vec<String> = vec!["a".into(), "b".into()];
+    let id = create_with(
+        &sim,
+        &none(),
+        &known(&sim),
+        "Gym Mix",
+        Privacy::Private,
+        &videos,
+    )
+    .unwrap();
+    let list = playlist(&id, "Gym Mix");
+    sim.add_to_playlist(&id, "z").unwrap();
+    assert_eq!(undo_created(&sim, &none(), &list, &videos), Ok(false));
+    assert!(sim.owned_ids().contains(&id), "the playlist stays");
+    assert_eq!(videos_of(&sim, &list), ["z"]);
+}
+
+#[test]
+fn rows_are_matched_to_songs_by_the_answer_or_by_what_appeared() {
+    let named = |video: &str, token: &str| AddedRow { video_id: video.into(), set_video_id: token.into() };
+    let videos: Vec<String> = vec!["a".into(), "b".into(), "a".into()];
+    assert_eq!(
+        tokens_named(&[named("a", "S1"), named("b", "S2"), named("a", "S3")], &videos),
+        Some(vec!["S1".into(), "S2".into(), "S3".into()])
+    );
+    assert_eq!(tokens_named(&[named("a", "S1")], &videos), None, "an answer short of a row");
+    assert_eq!(tokens_named(&[], &videos), None);
+
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b", "a"]);
+    let list = playlist("PLsimempty", "x");
+    let rows = all_rows(&sim, &list).unwrap();
+    let known: HashSet<String> = rows[..1].iter().filter_map(|r| r.occurrence.clone()).collect();
+    // Two rows are new ("b" and the second "a"), which is not the three songs asked for.
+    assert_eq!(tokens_appeared(&rows, &known, &videos), None);
+    let two: Vec<String> = vec!["a".into(), "b".into()];
+    assert_eq!(
+        tokens_appeared(&rows, &known, &two),
+        Some(vec![
+            rows[2].occurrence.clone().unwrap(),
+            rows[1].occurrence.clone().unwrap()
+        ])
+    );
+}
+
+#[test]
+fn rows_go_back_to_an_earlier_order_with_what_changed_since_left_where_it_fits() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b", "c", "d"]);
+    let list = playlist("PLsimempty", "x");
+    let earlier = sim.occurrences("PLsimempty");
+    // Moved around, one removed, one added since.
+    let now = sim.occurrences("PLsimempty");
+    let desired = apollo_domain::library::moved(&now, 3, 0);
+    move_row(&sim, &none(), &list, &now[3], Some(&now[0]), &desired).unwrap();
+    remove(&sim, &none(), &list, "b", &earlier[1]).unwrap();
+    sim.add_to_playlist("PLsimempty", "z").unwrap();
+    assert_eq!(videos_of(&sim, &list), ["d", "a", "c", "z"]);
+
+    reorder(&sim, &none(), &list, &earlier).unwrap();
+    assert_eq!(videos_of(&sim, &list), ["a", "c", "d", "z"]);
+    // Already in that order: nothing is sent.
+    let sent = sim.write_log().len();
+    reorder(&sim, &none(), &list, &earlier).unwrap();
+    assert_eq!(sim.write_log().len(), sent);
+}

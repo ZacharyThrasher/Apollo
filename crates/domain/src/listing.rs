@@ -163,6 +163,19 @@ impl<T: ListItem> Listing<T> {
         true
     }
 
+    /// Put one item at place `at` (the end when that is past it): a row shown before the service
+    /// has confirmed it. Paging state is untouched. An item whose key is already held is not
+    /// added twice; returns whether it was added.
+    pub fn insert(&mut self, at: usize, item: T) -> bool {
+        if let Some(k) = item.dedup_key() {
+            if !self.keys.insert(k) {
+                return false;
+            }
+        }
+        self.items.insert(at.min(self.items.len()), item);
+        true
+    }
+
     /// Take the row at `from` and put it before the insertion slot `slot` (0 above the first row,
     /// `len` below the last). Returns whether anything moved. Paging state is untouched.
     pub fn move_item(&mut self, from: usize, slot: usize) -> bool {
@@ -299,6 +312,22 @@ mod tests {
         assert_eq!(l.items(), [Occ("a"), Occ("b"), Occ("c")]);
         assert_eq!(l.state(), LoadState::HasMore);
         assert_eq!(l.continuation(), Some((rev, "t1")));
+    }
+
+    #[test]
+    fn insert_puts_a_row_at_a_place_or_at_the_end_without_touching_paging() {
+        let mut l = Listing::new();
+        let rev = l.begin();
+        l.apply(rev, page(vec![Occ("a"), Occ("b")], Some("t1")));
+        assert!(l.insert(1, Occ("x")));
+        assert_eq!(l.items(), [Occ("a"), Occ("x"), Occ("b")]);
+        assert!(l.insert(99, Occ("z")), "past the end is the end");
+        assert_eq!(l.items(), [Occ("a"), Occ("x"), Occ("b"), Occ("z")]);
+        assert_eq!(l.continuation(), Some((rev, "t1")));
+        let mut keyed = Listing::new();
+        let rev = keyed.begin();
+        keyed.apply(rev, page(vec![Row("a")], None));
+        assert!(!keyed.insert(0, Row("a")), "a held key is not added twice");
     }
 
     #[test]

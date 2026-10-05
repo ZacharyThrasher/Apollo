@@ -1264,6 +1264,35 @@ pub fn edit_succeeded(root: &Value) -> bool {
     root.get("status").and_then(Value::as_str) == Some("STATUS_SUCCEEDED")
 }
 
+/// A video an `ACTION_ADD_VIDEO` put into a playlist, with the token of the row it made
+/// (`setVideoId`): what a later remove or move names, so the row this add made can be taken out
+/// again without touching another copy of the song.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddedVideo {
+    pub video_id: String,
+    pub set_video_id: String,
+}
+
+/// The rows a `browse/edit_playlist` answer says its adds made, in the order it lists them. An
+/// add the service skipped (a duplicate) or an answer that carries no row data gives none: the
+/// caller then does not know the tokens and must not guess them.
+pub fn added_videos(root: &Value) -> Vec<AddedVideo> {
+    root.get("playlistEditResults")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|result| {
+            let data = result.get("playlistEditVideoAddedResultData")?;
+            let video_id = data.get("videoId")?.as_str()?;
+            let set_video_id = data.get("setVideoId")?.as_str()?;
+            (!video_id.is_empty() && !set_video_id.is_empty()).then(|| AddedVideo {
+                video_id: video_id.to_owned(),
+                set_video_id: set_video_id.to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// Whether a `feedback` answer says every token it was sent was processed (the answer carries one
 /// `isProcessed` per token). An answer with no responses at all is not success: that is a shape
 /// this parser does not know, and the caller reads the library back instead of believing it.
@@ -2100,6 +2129,29 @@ mod tests {
         assert!(edit_succeeded(&ok));
         assert!(!edit_succeeded(&failed));
         assert!(!edit_succeeded(&json!({ "responseContext": {} })), "no status is not success");
+    }
+
+    #[test]
+    fn an_add_answer_names_the_rows_it_made() {
+        let ok: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/edit_playlist_ok.json"))
+                .unwrap();
+        assert_eq!(
+            added_videos(&ok),
+            vec![AddedVideo { video_id: "dQw4w9WgXcQ".into(), set_video_id: "ABCDEF".into() }]
+        );
+        let two = json!({
+            "status": "STATUS_SUCCEEDED",
+            "playlistEditResults": [
+                { "playlistEditVideoAddedResultData": { "videoId": "a1", "setVideoId": "S1" } },
+                { "playlistEditVideoAddedResultData": { "videoId": "b2" } },
+                { "somethingElse": {} },
+                { "playlistEditVideoAddedResultData": { "videoId": "c3", "setVideoId": "S3" } }
+            ]
+        });
+        let rows: Vec<_> = added_videos(&two).into_iter().map(|r| (r.video_id, r.set_video_id)).collect();
+        assert_eq!(rows, [("a1".into(), "S1".into()), ("c3".into(), "S3".into())]);
+        assert!(added_videos(&json!({ "status": "STATUS_SUCCEEDED" })).is_empty());
     }
 
     /// A song row whose menu carries the library toggle, in the shape the live rows use: the

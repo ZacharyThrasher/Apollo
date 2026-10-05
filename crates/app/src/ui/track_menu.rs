@@ -705,8 +705,9 @@ pub fn on_context_menu<E: InteractiveElement>(el: E, subject: Subject) -> E {
 /// Where the menu goes once a target is chosen (Go to artist, Go to album).
 pub type OpenTarget = Rc<dyn Fn(Target, &mut Window, &mut App)>;
 
-/// What Remove from playlist calls: the playlist's collection and the row's token.
-pub type RemoveRow = Rc<dyn Fn(&Collection, &str, &mut App)>;
+/// What Remove from playlist calls: the playlist's collection and the tokens of the rows to take
+/// out (all of them one step for Ctrl+Z).
+pub type RemoveRow = Rc<dyn Fn(&Collection, &[String], &mut App)>;
 
 /// What Move to top / Move to bottom call: the playlist's collection, the tokens of the rows to
 /// move (in list order) and the end they go to.
@@ -743,7 +744,7 @@ impl TrackMenu {
         picker: Entity<PlaylistPicker>,
         edits: Entity<LibraryEdits>,
         on_open: impl Fn(Target, &mut Window, &mut App) + 'static,
-        on_remove_row: impl Fn(&Collection, &str, &mut App) + 'static,
+        on_remove_row: impl Fn(&Collection, &[String], &mut App) + 'static,
         on_arrange: impl Fn(&Collection, &[String], Edge, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1050,8 +1051,10 @@ impl TrackMenu {
             }
             (Command::RemoveFromPlaylist, Subject::Tracks(songs)) => {
                 // The playlist page's own edit queue sends the removals one at a time.
-                for row in songs.into_iter().filter_map(|s| s.playlist_row) {
-                    (self.on_remove_row.clone())(&row.collection, &row.occurrence, cx);
+                let rows: Vec<PlaylistRow> = songs.into_iter().filter_map(|s| s.playlist_row).collect();
+                if let Some(first) = rows.first() {
+                    let tokens: Vec<String> = rows.iter().map(|r| r.occurrence.clone()).collect();
+                    (self.on_remove_row.clone())(&first.collection, &tokens, cx);
                 }
             }
             (Command::MoveToTop | Command::MoveToBottom, Subject::Tracks(songs)) => {
@@ -1175,7 +1178,7 @@ impl TrackMenu {
             }
             (Command::RemoveFromPlaylist, Subject::Track(t)) => {
                 if let Some(row) = t.playlist_row {
-                    (self.on_remove_row.clone())(&row.collection, &row.occurrence, cx);
+                    (self.on_remove_row.clone())(&row.collection, &[row.occurrence.clone()], cx);
                 }
             }
             (Command::SaveToLibrary, Subject::Collection(c)) => {

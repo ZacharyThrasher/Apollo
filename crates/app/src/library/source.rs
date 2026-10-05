@@ -2,7 +2,7 @@
 //! GPUI's background executor, never on the UI thread, and nothing here touches GPUI types.
 
 use apollo_domain::library::{
-    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy,
+    bare_playlist_id, AddedRow, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy,
     WriteFailure,
 };
 use apollo_domain::listing::{ListItem, LoadFailure, Page};
@@ -242,6 +242,34 @@ pub trait LibrarySource: Send + Sync {
         video_ids
             .iter()
             .try_for_each(|video| self.add_to_playlist(playlist_id, video))
+    }
+
+    /// Add tracks to a playlist the account owns, in order, skipping any it holds, and say which
+    /// rows that made (a skipped duplicate makes none; an answer that does not name the rows
+    /// gives none). One track goes as [`Self::add_to_playlist`], several as
+    /// [`Self::add_many_to_playlist`]. What the rows are lets an add be taken back exactly.
+    fn add_to_playlist_rows(
+        &self,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
+        match video_ids {
+            [video] => self.add_to_playlist(playlist_id, video)?,
+            _ => self.add_many_to_playlist(playlist_id, video_ids)?,
+        }
+        Ok(Vec::new())
+    }
+
+    /// Add tracks to a playlist the account owns even if it holds them (putting back a song a
+    /// removal took out of a playlist that has it twice), in order. Sent once, never retried: a
+    /// lost reply is settled by reading the playlist. The rows it made come back when the answer
+    /// names them.
+    fn add_again_to_playlist(
+        &self,
+        _playlist_id: &str,
+        _video_ids: &[String],
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
+        Err(WriteFailure::Unsupported)
     }
 
     // ---- playlist editing -------------------------------------------------------------------

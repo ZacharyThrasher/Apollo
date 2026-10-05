@@ -34,6 +34,7 @@ use super::writes::{LibraryWrites, WritesEvent};
 mod arrange;
 mod artist;
 mod stats;
+mod undoing;
 pub use arrange::{Arrange, Repeat};
 pub use artist::MixKind;
 use crate::art::{sized_thumbnail, DecodedArt};
@@ -75,6 +76,9 @@ fn read_songs(
 }
 
 const SONGS_BROWSE_ID: &str = "apollo:library-songs";
+
+/// What Ctrl+Z says when songs it put back could not go where they were.
+const PUT_BACK_AT_END: &str = "Put back at the end instead";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
@@ -228,6 +232,10 @@ struct EditQueue {
     items: VecDeque<(PageEdit, Option<String>)>,
     /// One is out.
     busy: bool,
+    /// The edits include one that takes back an earlier edit (Ctrl+Z): once they have all been
+    /// written, open pages of the playlist are read again, so rows put back have the service's
+    /// own tokens and places.
+    refresh: bool,
 }
 
 /// An edit of the rows of a playlist page, already shown and waiting to be (or being) written.
@@ -236,6 +244,22 @@ enum PageEdit {
     Remove {
         video_id: String,
         occurrence: String,
+        /// The Ctrl+Z step this removal is part of, if it is one a person asked for.
+        step: Option<u64>,
+    },
+    /// Taking back an add: the row it made goes.
+    Unadd {
+        video_id: String,
+        occurrence: String,
+    },
+    /// Taking back a removal: each song goes back in front of the row it sat before (a row
+    /// token, or none for the end), in this order.
+    Restore {
+        items: Vec<(String, Option<String>)>,
+    },
+    /// Taking back moves: the rows go back to the order they had (their tokens, in that order).
+    Reorder {
+        order: Vec<String>,
     },
     Move {
         occurrence: String,
@@ -1647,29 +1671,7 @@ impl LibraryModel {
     /// and the write follows. Only the page of a playlist the account owns, once all its rows are
     /// loaded; anything else is ignored.
     pub fn remove_row(&mut self, playlist_key: &str, occurrence: &str, cx: &mut Context<Self>) {
-        let Some(Entry::Collection(d)) = self.stack.last_mut() else {
-            return;
-        };
-        if d.collection.library_key() != playlist_key || !d.can_edit() {
-            return;
-        }
-        let Some(row) = d
-            .listing
-            .items()
-            .iter()
-            .find(|r| r.occurrence.as_deref() == Some(occurrence))
-            .cloned()
-        else {
-            return;
-        };
-        d.listing.retain(|r| r.occurrence.as_deref() != Some(occurrence));
-        let collection = d.collection.clone();
-        let edit = PageEdit::Remove {
-            video_id: row.track.video_id.as_str().to_owned(),
-            occurrence: occurrence.to_owned(),
-        };
-        self.queue_edit(collection, edit, cx);
-        cx.notify();
+        self.remove_rows(playlist_key, &[occurrence.to_owned()], cx);
     }
 
     /// Show a song just added to the playlist whose page is on top, at its end, before the service
@@ -1755,6 +1757,7 @@ impl LibraryModel {
         };
         d.listing.move_item(from, slot);
         let collection = d.collection.clone();
+        self.note_reorder(&collection, tokens, cx);
         self.queue_edit(collection, edit, cx);
         cx.notify();
         true
@@ -1771,6 +1774,7 @@ impl LibraryModel {
                 collection,
                 items: VecDeque::new(),
                 busy: false,
+                refresh: false,
             })
             .items
             .push_back((edit, token));
@@ -1789,7 +1793,11 @@ impl LibraryModel {
             return;
         }
         let Some((edit, token)) = queue.items.pop_front() else {
+            let refresh = queue.refresh;
             self.edit_queues.remove(key);
+            if refresh {
+                self.refresh_pages_of(key, cx);
+            }
             return;
         };
         queue.busy = true;
@@ -1798,35 +1806,59 @@ impl LibraryModel {
         let kind = match &edit {
             PageEdit::Remove { .. } => Edit::RemoveSong,
             PageEdit::Move { .. } => Edit::MoveSong,
+            PageEdit::Unadd { .. } | PageEdit::Restore { .. } | PageEdit::Reorder { .. } => {
+                Edit::Undo
+            }
         };
+        let sent = edit.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
+                    let done = |r: Result<(), apollo_domain::library::WriteFailure>| {
+                        r.map(|()| edits::Restored::default())
+                    };
                     match edit {
                         PageEdit::Remove {
                             video_id,
                             occurrence,
-                        } => edits::remove(&*source, &token, &collection, &video_id, &occurrence),
+                            ..
+                        }
+                        | PageEdit::Unadd {
+                            video_id,
+                            occurrence,
+                        } => done(edits::remove(
+                            &*source,
+                            &token,
+                            &collection,
+                            &video_id,
+                            &occurrence,
+                        )),
+                        PageEdit::Restore { items } => {
+                            edits::restore(&*source, &token, &collection, &items)
+                        }
+                        PageEdit::Reorder { order } => {
+                            done(edits::reorder(&*source, &token, &collection, &order))
+                        }
                         PageEdit::Move {
                             occurrence,
                             before,
                             desired,
-                        } => edits::move_row(
+                        } => done(edits::move_row(
                             &*source,
                             &token,
                             &collection,
                             &occurrence,
                             before.as_deref(),
                             &desired,
-                        ),
+                        )),
                     }
                 })
                 .await;
             let _ = this.update(cx, |m, cx| {
                 // The account changed while it was out: its answer is not for this library.
                 if m.edit_epoch == generation {
-                    m.edit_settled(&key, kind, result, cx);
+                    m.edit_settled(&key, kind, sent, result, cx);
                 }
             });
         })
@@ -1837,36 +1869,59 @@ impl LibraryModel {
         &mut self,
         key: &str,
         kind: Edit,
-        result: Result<(), apollo_domain::library::WriteFailure>,
+        sent: PageEdit,
+        result: Result<edits::Restored, apollo_domain::library::WriteFailure>,
         cx: &mut Context<Self>,
     ) {
         // Whatever a read cached while the write was out is not the playlist as it is now.
         edits::Stale::Collection(key.to_owned()).invalidate(cx);
         match result {
-            Ok(()) => {
+            Ok(placed) => {
                 if let Some(queue) = self.edit_queues.get_mut(key) {
                     queue.busy = false;
+                }
+                if placed.at_end > 0 {
+                    // The songs are back, but not where they were.
+                    self.writes
+                        .update(cx, |w, cx| w.raise(PUT_BACK_AT_END, cx));
                 }
                 self.pump_edits(key, cx);
             }
             Err(failure) => {
                 // What is shown was ahead of the service: put the service's own list back, and
                 // drop what was waiting behind the edit that failed (it assumed that one landed).
-                self.edit_queues.remove(key);
+                let dropped = self.edit_queues.remove(key);
+                // Removals that never happened are not something Ctrl+Z can put back.
+                let mut stayed: HashMap<u64, Vec<String>> = HashMap::new();
+                let waiting = dropped.into_iter().flat_map(|q| q.items).map(|(e, _)| e);
+                for edit in std::iter::once(sent).chain(waiting) {
+                    if let PageEdit::Remove { occurrence, step: Some(step), .. } = edit {
+                        stayed.entry(step).or_default().push(occurrence);
+                    }
+                }
+                for (step, tokens) in stayed {
+                    self.writes
+                        .update(cx, |w, _| w.keep_removed_except(step, &tokens));
+                }
                 let text = edits::failure_text(kind, failure);
                 self.writes.update(cx, |w, cx| w.raise(text, cx));
-                let ids: Vec<u64> = self
-                    .stack
-                    .iter()
-                    .filter_map(|e| match e {
-                        Entry::Collection(d) if d.collection.library_key() == key => Some(d.id),
-                        _ => None,
-                    })
-                    .collect();
-                for id in ids {
-                    self.refresh_detail(id, cx);
-                }
+                self.refresh_pages_of(key, cx);
             }
+        }
+    }
+
+    /// Read the open pages of a playlist again.
+    fn refresh_pages_of(&mut self, key: &str, cx: &mut Context<Self>) {
+        let ids: Vec<u64> = self
+            .stack
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Collection(d) if d.collection.library_key() == key => Some(d.id),
+                _ => None,
+            })
+            .collect();
+        for id in ids {
+            self.refresh_detail(id, cx);
         }
     }
 

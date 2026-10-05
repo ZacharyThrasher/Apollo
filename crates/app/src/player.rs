@@ -1116,6 +1116,17 @@ impl PlayerModel {
         self.undo.can_undo()
     }
 
+    /// How deep the queue's undo history is (see `UndoHistory::depth`): playlist edits note it
+    /// to be put in order with queue changes.
+    pub fn queue_undo_depth(&self) -> i64 {
+        self.undo.depth()
+    }
+
+    /// Ctrl+Z has a queue change to take back (not while a skim holds the queue).
+    pub fn queue_undoable(&self) -> bool {
+        self.skim.is_none() && self.undo.can_undo()
+    }
+
     pub fn can_redo_queue(&self) -> bool {
         self.undo.can_redo()
     }

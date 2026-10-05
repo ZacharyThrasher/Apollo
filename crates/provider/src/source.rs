@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use apollo_domain::account::{Validation, ValidationError};
 use apollo_domain::library::{
-    bare_playlist_id, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy,
+    bare_playlist_id, AddedRow, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy,
     WriteFailure,
 };
 use apollo_domain::links::ExternalLink;
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::BrowseId;
 use innertube::{
-    Clients, InnerTube, PlaybackTracking, Rating, Session, WatchtimePing, YouTubeClient,
+    AddedVideo, Clients, InnerTube, PlaybackTracking, Rating, Session, WatchtimePing, YouTubeClient,
     METADATA_CLIENT,
 };
 use tokio::sync::Notify;
@@ -26,6 +26,13 @@ use crate::map::{
 use crate::search::{
     hit_from_item, search_page, search_results, Hit, SearchFilter, SearchPage, SearchResults,
 };
+
+/// The rows the service says an add made, as the app's own type.
+fn added_rows(rows: Vec<AddedVideo>) -> Vec<AddedRow> {
+    rows.into_iter()
+        .map(|r| AddedRow { video_id: r.video_id, set_video_id: r.set_video_id })
+        .collect()
+}
 
 /// The browse id of Library > Songs: the songs saved to the library, apart from Liked Music.
 const LIBRARY_SONGS_BROWSE_ID: &str = "FEmusic_liked_videos";
@@ -609,29 +616,48 @@ impl InnerTubeSource {
     }
 
     /// Add one track to a playlist the account owns. A track already there is skipped, not added
-    /// twice. `playlist_id` may carry the `VL` browse prefix.
+    /// twice. `playlist_id` may carry the `VL` browse prefix. The row the service says it made
+    /// comes back (none for a skipped duplicate, or an answer that does not name it).
     pub async fn add_to_playlist(
         &self,
         playlist_id: &str,
         video_id: &str,
-    ) -> Result<(), WriteFailure> {
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
         let bare = playlist_id.strip_prefix("VL").unwrap_or(playlist_id);
         self.tube
             .add_to_playlist(&self.client, bare, video_id)
             .await
+            .map(added_rows)
             .map_err(|e| classify_write(&e))
     }
 
     /// Add several tracks to a playlist the account owns in one request, in the order given.
-    /// Tracks already there are skipped. `playlist_id` may carry the `VL` browse prefix.
+    /// Tracks already there are skipped. `playlist_id` may carry the `VL` browse prefix. The rows
+    /// the service says it made come back.
     pub async fn add_many_to_playlist(
         &self,
         playlist_id: &str,
         video_ids: &[String],
-    ) -> Result<(), WriteFailure> {
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
         self.tube
             .add_many_to_playlist(&self.client, bare_playlist_id(playlist_id), video_ids)
             .await
+            .map(added_rows)
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// Add tracks to a playlist the account owns even when it holds them already (a removal being
+    /// undone). Sent once: it is not safe to repeat, so a lost reply is for the caller to settle
+    /// by reading the playlist. The rows the service says it made come back.
+    pub async fn add_again_to_playlist(
+        &self,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
+        self.tube
+            .add_again_to_playlist(&self.client, bare_playlist_id(playlist_id), video_ids)
+            .await
+            .map(added_rows)
             .map_err(|e| classify_write(&e))
     }
 

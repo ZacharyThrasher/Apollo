@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apollo_domain::library::{
-    Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy, WriteFailure,
+    AddedRow, Collection, CollectionKind, PageMeta, PlaylistEdit, PlaylistTarget, Privacy, WriteFailure,
 };
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::BrowseId;
@@ -397,7 +397,7 @@ impl LibrarySource for InnerTubeLibrary {
         let source = self.source().map_err(write_failure)?;
         self.rt.block_on(async {
             source.ensure_visitor_data().await;
-            source.add_to_playlist(playlist_id, video_id).await
+            source.add_to_playlist(playlist_id, video_id).await.map(drop)
         })
     }
 
@@ -409,7 +409,34 @@ impl LibrarySource for InnerTubeLibrary {
         let source = self.source().map_err(write_failure)?;
         self.rt.block_on(async {
             source.ensure_visitor_data().await;
-            source.add_many_to_playlist(playlist_id, video_ids).await
+            source.add_many_to_playlist(playlist_id, video_ids).await.map(drop)
+        })
+    }
+
+    fn add_to_playlist_rows(
+        &self,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            match video_ids {
+                [video] => source.add_to_playlist(playlist_id, video).await,
+                _ => source.add_many_to_playlist(playlist_id, video_ids).await,
+            }
+        })
+    }
+
+    fn add_again_to_playlist(
+        &self,
+        playlist_id: &str,
+        video_ids: &[String],
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.add_again_to_playlist(playlist_id, video_ids).await
         })
     }
 

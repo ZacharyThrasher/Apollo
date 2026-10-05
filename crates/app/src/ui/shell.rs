@@ -362,11 +362,11 @@ impl Shell {
                 },
                 {
                     let weak = weak.clone();
-                    move |collection, occurrence, cx| {
+                    move |collection, occurrences, cx| {
                         let _ = weak.update(cx, |s, cx| {
                             let model = s.library.read(cx).model().clone();
                             model.update(cx, |m, cx| {
-                                m.remove_row(collection.library_key(), occurrence, cx)
+                                m.remove_rows(collection.library_key(), occurrences, cx)
                             });
                         });
                     }
@@ -1217,10 +1217,32 @@ impl Shell {
         }
     }
 
-    /// Ctrl+Z: take back the last queue change.
+    /// Ctrl+Z: take back the last thing done to the queue or to a playlist, whichever came last.
+    pub fn undo(&mut self, cx: &mut Context<Self>) {
+        let (depth, queue_undoable) = {
+            let player = self.player.read(cx);
+            (player.queue_undo_depth(), player.queue_undoable())
+        };
+        let note = self.writes.read(cx).playlist_undo_note();
+        match apollo_domain::undo::newest(depth, queue_undoable, note) {
+            apollo_domain::undo::Newest::Queue => self.undo_queue(cx),
+            apollo_domain::undo::Newest::Playlist => self.undo_playlist(cx),
+            apollo_domain::undo::Newest::Nothing => {}
+        }
+    }
+
+    /// Take back the last queue change.
     pub fn undo_queue(&mut self, cx: &mut Context<Self>) {
         if self.player.update(cx, |p, cx| p.undo_queue(cx)) {
             self.show_pill("Queue restored", toast::PILL_FOR, cx);
+        }
+    }
+
+    /// Take back the last playlist edit; the pill says what was undone.
+    fn undo_playlist(&mut self, cx: &mut Context<Self>) {
+        let model = self.library.read(cx).model().clone();
+        if let Some(words) = model.update(cx, |m, cx| m.undo_playlist_edit(cx)) {
+            self.show_tip(format!("Undid: {words}").into(), cx);
         }
     }
 
@@ -1825,7 +1847,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &SkimCancel, _, cx| {
                 this.player.update(cx, |m, cx| m.skim_cancel(cx));
             }))
-            .on_action(cx.listener(|this, _: &UndoQueue, _, cx| this.undo_queue(cx)))
+            .on_action(cx.listener(|this, _: &UndoQueue, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &RedoQueue, _, cx| this.redo_queue(cx)))
             .on_action(cx.listener(|_, _: &FocusNextControl, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &FocusPreviousControl, window, cx| window.focus_prev(cx)))
