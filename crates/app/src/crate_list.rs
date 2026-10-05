@@ -340,7 +340,7 @@ impl CrateModel {
     ) -> bool {
         let before = self.items.clone();
         let asked = songs_in.len();
-        let mut added = 0;
+        let mut added_ids: Vec<String> = Vec::new();
         let mut slot = slot.min(self.items.len());
         for (track, thumbnail) in songs_in {
             let video = track.video_id.as_str();
@@ -361,8 +361,8 @@ impl CrateModel {
                 if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
                     let _ = writer.send(Write::Add(key.clone(), Box::new(row.clone())));
                 }
+                added_ids.push(row.track.video_id.as_str().to_owned());
                 self.items.insert(slot, row);
-                added += 1;
             }
             slot += 1;
         }
@@ -375,16 +375,15 @@ impl CrateModel {
             return false;
         }
         self.save_order();
-        let words = if added > 0 {
-            format!("added {} to the Crate", songs(added))
+        let words = if !added_ids.is_empty() {
+            format!("added {} to the Crate", songs(added_ids.len()))
         } else {
             format!("moved {} in the Crate", songs(asked))
         };
         self.record(before, words, cx);
         cx.notify();
         // Songs that were not in the crate before are the ones added (the rest only moved).
-        let added: Vec<String> = after.into_iter().filter(|v| !before.contains(v)).collect();
-        crate::confirm::crated(added, cx);
+        crate::confirm::crated(added_ids, cx);
         true
     }
 
