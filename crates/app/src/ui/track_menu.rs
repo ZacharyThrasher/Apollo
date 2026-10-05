@@ -30,6 +30,7 @@ use crate::library::model::{ArtistTarget, Target};
 use crate::queue_source;
 use crate::library::writes::LibraryWrites;
 use crate::player::PlayerModel;
+use crate::shortcuts::{self, Scope};
 use crate::style::{self, color};
 use crate::ui::anchor;
 use crate::ui::playlist_dialog::{self, Mode};
@@ -1283,7 +1284,20 @@ impl Render for TrackMenu {
     }
 }
 
+/// The command's entry in `shortcuts`, when it has a key.
+fn shortcut_of(command: Command) -> Option<&'static str> {
+    match command {
+        Command::ToggleLike => Some("like"),
+        Command::AddToCrate => Some("crate"),
+        Command::AddToPlaylist => Some("playlist"),
+        Command::RemoveFromQueue | Command::RemoveFromCrate => Some("remove"),
+        _ => None,
+    }
+}
+
 fn menu_item(ix: usize, it: Item, cursor: bool, cx: &mut Context<TrackMenu>) -> gpui::AnyElement {
+    let shortcut = shortcut_of(it.command);
+    let key = shortcut.and_then(|id| shortcuts::menu_key(id, cx));
     style::text_style(div(), typography::BODY, cx)
         .id(("track-menu-item", ix))
         .debug_selector(move || format!("track-menu-item-{ix}"))
@@ -1309,7 +1323,12 @@ fn menu_item(ix: usize, it: Item, cursor: bool, cx: &mut Context<TrackMenu>) -> 
                 m.move_cursor(ix as isize, cx);
             }
         }))
-        .on_click(cx.listener(move |m, _: &gpui::ClickEvent, window, cx| m.choose(ix, window, cx)))
+        .on_click(cx.listener(move |m, event: &gpui::ClickEvent, window, cx| {
+            m.choose(ix, window, cx);
+            if let (Some(id), gpui::ClickEvent::Mouse(_)) = (shortcut, event) {
+                shortcuts::note_mouse_use(id, Scope::Any, cx);
+            }
+        }))
         .child(
             gpui::svg()
                 .path(it.icon.path())
@@ -1317,7 +1336,14 @@ fn menu_item(ix: usize, it: Item, cursor: bool, cx: &mut Context<TrackMenu>) -> 
                 .flex_none()
                 .text_color(color::text_secondary()),
         )
-        .child(it.label)
+        .child(div().flex_1().min_w_0().truncate().child(it.label))
+        .children(key.map(|key| {
+            style::text_style(div(), typography::CAPTION, cx)
+                .debug_selector(move || format!("track-menu-key-{ix}"))
+                .flex_none()
+                .text_color(color::text_secondary())
+                .child(key)
+        }))
         .into_any_element()
 }
 

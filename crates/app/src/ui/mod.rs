@@ -4,6 +4,7 @@ pub mod art_tile;
 pub mod audio_page;
 pub mod blocked_dialog;
 pub mod button;
+pub mod cheat_sheet;
 pub mod card;
 pub mod crate_page;
 pub mod data_page;
