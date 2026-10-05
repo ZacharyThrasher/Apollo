@@ -46,6 +46,7 @@ use gpui::{
 };
 
 use crate::assets::Icon;
+use crate::crate_add::{CrateAddEvent, CrateAddModel};
 use crate::crate_arrange::{self, Arrange};
 use crate::crate_list::{CrateEvent, CrateModel};
 use crate::library::LibraryWrites;
@@ -56,6 +57,7 @@ use crate::player::{format_time, PlayerModel};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
+use crate::ui::crate_add::{CrateAddBox, Leave};
 use crate::ui::dock_tabs::{Dock, DockFocus, DockTabs, OnPick as DockPick};
 use crate::ui::library::DraggedRow as LibraryRow;
 use crate::ui::song_drag::SongDrag;
@@ -84,7 +86,9 @@ actions!(
         ExtendUp,
         ExtendDown,
         SelectAll,
-        ClearPicks
+        ClearPicks,
+        CrateFocusAdd,
+        CratePaste
     ]
 );
 
@@ -95,6 +99,10 @@ actions!(
 
 /// Key context of the list's focus handle.
 pub const KEY_CONTEXT: &str = "CrateList";
+
+/// Key context of the header's button row: `/` and Ctrl+V work from there too (not from the filter
+/// or add fields, which have their own contexts).
+pub const BAR_CONTEXT: &str = "CrateBar";
 
 /// Key context of the Arrange popover.
 pub const ARRANGE_CONTEXT: &str = "CrateArrange";
@@ -119,6 +127,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-down", ExtendDown, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-a", SelectAll, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", ClearPicks, Some(KEY_CONTEXT)),
+        KeyBinding::new("/", CrateFocusAdd, Some(KEY_CONTEXT)),
+        KeyBinding::new("/", CrateFocusAdd, Some(BAR_CONTEXT)),
+        KeyBinding::new("ctrl-v", CratePaste, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-v", CratePaste, Some(BAR_CONTEXT)),
         KeyBinding::new("up", ArrangeUp, Some(ARRANGE_CONTEXT)),
         KeyBinding::new("down", ArrangeDown, Some(ARRANGE_CONTEXT)),
         KeyBinding::new("enter", ArrangeChoose, Some(ARRANGE_CONTEXT)),
@@ -333,6 +345,9 @@ pub struct CratePage {
     cursor: Option<String>,
     /// The filter field, made once the Crate has songs to filter.
     filter: Option<Entity<TextField>>,
+    /// The "Add songs" box above the list, and what it holds.
+    add: Entity<CrateAddBox>,
+    add_model: Entity<CrateAddModel>,
     /// The Arrange popover is open, and the choice the keyboard is on.
     arrange_open: bool,
     arrange_cursor: usize,
@@ -414,6 +429,24 @@ impl CratePage {
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         crate::confirm::watch(cx);
         let dock = layout == Layout::Dock;
+        let add_model = cx.new(|_| CrateAddModel::new(crate_.clone(), player.clone()));
+        // Esc and Down in the add box hand the keyboard to the list.
+        let on_leave: Leave = {
+            let page = cx.weak_entity();
+            Rc::new(move |window, cx| {
+                let _ = page.update(cx, |p, cx| {
+                    p.enter(window, cx);
+                });
+            })
+        };
+        let add_tab = if dock { DOCK_TAB_FILTER } else { TAB_ARRANGE };
+        let add = cx.new(|cx| CrateAddBox::new(add_model.clone(), add_tab, dock, on_leave, cx));
+        // Songs added by search or paste: the list scrolls to the first one.
+        cx.subscribe(&add_model, |this, _, event: &CrateAddEvent, cx| {
+            let CrateAddEvent::Added(ids) = event;
+            this.scroll_to_added(ids, cx);
+        })
+        .detach();
         // The docked panel's stops are in the queue panel's slots; the page's own are as before.
         let at = |page: isize, docked: isize| if dock { docked } else { page };
         let focus = Focus {
@@ -438,6 +471,8 @@ impl CratePage {
             scroll: UniformListScrollHandle::new(),
             cursor: None,
             filter: None,
+            add,
+            add_model,
             arrange_open: false,
             arrange_cursor: 0,
             selection: Selection::new(),
@@ -536,7 +571,44 @@ impl CratePage {
         if let Some(field) = self.filter.clone() {
             field.update(cx, |f, cx| f.set_text("", cx));
         }
+        self.add_model.update(cx, |m, cx| m.reset(cx));
         cx.notify();
+    }
+
+    // ---- the add box ---------------------------------------------------------------------
+
+    /// The "Add songs" box (tests).
+    pub fn add_box(&self) -> &Entity<CrateAddBox> {
+        &self.add
+    }
+
+    /// What the add box holds and looks up (tests).
+    pub fn add_model(&self) -> &Entity<CrateAddModel> {
+        &self.add_model
+    }
+
+    /// `/`: the keyboard goes to the add box.
+    pub fn focus_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add.update(cx, |b, cx| b.focus(window, cx));
+    }
+
+    /// Ctrl+V on the list or the header's buttons: links and lines on the clipboard are added.
+    pub fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        self.add.update(cx, |b, cx| {
+            b.paste(&text, false, window, cx);
+        });
+    }
+
+    /// Songs went in by search or paste: show the first of them.
+    fn scroll_to_added(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        let Some(first) = ids.first() else { return };
+        let shown = self.shown(cx);
+        if let Some(at) = shown.iter().position(|r| r.track.video_id.as_str() == first) {
+            self.scroll.scroll_to_item(at, ScrollStrategy::Nearest);
+        }
     }
 
     // ---- the filter --------------------------------------------------------------------
@@ -1638,6 +1710,7 @@ impl CratePage {
         let page = cx.entity();
         let has_rows = count > 0;
         let buttons = div()
+            .key_context(BAR_CONTEXT)
             .flex()
             .flex_row()
             .items_center()
@@ -1809,6 +1882,7 @@ impl CratePage {
             .clone()
             .map(|(focus, on_pick)| DockTabs::new(Dock::Crate, &focus, accent, on_pick));
         let actions = div()
+            .key_context(BAR_CONTEXT)
             .flex()
             .flex_row()
             .items_center()
@@ -2018,6 +2092,8 @@ impl Render for CratePage {
         let count = self.rows.len();
 
         let docked = self.docked();
+        self.add.update(cx, |a, _| a.set_accent(accent));
+        let add = self.add.clone();
         let header = if docked {
             self.dock_header(count, controls, accent, cx)
         } else {
@@ -2091,7 +2167,16 @@ impl Render for CratePage {
                 .bg(color::bg_raised())
                 .border_l_1()
                 .border_color(color::border_subtle())
+                .on_action(cx.listener(|this, _: &CrateFocusAdd, window, cx| this.focus_add(window, cx)))
+                .on_action(cx.listener(|this, _: &CratePaste, window, cx| this.paste_clipboard(window, cx)))
                 .child(header)
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(spacing::S3))
+                        .pb(px(spacing::S2))
+                        .child(add),
+                )
                 .child(div().flex_1().min_h_0().child(body))
                 .into_any_element();
         }
@@ -2102,7 +2187,10 @@ impl Render for CratePage {
             .flex_col()
             .size_full()
             .min_h_0()
+            .on_action(cx.listener(|this, _: &CrateFocusAdd, window, cx| this.focus_add(window, cx)))
+            .on_action(cx.listener(|this, _: &CratePaste, window, cx| this.paste_clipboard(window, cx)))
             .child(header)
+            .child(div().flex_none().mt(px(spacing::S4)).child(add))
             .child(div().flex_1().min_h_0().mt(px(spacing::S4)).child(body))
             .into_any_element()
     }
