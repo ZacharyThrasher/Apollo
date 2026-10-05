@@ -196,6 +196,11 @@ add whose reply from YouTube Music was lost cannot be undone exactly (which rows
 known), so Ctrl+Z says so and leaves it. An add that has not been answered yet answers "Try again
 in a moment". The Crate's own drag moves are not part of this history.
 
+An add that Ctrl+Z can take back says so in its confirmation: "Added to Road trip · Ctrl+Z to
+undo" (queue adds and playlist adds, including a playlist made from the queue or the Crate), for
+2.5 seconds, while **Show shortcut hints** is on. Crate adds, likes and library saves have no undo
+and no hint. Settings > Playlists > **Confirm when adding** switches the confirmation off.
+
 Media keys are the OS's (SMTC) and are untouched.
 
 ## The playlist picker

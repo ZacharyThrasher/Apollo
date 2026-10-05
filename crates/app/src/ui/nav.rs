@@ -312,6 +312,13 @@ impl RenderOnce for NavItem {
                         .bg(accent),
                 )
             })
+            // The Crate lights up when a song is added to it.
+            .children(
+                (self.route == Route::Crate)
+                    .then(|| crate::confirm::pulse(crate::confirm::Place::Crate, cx))
+                    .flatten()
+                    .map(|seq| crate::confirm::highlight(seq, radius::SMALL)),
+            )
             .child(
                 gpui::svg()
                     .path(self.route.icon(self.active).path())

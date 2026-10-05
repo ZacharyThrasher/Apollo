@@ -83,6 +83,9 @@ pub const TARGET_PLAYLIST: TextSetting = TextSetting::new("target_playlist", "")
 /// Playlists > Show More like this: a playlist of your own ends with a short list of songs like
 /// its own, each with a + that adds it in place. Off hides the section and fetches nothing.
 pub const MORE_LIKE_THIS: BoolSetting = BoolSetting::new("more_like_this", true);
+/// Playlists > Confirm when adding: say so when something is added to a list, with the pill and
+/// a short pulse where the list is on screen (see `confirm`).
+pub const CONFIRM_ADDS: BoolSetting = BoolSetting::new("confirm_adds", true);
 /// Playlists > Create playlists instantly: "New playlist" and "Save as playlist…" skip the name
 /// dialog, make a private "Oct 5 · Untitled" at once and open it with its title ready to rename.
 /// Off until the owner asks for it.
@@ -169,6 +172,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     TARGET_KEY.key,
     TARGET_PILL.key,
     MORE_LIKE_THIS.key,
+    CONFIRM_ADDS.key,
     INSTANT_PLAYLISTS.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
