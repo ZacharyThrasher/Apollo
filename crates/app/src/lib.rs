@@ -22,6 +22,7 @@ pub mod crate_list;
 pub mod instant_playlist;
 pub mod assets;
 pub mod audio;
+pub mod auto_advance;
 pub mod blocked_artists;
 pub mod autostart;
 pub mod backend;
