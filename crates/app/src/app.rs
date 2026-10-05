@@ -31,6 +31,7 @@ const MAIN_PLACEMENT: Constraints = Constraints {
     default_size: (1100.0, 720.0),
     min_size: (MIN_WIDTH, MIN_HEIGHT),
     home: Home::Center,
+    fixed: false,
 };
 
 /// How often the system's animation setting is looked at while the app runs.
@@ -298,7 +299,7 @@ fn open_window(
             shell.install_window_hooks(window, cx);
             // Size, position and maximized state are written down as they change.
             let remembered =
-                window_state::remember(window, cx, windows, window_state::KEY_MAIN, true);
+                window_state::remember(window, cx, windows, window_state::KEY_MAIN, None);
             shell.keep(remembered);
         })
         .expect("focus root");
