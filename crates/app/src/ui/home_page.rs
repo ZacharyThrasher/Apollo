@@ -29,6 +29,7 @@ use crate::assets::Icon;
 use crate::home::{ChipPhase, HomeModel, More, Phase};
 use crate::library::model::{ArtistTarget, Target};
 use crate::queue_source;
+use crate::shelf_song;
 use crate::motion::HoverFade;
 use crate::player::PlayerModel;
 use crate::style::{self, color};
@@ -1049,6 +1050,7 @@ impl RenderOnce for SongTile {
         let on_intent = self.on_intent.clone();
         let (id, title, artists) = (self.id.clone(), self.title.clone(), self.artists.clone());
         let menu = self.menu.clone();
+        let (crate_menu, hover_menu, hover_id) = (menu.clone(), menu.clone(), id.clone());
 
         let art = div()
             .relative()
@@ -1145,13 +1147,15 @@ impl RenderOnce for SongTile {
                         f(cx);
                     }
                 }
+                shelf_song::hover(&hover_id, &hover_menu, *hovered, cx);
                 fade.update(cx, |s, cx| {
                     s.set(*hovered, Instant::now(), animate);
                     cx.notify();
                 });
             })
-            .key_context(card::KEY_CONTEXT)
+            .key_context(card::SONG_KEY_CONTEXT)
             .on_action(move |_: &card::OpenCard, window, cx| play_key(window, cx))
+            .on_action(move |_: &card::CrateSong, _, cx| shelf_song::crate_card(&crate_menu, ring, cx))
             .on_click(move |event, window, cx| {
                 // The keyboard plays through `OpenCard`; Space is the play/pause key.
                 if !matches!(event, gpui::ClickEvent::Keyboard(_)) {

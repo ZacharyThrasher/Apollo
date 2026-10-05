@@ -21,7 +21,7 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | ? (Shift+/) | Cheat sheet: every key, grouped by Play / Collect / Navigate / Window. Esc, ?, Enter or Space close it; the other keys stand down while it is open |
 | Ctrl+L | Show / hide lyrics (opens Now Playing) |
 | L | Like / unlike the playing song |
-| C | Set the playing song aside in the Crate (in the queue, Library and Search lists: the song under the cursor, and the cursor then steps to the next row: see "Auto-advance") |
+| C | Set a song aside in the Crate. On a Home, Explore or Related shelf: the song card the keyboard ring is on, else the one under the pointer (see "C from anywhere"). In the queue, Library and Search lists: the song under the cursor, and the cursor then steps to the next row (see "Auto-advance"). Anywhere else: the playing song |
 | D | Dig from here: the radio of the playing song, skimmed (in the queue, Library and Search lists: the song under the cursor or the pointer). Settings > Playlists > "Dig key" switches it off. See "Dig from here" |
 | P | Add to playlist: open the picker for the playing song (in the queue, Library, Search and Crate lists: the song under the cursor). Settings > Playback > "P opens the playlist picker" switches it off |
 | A | Add to the target playlist: the playing song (in the queue, Library, Search and Crate lists: the song under the cursor; with 2 or more picked, all of them). With no target set the picker opens to choose one. Settings > Playlists > "A adds to the target playlist" switches it off. See "The target playlist" |
@@ -117,6 +117,35 @@ playlist, an album or the Songs tab and let go on the panel. A thin line shows w
 below the last row, or on the empty panel, is the bottom / the start. A song the Crate already
 holds moves to that place instead of being added twice. C still adds at the bottom. Rows of the
 panel drag to rearrange it, as on the page.
+
+## C from anywhere
+
+**On a shelf of songs** (Home's song grids, Explore's Top songs, the Related tab beside Now
+Playing) C sets aside the song card the **keyboard ring** is on (Tab, or the arrows of PR #96, put
+it there); with no ring showing, the card **under the pointer**; with neither, the playing song as
+everywhere else. A card the keyboard holds only by an old click does not beat the pointer: the
+ring has to be showing. Album, artist and playlist cards have no C of their own (it falls through
+to the playing song). The cursor does not step on after C on a shelf (shelves are grids; Left and
+Right keep their meaning). C never starts anything: it only notes the song, no prefetch, no
+resolving, no YouTube call.
+
+**Add all to Crate** is in the More menu of:
+
+| Where | Menu item | Adds |
+|---|---|---|
+| A playlist or album page (More in its header, or right-click the header) | Add all to Crate | every row loaded so far, in page order (the page's filter box does not narrow it) |
+| A playlist page (not an album) | Open in Crate | the same songs, then the Crate page opens; a Crate that already has songs keeps them and the playlist's go below (no dialog) |
+| Library > Songs (More at the right end of the Play / Shuffle row) | Add all to Crate | the songs shown, in the tab's chosen order, **narrowed by its filter box** (like Play) |
+| Explore > Top songs (More at the right end of the Skim row) | Add all to Crate | all the chart's songs, including those past the first twenty |
+| The queue panel (header More) | Add queue to Crate | the whole queue: played, playing and up next |
+
+Songs the Crate already holds, and a song a list names twice, are skipped. **One Ctrl+Z** takes
+the whole add back ("Undid: added 24 songs to the Crate"). The pill reads "Added 24 songs to
+Crate", "Added 18 · 6 already in Crate" when some were held, or "Already in Crate" when all were;
+"· still loading" is added when the page had more rows on the way (run it again once they are in:
+what is held is skipped). A playlist or album **card** (Library lists, Search, Home) has neither
+item: its rows are not loaded, and nothing here asks YouTube for them. These items use only rows
+already on the page, so they make no YouTube calls and start no playback.
 
 ## Auto-advance
 
@@ -285,6 +314,7 @@ memory only; a restart or a different account starts empty):
 | Change | Ctrl+Z does |
 |---|---|
 | A song set aside (C, Add to Crate, a drop on the dock) | Takes it out again |
+| Add all to Crate, Add queue to Crate, Open in Crate | Takes out exactly the songs that add put in, as one step |
 | Remove, or Delete with several picked | Puts the songs back where they were (several at once are one step) |
 | Clear | Puts every song back. Clear no longer asks first: Ctrl+Z is the safety net |
 | A move (drag, Alt+Up / Alt+Down, Alt+Home / Alt+End, a drop in the dock) | Puts the order back |
@@ -417,3 +447,5 @@ registered hotkey while the keys are held, so each press is one step.
 - `crates/app/src/shortcuts.rs`: reads the keymap for the tooltips, menu keys, cheat sheet rows,
   badges and the third-use nudge (`HintLedger`).
 - `crates/app/src/ui/shell.rs`: the action handlers. `tests/keyboard.rs` drives them.
+- `crates/app/src/shelf_song.rs` and `ui/card.rs` (`SONG_KEY_CONTEXT`): C on a shelf's song card
+  (`tests/crate_from_anywhere.rs`); `ui/track_menu.rs` (`loaded_songs`): the Add all items.

@@ -469,6 +469,49 @@ impl CrateModel {
         true
     }
 
+    /// Set several songs aside at the bottom, in the order given, as one step for Ctrl+Z. A song
+    /// the crate already holds (or that comes twice in `songs_in`) is skipped. Returns the ids
+    /// that went in; nothing goes in, and nothing is recorded, when they were all held.
+    pub fn add_many(
+        &mut self,
+        songs_in: Vec<(Track, Option<String>)>,
+        cx: &mut Context<Self>,
+    ) -> Vec<String> {
+        let mut held: HashSet<String> = self
+            .items
+            .iter()
+            .map(|r| r.track.video_id.as_str().to_owned())
+            .collect();
+        let before = self.items.clone();
+        let mut added = Vec::new();
+        for (track, thumbnail) in songs_in {
+            let video = track.video_id.as_str().to_owned();
+            if !held.insert(video.clone()) {
+                continue;
+            }
+            let row = CrateRow {
+                explicit: crate::explicit_marks::is_explicit(&video),
+                track,
+                thumbnail,
+                added_ms: now_ms(),
+            };
+            if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
+                let _ = writer.send(Write::Add(key.clone(), Box::new(row.clone())));
+            }
+            self.items.push(row);
+            added.push(video);
+        }
+        if added.is_empty() {
+            return added;
+        }
+        let words = format!("added {} to the Crate", songs(added.len()));
+        self.record(before, words, cx);
+        cx.notify();
+        // "Prefer explicit versions" (off unless chosen) treats these like any other add.
+        self.auto_swap(added.clone(), cx);
+        added
+    }
+
     /// Drop songs into the crate before what is at slot `slot` now (`len` or more means the
     /// bottom). A song already in the crate moves there instead of being added twice; the songs
     /// keep the order they are given in. Returns whether anything changed. One step for Ctrl+Z.
@@ -1214,20 +1257,43 @@ pub fn add_tracks(
     songs: Vec<(Track, Option<String>)>,
     cx: &mut App,
 ) {
-    let Some(model) = handle(cx) else { return };
-    let mut added = Vec::new();
-    for (track, thumbnail) in songs {
-        let thumbnail = thumbnail.or_else(|| player.read(cx).art_url(track.video_id.as_str()));
-        let video = track.video_id.as_str().to_owned();
-        if model.update(cx, |m, cx| m.add(track, thumbnail, cx)) {
-            added.push(video);
-        }
-    }
-    if added.is_empty() {
-        crate::confirm::already_crated(cx);
-    } else {
-        crate::confirm::crated(added, cx);
-    }
+    let songs = songs
+        .into_iter()
+        .map(|(track, thumbnail)| {
+            let thumbnail = thumbnail.or_else(|| player.read(cx).art_url(track.video_id.as_str()));
+            (track, thumbnail)
+        })
+        .collect();
+    add_rows(songs, false, cx);
+}
+
+/// Set a song a card showed aside, with the cover the card knew (no player to ask for another).
+pub fn add_card_song(track: Track, thumbnail: Option<String>, cx: &mut App) {
+    add_rows(vec![(track, thumbnail)], false, cx);
+}
+
+/// What an add of many songs did, for the confirmation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Added {
+    /// Songs that went in.
+    pub new: usize,
+    /// Songs the Crate held already (or the list named twice).
+    pub held: usize,
+}
+
+/// Set the songs aside as one step for Ctrl+Z and say what happened: "Added 24 songs to Crate",
+/// "Added 18 · 6 already in Crate", or "Already in Crate". `partial` says the list is still
+/// loading, which the confirmation adds. Does nothing where there is no shell.
+pub fn add_rows(songs: Vec<(Track, Option<String>)>, partial: bool, cx: &mut App) -> Option<Added> {
+    let model = handle(cx)?;
+    let asked = songs.len();
+    let added = model.update(cx, |m, cx| m.add_many(songs, cx));
+    let result = Added {
+        new: added.len(),
+        held: asked - added.len(),
+    };
+    crate::confirm::crated_many(added, result.held, partial, cx);
+    Some(result)
 }
 
 /// Swap the Crate's songs for their `want` version: every song, or only `only`. The window's tip
@@ -1304,6 +1370,41 @@ mod tests {
             .iter()
             .map(|r| r.track.video_id.as_str().to_owned())
             .collect()
+    }
+
+    #[gpui::test]
+    fn add_many_goes_in_below_in_order_skips_what_is_held_and_is_one_step(cx: &mut TestAppContext) {
+        let model = cx.new(|_| CrateModel::new());
+        model.update(cx, |m, cx| {
+            m.add(track("a"), None, cx);
+            let before = m.history.len();
+            let added = m.add_many(
+                vec![
+                    (track("b"), None),
+                    (track("a"), None),
+                    (track("c"), Some("art".into())),
+                    (track("b"), None),
+                ],
+                cx,
+            );
+            assert_eq!(added, ["b", "c"], "held and repeated songs are skipped");
+            assert_eq!(ids(m), ["a", "b", "c"]);
+            assert_eq!(m.history.len(), before + 1, "one step for the whole add");
+            assert_eq!(m.undo(cx).as_deref(), Some("added 2 songs to the Crate"));
+            assert_eq!(ids(m), ["a"]);
+        });
+    }
+
+    #[gpui::test]
+    fn add_many_of_only_held_songs_records_nothing(cx: &mut TestAppContext) {
+        let model = cx.new(|_| CrateModel::new());
+        model.update(cx, |m, cx| {
+            m.add(track("a"), None, cx);
+            let before = m.history.len();
+            assert!(m.add_many(vec![(track("a"), None)], cx).is_empty());
+            assert!(m.add_many(Vec::new(), cx).is_empty());
+            assert_eq!(m.history.len(), before);
+        });
     }
 
     #[gpui::test]

@@ -699,7 +699,7 @@ fn the_queue_headers_more_button_opens_the_menu_under_itself(cx: &mut TestAppCon
     let more = bounds(vcx, "queue-more");
     click(vcx, "queue-more");
     assert!(is_open(&page, vcx));
-    assert_eq!(commands(&page, vcx), [Command::SaveQueue]);
+    assert_eq!(commands(&page, vcx), [Command::SaveQueue, Command::AddAllToCrate]);
     assert_eq!(
         page.menu.read_with(vcx, |m, _| m.subject().cloned()),
         Some(Subject::Queue)
@@ -783,7 +783,7 @@ fn the_queues_menu_saves_it_as_a_private_playlist_named_for_where_it_plays_from(
 ) {
     let (page, vcx) = setup(cx);
     open_queue_menu(vcx);
-    assert_eq!(commands(&page, vcx), [Command::SaveQueue]);
+    assert_eq!(commands(&page, vcx), [Command::SaveQueue, Command::AddAllToCrate]);
     choose(&page, vcx, Command::SaveQueue);
     let dialog = dialog_of(&page, vcx);
     let ids: Vec<String> = [FIRST, "queued00001", "queued00002"]
