@@ -10,6 +10,7 @@ use apollo_app::library::sim::SimLibrary;
 use apollo_app::player::{PlayerModel, SkimView};
 use apollo_app::reporting::{PlayReporter, Snapshot};
 use apollo_app::search::SearchSource;
+use apollo_app::settings::AUTO_ADVANCE;
 use apollo_app::style::Fonts;
 use apollo_app::ui::shell::{self, Shell};
 use apollo_app::url_thumbs::NoThumbs;
@@ -259,6 +260,9 @@ fn the_progress_bar_is_the_window_and_a_seek_lands_inside_it(cx: &mut TestAppCon
 #[gpui::test]
 fn k_sets_the_song_aside_and_the_skim_goes_on(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
+    // With auto-advance off K only sets the song aside; the skim goes on by its own clock.
+    let settings = page.shell.read_with(vcx, |s, cx| s.settings(cx));
+    settings.update(vcx, |m, cx| m.set(&AUTO_ADVANCE, false, cx));
     start(&page, vcx);
     open_at(&page, vcx, START);
     vcx.simulate_keystrokes("k");
@@ -272,6 +276,32 @@ fn k_sets_the_song_aside_and_the_skim_goes_on(cx: &mut TestAppContext) {
         crate_ids(&page, vcx),
         vec!["skim0000001".to_owned(), "skim0000002".to_owned()]
     );
+}
+
+#[gpui::test]
+fn with_auto_advance_k_also_moves_on_to_the_next_song(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    start(&page, vcx);
+    open_at(&page, vcx, START);
+    vcx.simulate_keystrokes("k");
+    assert_eq!(crate_ids(&page, vcx), vec!["skim0000001".to_owned()]);
+    assert_eq!(title(&page, vcx), "Two", "K kept One and went to the next song");
+    assert!(skim(&page, vcx).is_some(), "the skim carries on");
+
+    open_at(&page, vcx, START);
+    vcx.simulate_keystrokes("k");
+    assert_eq!(title(&page, vcx), "Three");
+    assert_eq!(
+        crate_ids(&page, vcx),
+        vec!["skim0000001".to_owned(), "skim0000002".to_owned()]
+    );
+
+    // The last song: K sets it aside and stays; a key that only collects does not end the skim.
+    open_at(&page, vcx, START);
+    vcx.simulate_keystrokes("k");
+    assert_eq!(crate_ids(&page, vcx).len(), 3);
+    assert_eq!(title(&page, vcx), "Three");
+    assert!(skim(&page, vcx).is_some(), "still skimming");
 }
 
 #[gpui::test]
