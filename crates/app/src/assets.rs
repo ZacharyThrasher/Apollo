@@ -91,6 +91,7 @@ icons! {
     PersonProhibited => "person-prohibited-regular",
     MoveTop => "arrow-up-to-top-regular",
     MoveBottom => "arrow-down-to-bottom-regular",
+    ArrowSwap => "arrow-swap-regular",
 }
 
 pub struct Assets;
