@@ -191,6 +191,7 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
         shell.install_related(stores.related_open.clone(), cx);
         shell.install_library_sort(stores.library_sort.clone(), cx);
         shell.install_crate_store(stores.crate_list.clone(), cx);
+        shell.install_crate_dock(stores.windows.clone(), cx);
         shell.install_block_store(stores.blocked.clone(), cx);
     });
     // Media keys and the SMTC overlay, on the window just opened.

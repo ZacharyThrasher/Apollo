@@ -29,12 +29,15 @@ actions!(
         ToggleLyrics,
         LikeCurrent,
         CrateCurrent,
+        ToggleCrateDock,
         AddCurrentToPlaylist,
         AddCurrentToTarget,
         UndoQueue,
         RedoQueue,
         ToggleFullscreen,
         ShowShortcuts,
+        GoBack,
+        GoForward,
         SkimCrate,
         SkimKeep,
         SkimCancel,
@@ -81,6 +84,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-l", ToggleLyrics, plain),
         KeyBinding::new("l", LikeCurrent, plain),
         KeyBinding::new("c", CrateCurrent, plain),
+        KeyBinding::new("ctrl-shift-c", ToggleCrateDock, plain),
         KeyBinding::new("p", AddCurrentToPlaylist, plain),
         KeyBinding::new("a", AddCurrentToTarget, plain),
         KeyBinding::new("ctrl-z", UndoQueue, plain),
@@ -90,6 +94,13 @@ pub fn bind_keys(cx: &mut App) {
         // "?" is Shift+/ on most layouts; a layout that types it on its own key sends "?".
         KeyBinding::new("shift-/", ShowShortcuts, plain),
         KeyBinding::new("?", ShowShortcuts, plain),
+        // Backspace goes back like a browser's, but never in a text field (it deletes there).
+        KeyBinding::new("backspace", GoBack, plain),
+    ]);
+    // Alt+Left / Alt+Right work wherever focus is, text fields included (no field uses them).
+    cx.bind_keys([
+        KeyBinding::new("alt-left", GoBack, Some(KEY_CONTEXT)),
+        KeyBinding::new("alt-right", GoForward, Some(KEY_CONTEXT)),
     ]);
     // Bound after the shell's own Esc (Close Now Playing), so while skimming Esc ends the skim.
     let skim = Some(SKIM_PLAIN);

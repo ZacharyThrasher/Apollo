@@ -50,6 +50,7 @@ use crate::ui::row_actions::{heart_action, more_slot, playlist_action, ACTION_SI
 use crate::ui::selection::{self, Click, Selection};
 use crate::ui::track_menu::{self, Command, Subject, TrackSubject};
 use crate::ui::skeleton;
+use crate::ui::song_drag::{self, SongDrag};
 use crate::ui::text_button::TextButton;
 use crate::ui::text_field::{self, TextField, TextFieldEvent};
 use crate::ui::tooltip::Tooltip;
@@ -112,7 +113,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("left", crate::ui::shell::FocusSidebar, Some(LIST_CONTEXT)),
         KeyBinding::new("alt-up", MoveRowUp, Some(LIST_CONTEXT)),
         KeyBinding::new("alt-down", MoveRowDown, Some(LIST_CONTEXT)),
-        KeyBinding::new("alt-left", Back, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Back, Some(KEY_CONTEXT)),
     ]);
     tabs::bind_keys(cx);
@@ -298,6 +298,9 @@ pub struct LibraryView {
     on_search: Rc<Handler>,
     /// Back closed the last open page: a page opened from elsewhere (Search) returns there.
     on_closed: Rc<Handler>,
+    /// Back, as the window's history has it (it knows where the page was opened from). Without
+    /// one (tests of the view alone) Back only closes the page.
+    on_back: Option<Rc<Handler>>,
     /// Nobody is signed in: the page says so instead of listing (or failing to).
     signed_out: bool,
     /// The signed-out state's action: Settings > Account.
@@ -313,10 +316,12 @@ pub struct LibraryView {
 
 /// The song row being dragged to a new place in an editable playlist.
 #[derive(Clone)]
-struct DraggedRow {
+pub(crate) struct DraggedRow {
     from: usize,
     title: SharedString,
     artist: SharedString,
+    /// The song, for the docked Crate to take.
+    pub(crate) song: Option<SongDrag>,
 }
 
 struct DragGhost(DraggedRow);
@@ -436,6 +441,7 @@ impl LibraryView {
             hover: RowHover::default(),
             on_search: Rc::new(Box::new(on_search)),
             on_closed: Rc::new(Box::new(on_closed)),
+            on_back: None,
             signed_out: false,
             on_sign_in: Rc::new(Box::new(on_sign_in)),
             rendered: 0..0,
@@ -658,9 +664,27 @@ impl LibraryView {
         cx.notify();
     }
 
+    /// Hand Back to the window's history (see [`Self::back`]).
+    pub fn set_on_back(&mut self, on_back: impl Fn(&mut Window, &mut App) + 'static) {
+        self.on_back = Some(Rc::new(Box::new(on_back)));
+    }
+
+    /// Back from the page on screen. The window's history decides where that is (the page it was
+    /// opened from); it asks for [`Self::back_one`] when it has nowhere to go. Deferred: the
+    /// history changes this view too, and this runs inside one of its updates.
+    pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.read(cx).depth() == 0 {
+            return;
+        }
+        match self.on_back.clone() {
+            Some(on_back) => window.defer(cx, move |window, cx| on_back(window, cx)),
+            None => self.back_one(window, cx),
+        }
+    }
+
     /// Closes the page on screen, back to the one beneath it or the lists. Closing the last
     /// one tells the host.
-    pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn back_one(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.model.read(cx).depth() == 0 {
             return;
         }
@@ -676,7 +700,7 @@ impl LibraryView {
         }
     }
 
-    fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+    pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         if self.model.read(cx).tab() != tab {
             self.model.update(cx, |m, cx| m.set_tab(tab, cx));
             self.selected = 0;
@@ -695,6 +719,57 @@ impl LibraryView {
     fn stats_open(&self, cx: &App) -> bool {
         let model = self.model.read(cx);
         model.depth() == 0 && model.tab() == Tab::Stats
+    }
+
+    /// The scrolling surface on screen: an artist page's column, a playlist or album page's
+    /// list, or the overview tab's list or column.
+    fn surface(&self, cx: &App) -> ScrollHandle {
+        let model = self.model.read(cx);
+        let of_list = |list: &UniformListScrollHandle| list.0.borrow().base_handle.clone();
+        if model.depth() == 0 {
+            return match model.tab() {
+                Tab::Playlists => of_list(&self.playlists_scroll),
+                Tab::Albums => of_list(&self.albums_scroll),
+                Tab::Songs => of_list(&self.songs_scroll),
+                Tab::Artists => self.artists_scroll.clone(),
+                Tab::History => self.history_scroll.clone(),
+                Tab::Stats => self.stats_scroll.clone(),
+            };
+        }
+        match self.pages.last() {
+            Some(page) if model.artist().is_some() => page.column.clone(),
+            Some(page) => of_list(&page.list),
+            None => of_list(&self.playlists_scroll),
+        }
+    }
+
+    /// How far the page or list on screen is scrolled; the window's history keeps it.
+    pub fn scroll_offset(&self, cx: &App) -> gpui::Point<gpui::Pixels> {
+        self.surface(cx).offset()
+    }
+
+    pub fn set_scroll_offset(&self, offset: gpui::Point<gpui::Pixels>, cx: &App) {
+        self.surface(cx).set_offset(offset);
+    }
+
+    /// What the filter field of the page on screen holds (untrimmed), if it has text.
+    pub fn filter_snapshot(&self, cx: &App) -> Option<String> {
+        let text = self.filter_field(cx)?.read(cx).text().to_owned();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Put text back in the filter field of the page on screen (the window's Back and Forward).
+    pub fn restore_filter(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let field = if self.model.read(cx).songs_open() {
+            Some(self.ensure_songs_filter(window, cx))
+        } else {
+            self.ensure_filter(window, cx)
+        };
+        if let Some(field) = field {
+            if field.read(cx).text() != text {
+                field.update(cx, |f, cx| f.set_text(text, cx));
+            }
+        }
     }
 
     /// The track list on screen's filter field (a playlist or album page's, or the Songs tab's),
@@ -2224,6 +2299,7 @@ impl LibraryView {
             ),
             _ => Subject::track(row.track.clone(), row.thumbnail.clone()),
         };
+        let song_subject = subject.clone();
         let draggable = editable.is_some()
             && !filtering
             && self
@@ -2235,6 +2311,7 @@ impl LibraryView {
             from: real,
             title: row.track.title.clone().into(),
             artist: artists.clone(),
+            song: SongDrag::of(&song_subject),
         };
         let actions = self.row_actions(
             ix,
@@ -2369,6 +2446,9 @@ impl LibraryView {
                     this.drop_row(dragged.from, ix, cx)
                 }))
         })
+        // The other rows drag their songs (every picked one, from a picked row) to the docked
+        // Crate; a row of a playlist of your own does so through its reorder payload.
+        .when(!draggable, |d| song_drag::draggable(d, &song_subject))
         .into_any_element()
     }
 

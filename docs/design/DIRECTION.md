@@ -47,7 +47,7 @@ Focus ring: 2px accent, 2px offset, keyboard focus only.
 ## Shell decisions (coordinator, 2026-10-03)
 Applied to the app shell from the first Windows review.
 1. **Close button:** hover is native Windows 11 red #C42B1C with a white glyph; pressed is #C42B1C at 90%. The other caption buttons keep the neutral hover and pressed tints.
-2. **Player bar side blocks:** the left block (art, title, artist) is 30% of the bar, min 240px, max 360px. The right block (volume, queue) has the same width, so the transport stays centred on the window. The minimum window width follows: 240 + 320 + 240 plus padding and gaps is 864px.
+2. **Player bar side blocks:** the left block (art, title, artist) is 30% of the bar, min 280px, max 360px. The right block (volume, mini player, lyrics, queue, Crate) has the same width, so the transport stays centred on the window. The minimum window width follows: 280 + 320 + 280 plus padding and gaps is 944px (it was 864px before the Crate button joined the right block).
 3. **No-art tile:** bg.overlay #1F1F23 with a centred 20px Fluent music-note glyph in text.tertiary. The glyph is decorative, not text, so the "no text.tertiary on bg.overlay" rule does not apply (4.19:1 clears the 3:1 non-text minimum).
 4. **Top-edge speckles:** the app draws no 1px border at the window top; the Mica edge is native. Nothing to remove; if the speckles persist they come from DWM compositing.
 5. **Tooltip radius** 4px. **Volume default** 70, saved to the `settings` table of the app store (`%LOCALAPPDATA%\Apollo\app\apollo.db`, key `volume_percent`) when a slider change is final, restored on start.
@@ -88,7 +88,7 @@ Applied to the Library page (`ui/library.rs`).
 
 ## Album, artist and playlist decisions (coordinator, 2026-10-03)
 Applied to the pages opened from Search cards and artist pages (`ui/library.rs`, `ui/card.rs`).
-1. **Pages:** an album or playlist page is the Library's detail view. An artist page has the same header with Play and Shuffle acting on its top songs, a "Top songs" list, then a section per row of albums, singles and playlists. Pages stack; Back (Esc, Alt+Left, the back button) closes one at a time, and closing the last one returns to the route it was opened from. The nav keeps that route lit.
+1. **Pages:** an album or playlist page is the Library's detail view. An artist page has the same header with Play and Shuffle acting on its top songs, a "Top songs" list, then a section per row of albums, singles and playlists. Back (Esc, Alt+Left, the page's back button, the title bar's Back) goes to the previous place in the window's history (see "Back and Forward"), which for a page opened from Search or Home is that route. The nav keeps that route lit.
 2. **Cards:** 144px artwork inside an 8px inset (the hover tint and focus ring sit in the inset), title in body-strong, second line in body text.secondary. Cards wrap in a grid with 16px between cards, and the artwork lines up with the section heading above it.
 3. **Shape:** artist artwork is a circle, on Search's artist cards and on the artist page header. It is the one cue that tells an artist from an album at a glance. Albums, singles and playlists stay 8px-radius squares.
 4. **Header:** 96px artwork, page-title name, then the card's own second line and a "N songs" line in text.tertiary once every page has loaded. The count is dropped when the second line already says songs or tracks, and its line is held open while loading so nothing shifts. It never sits on bg.overlay.
@@ -290,6 +290,19 @@ Audition a list (`player/skim.rs`). Settings > Playback > "Skim" (on) and "Secon
 4. **Keys** (only while skimming; text fields and popups keep theirs): K sets the song aside in the Crate, Enter keeps the song and plays it from its start with the rest of the list after it, Esc puts back what was playing before.
 5. **Never leaves a trace:** skimmed songs are not reported to YouTube Music history or the local stats, the queue is not saved while it lasts, and a skim never starts or resumes at launch.
 
+## Back and Forward (coordinator brief, 2026-10-05)
+
+Zach: "a back arrow so you can always return to the previous screen". Browser-style history of places
+(Home, Explore, Search, a Library tab, a playlist, album or artist, Crate, Settings, Now Playing),
+50 at most, in memory only. Back and Forward are Fluent chevron icon buttons, 28px, text.secondary,
+at the left of the title bar row (disabled at the existing text.disabled level when there is nowhere
+to go; not Tab stops, they have keys). Keys: Alt+Left / Alt+Right (also in text fields), Backspace
+(only outside text fields), the mouse side buttons. Alt+Up/Down stay for arranging. Going back
+restores scroll position and the Search / filter text; opening a page from the middle drops the
+forward entries; choosing the nav item of the page you are on adds nothing. Built choices: the
+buttons sit at the window's top left over the nav rail's column (not the content's edge, which
+moves when the rail expands); closing Now Playing counts as stepping back.
+
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.
 
@@ -323,3 +336,11 @@ Applied to the playlist page of a playlist you own (`ui/library.rs`, `library/mo
 3. **Remove duplicates…:** in the playlist header's More menu, in the Edit / Delete group between them (Fluent dismiss icon). Opens the shared dialog look (bg.overlay panel, 360px, no scrim): "Remove duplicates", a body line "N songs listed again. The first copy of each stays.", up to six 48px rows (title 13px primary over artist 11px secondary; "Row N" right-aligned, caption secondary: the dialog sits on bg.overlay, so no tertiary), then Cancel and primary "Remove N". Cancel has the focus, so a stray Enter keeps everything. No duplicates: the line reads "No duplicates" and only Done is offered. Matching is by video id; removal names each row by its own token. No success toast.
 4. **Writes:** the service only knows "move before", so a set of picks is planned into the fewest single moves (the longest run already in order stays) and goes out through the page's one-at-a-time edit queue. Each shows at once; a refusal puts the service's own list back with the usual notice ("Couldn't move song" / "Couldn't remove song").
 5. **Dragging:** a playlist page already drags a row to a new place with the text.secondary drop line, as the queue does; unchanged. There is no whole-playlist sort (Zach's decision).
+
+## Docked Crate (coordinator brief, 2026-10-05)
+Applied to `ui/crate_page.rs` (its dock layout), `ui/dock_tabs.rs`, `ui/song_drag.rs` and the shell's right-hand slot.
+1. **Panel:** 320px on bg.raised with a left border, in the queue panel's slot on the right edge of the main window; the two share that slot (never both open) and swap through the **Queue · Crate** tabs (the Now Playing pane control's look: body-strong text.primary with a 2px accent underline). Open or closed is remembered.
+2. **Toggle:** a Crate icon button (Fluent box, filled when open) in the player bar beside the queue button, and Ctrl+Shift+C. No Settings switch.
+3. **Contents:** the arranged Crate list in the shared 56px song rows; More and Remove take the duration's place on hover (as in the queue). Header: **Save as playlist…** and **Add all to…** as text buttons, "N selected" at the right. Empty: "Nothing set aside yet" (text.secondary) and "Drag songs here, or press C." (text.tertiary).
+4. **Dragging in:** a song row (every picked song, from a picked row) dragged from Search, a playlist, an album or the Songs tab drops at the line shown above the row it lands before, in text.secondary like every other drag line; the ghost is a 280px bg.overlay card with title and artist. A song already in the Crate moves instead of doubling. C still adds at the bottom.
+5. **Width:** below 1100px of window width the panel overlays the page's right edge instead of squeezing it. It steps aside for Now Playing and for the Crate page.

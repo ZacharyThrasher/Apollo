@@ -332,6 +332,23 @@ impl SearchPage {
         }
     }
 
+    /// How far the results are scrolled; the window's history keeps it.
+    pub fn scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
+        self.scroll.offset()
+    }
+
+    pub fn set_scroll_offset(&self, offset: gpui::Point<gpui::Pixels>) {
+        self.scroll.set_offset(offset);
+    }
+
+    /// Put back what the field held when the page was last left (the window's Back and Forward).
+    /// The results follow by themselves, as they do for typing.
+    pub fn restore_query(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.field.read(cx).text() != text {
+            self.field.update(cx, |f, cx| f.set_text(text, cx));
+        }
+    }
+
     pub fn field(&self) -> &Entity<TextField> {
         &self.field
     }
@@ -2170,6 +2187,8 @@ impl RenderOnce for SongRow {
             .child(playlist)
             .child(add)
             .child(more);
+        // Drag the song (or every picked song) to the docked Crate.
+        let row = crate::ui::song_drag::draggable(row, &menu);
         track_menu::on_context_menu(row, menu)
     }
 }

@@ -185,14 +185,21 @@ pub const ENTRIES: &[Entry] = &[
         .all_keys()
         .tips(&["Search"]),
     entry("lyrics", "Lyrics", Group::Navigate, &["ToggleLyrics"]).tips(&["Lyrics"]),
+    entry("nav-back", "Back", Group::Navigate, &["GoBack"])
+        .prefer("alt-left")
+        .all_keys()
+        .tips(&["Back"]),
+    entry("nav-forward", "Forward", Group::Navigate, &["GoForward"])
+        .tips(&["Forward"]),
     entry(
         "back",
-        "Back / close",
+        "Close",
         Group::Navigate,
         &["CloseNowPlaying", "Back"],
     )
     .all_keys(),
     entry("help", "This list", Group::Navigate, &["ShowShortcuts"]).prefer("shift-/"),
+    entry("crate-panel", "Crate panel", Group::Window, &["ToggleCrateDock"]).tips(&["Crate panel"]),
     entry("fullscreen", "Fullscreen", Group::Window, &["ToggleFullscreen"]),
 ];
 

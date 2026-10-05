@@ -7,7 +7,8 @@ use std::time::Instant;
 use apollo_theme::tokens::{layout, spacing, typography};
 use gpui::{
     actions, div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, Styled, Window,
+    MouseButton, NavigationDirection, ParentElement, Pixels, Point, Render, ScrollHandle, Styled,
+    Window,
 };
 
 use crate::account::AccountModel;
@@ -16,8 +17,10 @@ use crate::crate_list::{CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
-    AddCurrentToPlaylist, AddCurrentToTarget, CrateCurrent, LikeCurrent, NavigateDown, NavigateLeft,
-    NavigateRight, NavigateUp, RedoQueue, SeekBack, SeekForward, ShowShortcuts, SkimCancel, SkimCrate, SkimKeep, ToggleFullscreen, ToggleLyrics, ToggleMute,
+    AddCurrentToPlaylist, AddCurrentToTarget, CrateCurrent, GoBack, GoForward, LikeCurrent,
+    NavigateDown, NavigateLeft, NavigateRight, NavigateUp, RedoQueue, SeekBack, SeekForward,
+    ToggleCrateDock, ShowShortcuts, SkimCancel, SkimCrate, SkimKeep, ToggleFullscreen, ToggleLyrics,
+    ToggleMute,
     UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
 };
@@ -31,15 +34,19 @@ use crate::player::PlayerModel;
 use crate::related::RelatedModel;
 use crate::search::{SearchModel, SearchSource};
 use crate::settings::{SettingsModel, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES};
-use crate::settings::{LibrarySortStore, LyricsOpenStore, RelatedOpenStore};
+use crate::settings::{LibrarySortStore, LyricsOpenStore, RelatedOpenStore, SettingsBackend};
 use crate::style::{self, color};
+use crate::assets::Icon;
 use crate::ui::account_page::AccountPage;
+use crate::ui::button::IconButton;
 use crate::ui::crate_page::{self, CratePage};
+use crate::ui::dock_tabs::{Dock, DockFocus};
 use crate::ui::explore_page::{self, ExploreView};
 use crate::ui::home_page::{self, HomeView};
 use crate::ui::library::{self, LibraryView};
 use crate::ui::lyrics_pane::LyricsPane;
 use crate::ui::nav::{NavRail, Route};
+use crate::ui::nav_history::{HistoryEntry, NavHistory, Place, PlaceState};
 use crate::ui::now_playing::NowPlaying;
 use crate::ui::audio_page::AudioPage;
 use crate::ui::data_page::DataPage;
@@ -85,6 +92,10 @@ pub const BADGE_AFTER: std::time::Duration = std::time::Duration::from_millis(60
 
 /// Key context of the root view; global shortcuts bind here.
 pub const KEY_CONTEXT: &str = "Shell";
+/// Where the docked Crate's open state is kept.
+const KEY_CRATE_DOCK: &str = "crate_dock_open";
+/// Below this window width the docked Crate overlays the page instead of squeezing it.
+pub const DOCK_OVERLAY_BELOW: f32 = 1100.0;
 /// The root's context while Skim runs: the shell's, plus `Skimming`.
 const SKIMMING_CONTEXT: &str = "Shell Skimming";
 
@@ -135,6 +146,20 @@ struct PillShown {
     leaving: bool,
 }
 
+/// A scroll position waiting for its page's content to be there to scroll.
+struct PendingRestore {
+    place: Place,
+    scroll: Option<Point<Pixels>>,
+    /// Frames spent trying.
+    tries: u8,
+}
+
+/// Side of the title bar's Back and Forward buttons.
+const HISTORY_BUTTON: f32 = 28.0;
+
+/// How many frames a returned-to page gets to grow tall enough for its old scroll position.
+const RESTORE_TRIES: u8 = 24;
+
 pub struct Shell {
     player: Entity<PlayerModel>,
     account: Entity<AccountModel>,
@@ -175,6 +200,16 @@ pub struct Shell {
     /// Where a page opened from another route (a Search card) returns to when Back closes the
     /// last of them. `None` while the pages were opened from the Library itself.
     detail_origin: Option<Route>,
+    /// The places the window has shown, for Back and Forward.
+    history: NavHistory,
+    /// A page just returned to by Back or Forward whose scroll position is still being put back
+    /// (its content may not be there on the first frame).
+    pending_restore: Option<PendingRestore>,
+    /// Where Settings is scrolled (the only page the shell scrolls itself).
+    settings_scroll: ScrollHandle,
+    /// The Back and Forward buttons at the left of the title bar.
+    history_back: FocusHandle,
+    history_forward: FocusHandle,
     /// The account epoch the library was last loaded under.
     library_epoch: u64,
     /// Whether the account could serve the library when it was last looked at; the library is
@@ -202,6 +237,11 @@ pub struct Shell {
     nav_toggled: bool,
     queue: PanelSlide,
     queue_panel: Entity<QueuePanel>,
+    /// The Crate docked on the right of the main window. It shares that slot with the queue
+    /// (never both open) and is remembered across restarts.
+    crate_dock: PanelSlide,
+    crate_dock_panel: Entity<CratePage>,
+    crate_dock_store: Option<Arc<dyn SettingsBackend>>,
     /// Lyrics of the playing track, and the pane that shows them in Now Playing.
     lyrics: Entity<LyricsModel>,
     lyrics_pane: Entity<LyricsPane>,
@@ -253,6 +293,9 @@ impl Shell {
             cx.focus_handle().tab_index(index).tab_stop(true)
         };
         let nav_toggle = stop(cx, 1);
+        // The title bar's Back and Forward are not tab stops (they have keys).
+        let history_back = cx.focus_handle();
+        let history_forward = cx.focus_handle();
         // Explore shares Search's index: the page's own stops start at 5 and Search's field is one
         // of them, so the rail cannot grow past 5; stops with one index keep the rail's order.
         let nav_items = [
@@ -281,6 +324,7 @@ impl Shell {
             mini: stop(cx, 29),
             lyrics: stop(cx, 29),
             queue: stop(cx, 29),
+            crate_dock: stop(cx, 29),
             // Under the artist, in the block of the Now Playing button.
             target: stop(cx, 19),
         };
@@ -419,6 +463,25 @@ impl Shell {
                 cx,
             )
         });
+        let crate_dock_panel = cx.new(|cx| {
+            CratePage::dock(
+                crate_model.clone(),
+                player.clone(),
+                writes.clone(),
+                picker.clone(),
+                cx,
+            )
+        });
+        // The Queue · Crate control, shared by the two panels that take the main window's right side.
+        let dock_focus = DockFocus::new(cx);
+        let on_dock_pick: crate::ui::dock_tabs::OnPick = Rc::new({
+            let weak = weak.clone();
+            move |dock, _, cx| {
+                let _ = weak.update(cx, |s, cx| s.show_dock(dock, cx));
+            }
+        });
+        queue_panel.update(cx, |p, _| p.set_dock_tabs(dock_focus.clone(), on_dock_pick.clone()));
+        crate_dock_panel.update(cx, |p, _| p.set_dock_tabs(dock_focus.clone(), on_dock_pick.clone()));
         let lyrics = cx.new(|cx| LyricsModel::new(player.clone(), cx));
         let lyrics_pane = cx.new(|cx| LyricsPane::new(player.clone(), lyrics.clone(), cx));
         cx.observe(&lyrics_pane, |_, _, cx| cx.notify()).detach();
@@ -515,6 +578,12 @@ impl Shell {
                 },
                 cx,
             )
+        });
+        library.update(cx, |l, _| {
+            let weak = weak.clone();
+            l.set_on_back(move |window, cx| {
+                let _ = weak.update(cx, |s, cx| s.go_back(window, cx));
+            });
         });
         let duplicates_dialog = {
             let model = library.read(cx).model().clone();
@@ -652,6 +721,11 @@ impl Shell {
             sleep_menu,
             toast: None,
             detail_origin: None,
+            history: NavHistory::new(),
+            pending_restore: None,
+            settings_scroll: ScrollHandle::new(),
+            history_back,
+            history_forward,
             library_epoch: 0,
             library_usable: false,
             search_account_live: false,
@@ -669,6 +743,9 @@ impl Shell {
             nav_toggled: false,
             queue: PanelSlide::default(),
             queue_panel,
+            crate_dock: PanelSlide::default(),
+            crate_dock_panel,
+            crate_dock_store: None,
             lyrics,
             lyrics_pane,
             related,
@@ -711,6 +788,9 @@ impl Shell {
         if epoch != self.library_epoch || became_usable {
             self.library_epoch = epoch;
             self.detail_origin = None;
+            // Where the old account had been is not a place to go back to.
+            self.history.clear();
+            self.pending_restore = None;
             // What the old account could undo does not carry over.
             self.player.update(cx, |p, _| p.clear_queue_history());
             self.crate_page.update(cx, |p, cx| p.reset(cx));
@@ -804,6 +884,7 @@ impl Shell {
             ("bar-mini", bar.mini.clone()),
             ("bar-lyrics", bar.lyrics.clone()),
             ("bar-queue", bar.queue.clone()),
+            ("bar-crate", bar.crate_dock.clone()),
         ]);
         stops
     }
@@ -978,6 +1059,246 @@ impl Shell {
         cx.notify();
     }
 
+    // ---- Back and Forward ----------------------------------------------------------------
+
+    /// The place on screen, as the history names it.
+    fn place(&self, cx: &App) -> Place {
+        if self.now_playing_open {
+            return Place::NowPlaying;
+        }
+        match self.route {
+            Route::Home => Place::Home,
+            Route::Explore => Place::Explore,
+            Route::Search => Place::Search,
+            Route::Crate => Place::Crate,
+            Route::Settings => Place::Settings,
+            Route::Library => {
+                let model = self.library.read(cx).model().read(cx);
+                match model.top_target() {
+                    Some(Target::Collection(c)) => Place::Collection(c.library_key().to_owned()),
+                    Some(Target::Artist(a)) => Place::Artist(a.id.as_str().to_owned()),
+                    None => Place::Library(model.tab()),
+                }
+            }
+        }
+    }
+
+    /// How far the page of `place` is scrolled.
+    fn page_scroll(&self, place: &Place, cx: &App) -> Option<Point<Pixels>> {
+        match place {
+            Place::Home => Some(self.home_page.read(cx).scroll_offset()),
+            Place::Explore => self.explore_page.read(cx).scroll_offset(cx),
+            Place::Search => Some(self.search.read(cx).scroll_offset()),
+            Place::Library(_) | Place::Collection(_) | Place::Artist(_) => {
+                Some(self.library.read(cx).scroll_offset(cx))
+            }
+            Place::Crate => Some(self.crate_page.read(cx).scroll_offset()),
+            Place::Settings => Some(self.settings_scroll.offset()),
+            Place::NowPlaying => None,
+        }
+    }
+
+    fn set_page_scroll(&self, place: &Place, offset: Point<Pixels>, cx: &App) {
+        match place {
+            Place::Home => self.home_page.read(cx).set_scroll_offset(offset),
+            Place::Explore => self.explore_page.read(cx).set_scroll_offset(offset),
+            Place::Search => self.search.read(cx).set_scroll_offset(offset),
+            Place::Library(_) | Place::Collection(_) | Place::Artist(_) => {
+                self.library.read(cx).set_scroll_offset(offset, cx)
+            }
+            Place::Crate => self.crate_page.read(cx).set_scroll_offset(offset),
+            Place::Settings => self.settings_scroll.set_offset(offset),
+            Place::NowPlaying => {}
+        }
+    }
+
+    /// What is worth keeping about the page of `place` as it is now.
+    fn snapshot(&self, place: &Place, cx: &App) -> PlaceState {
+        let library_page = matches!(
+            place,
+            Place::Library(_) | Place::Collection(_) | Place::Artist(_)
+        );
+        PlaceState {
+            target: matches!(place, Place::Collection(_) | Place::Artist(_))
+                .then(|| self.library.read(cx).model().read(cx).top_target())
+                .flatten(),
+            scroll: self.page_scroll(place, cx),
+            query: (*place == Place::Search)
+                .then(|| self.search.read(cx).field().read(cx).text().to_owned()),
+            filter: library_page
+                .then(|| self.library.read(cx).filter_snapshot(cx))
+                .flatten(),
+            origin: self.detail_origin,
+        }
+    }
+
+    /// Record the place on screen: a new one is added to the history, and the one that is
+    /// current keeps up with what is done on it (scroll, search text, filter). Called every
+    /// frame, so every way of getting anywhere is recorded without saying so.
+    fn sync_history(&mut self, cx: &mut Context<Self>) {
+        let place = self.place(cx);
+        if self.history.current().map(|e| &e.place) != Some(&place) {
+            self.pending_restore = None;
+            let state = self.snapshot(&place, cx);
+            self.history.observe(place.clone(), state);
+        }
+        // While a returned-to page is still being scrolled into place its saved position is
+        // what the history holds; the page's present one would overwrite it.
+        if self.pending_restore.is_none() {
+            let state = self.snapshot(&place, cx);
+            if let Some(slot) = self.history.current_state_mut() {
+                *slot = state;
+            }
+        }
+    }
+
+    /// Put a returned-to page's scroll position back, a frame at a time until it holds (the
+    /// page may not be tall enough yet).
+    fn apply_pending_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((place, target, tries)) = self
+            .pending_restore
+            .as_ref()
+            .map(|p| (p.place.clone(), p.scroll, p.tries))
+        else {
+            return;
+        };
+        let Some(target) = target else {
+            self.pending_restore = None;
+            return;
+        };
+        if self.place(cx) != place {
+            self.pending_restore = None;
+            return;
+        }
+        let settled = self.page_scroll(&place, cx).is_some_and(|here| {
+            (f32::from(here.x) - f32::from(target.x)).abs() < 1.0
+                && (f32::from(here.y) - f32::from(target.y)).abs() < 1.0
+        });
+        if settled || tries >= RESTORE_TRIES {
+            self.pending_restore = None;
+            return;
+        }
+        self.set_page_scroll(&place, target, cx);
+        if let Some(p) = self.pending_restore.as_mut() {
+            p.tries += 1;
+        }
+        window.request_animation_frame();
+    }
+
+    pub fn can_go_back(&self, cx: &App) -> bool {
+        self.history.can_back() || self.mood_open(cx)
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        self.history.can_forward()
+    }
+
+    /// The places visited and the current one's index (tests).
+    pub fn history_places(&self) -> (Vec<Place>, usize) {
+        self.history.places()
+    }
+
+    /// An Explore mood page is open over the tiles: Back closes it before it leaves Explore.
+    fn mood_open(&self, cx: &App) -> bool {
+        !self.now_playing_open
+            && self.route == Route::Explore
+            && self.explore.read(cx).mood().is_some()
+    }
+
+    /// A popup or dialog is open: the history keys and mouse buttons leave the screen alone.
+    fn overlay_open(&self, cx: &App) -> bool {
+        self.picker.read(cx).is_open()
+            || self.menu.read(cx).is_open()
+            || self.dialog.read(cx).is_open()
+            || self.blocked_dialog.read(cx).is_open()
+            || self.duplicates_dialog.read(cx).is_open()
+            || self.cheat_sheet.read(cx).is_open()
+            || self.choices.read(cx).is_open()
+            || self.sleep_menu.read(cx).is_open()
+    }
+
+    /// Back: to the previous place, scrolled and filled in as it was left. An open mood page
+    /// closes first. With nowhere to go back to, a page the history never saw just closes.
+    pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Catch up with anything done since the last frame.
+        self.sync_history(cx);
+        if self.mood_open(cx) {
+            self.explore_page.update(cx, |e, cx| e.back(window, cx));
+            return;
+        }
+        match self.history.back() {
+            Some(entry) => self.show_place(entry, window, cx),
+            None => {
+                if self.route == Route::Library && !self.now_playing_open {
+                    self.library.update(cx, |l, cx| l.back_one(window, cx));
+                }
+            }
+        }
+    }
+
+    /// Forward: undoes a Back.
+    pub fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_history(cx);
+        if let Some(entry) = self.history.forward() {
+            self.show_place(entry, window, cx);
+        }
+    }
+
+    /// Show a place the history stepped to, and put back what was done on it.
+    fn show_place(&mut self, entry: HistoryEntry, window: &mut Window, cx: &mut Context<Self>) {
+        let HistoryEntry { place, state } = entry;
+        match &place {
+            Place::NowPlaying => self.set_now_playing(true, cx),
+            Place::Home => self.show_route(Route::Home, cx),
+            Place::Explore => self.show_route(Route::Explore, cx),
+            Place::Crate => self.show_route(Route::Crate, cx),
+            Place::Settings => self.show_route(Route::Settings, cx),
+            Place::Search => {
+                self.show_route(Route::Search, cx);
+                if let Some(query) = &state.query {
+                    self.search.update(cx, |s, cx| s.restore_query(query, cx));
+                }
+                self.search.update(cx, |s, cx| s.restore_focus(window, cx));
+            }
+            Place::Library(tab) => {
+                self.show_route(Route::Library, cx);
+                self.library.update(cx, |l, cx| {
+                    l.go_home(window, cx);
+                    l.set_tab(*tab, cx);
+                });
+            }
+            Place::Collection(_) | Place::Artist(_) => {
+                let Some(target) = state.target.clone() else {
+                    return;
+                };
+                self.leave_opened_pages(cx);
+                self.route = Route::Library;
+                self.now_playing_open = false;
+                self.library.update(cx, |l, cx| {
+                    l.go_home(window, cx);
+                    l.open_target(target, window, cx);
+                });
+                self.detail_origin = state.origin;
+            }
+        }
+        if let Some(filter) = &state.filter {
+            self.library
+                .update(cx, |l, cx| l.restore_filter(filter, window, cx));
+        }
+        if !matches!(
+            place,
+            Place::Search | Place::Library(_) | Place::Collection(_) | Place::Artist(_)
+        ) {
+            self.focus_root(window, cx);
+        }
+        self.pending_restore = (place != Place::NowPlaying).then(|| PendingRestore {
+            place,
+            scroll: state.scroll,
+            tries: 0,
+        });
+        cx.notify();
+    }
+
     pub fn set_now_playing(&mut self, open: bool, cx: &mut Context<Self>) {
         if open && !self.now_playing_open {
             // The lyrics column starts on the current line when the page appears.
@@ -1048,6 +1369,7 @@ impl Shell {
         match pane {
             Pane::UpNext => {
                 if !self.queue.is_open() {
+                    self.queue_takes_the_slot(cx);
                     self.queue.set(true, Instant::now(), !cx.reduce_motion());
                     self.queue_panel.update(cx, |p, cx| p.reveal_current(cx));
                 }
@@ -1363,6 +1685,7 @@ impl Shell {
             self.lyrics_pane.update(cx, |p, cx| p.set_open(false, cx));
             self.related_pane.update(cx, |p, cx| p.set_open(false, cx));
             if !self.queue.is_open() {
+                self.queue_takes_the_slot(cx);
                 self.queue.set(true, Instant::now(), !cx.reduce_motion());
                 self.queue_panel.update(cx, |p, cx| p.reveal_current(cx));
             }
@@ -1370,11 +1693,103 @@ impl Shell {
             return;
         }
         let open = !self.queue.is_open();
+        if open {
+            self.queue_takes_the_slot(cx);
+        }
         self.queue.set(open, Instant::now(), !cx.reduce_motion());
         if open {
             self.queue_panel.update(cx, |p, cx| p.reveal_current(cx));
         }
         cx.notify();
+    }
+
+    // ---- the docked Crate ------------------------------------------------------------------
+
+    /// Whether the docked Crate is open. It shows while no page takes the whole window (Now
+    /// Playing) and the Crate page itself is not on screen.
+    pub fn crate_dock_open(&self) -> bool {
+        self.crate_dock.is_open()
+    }
+
+    pub fn crate_dock_panel(&self) -> &Entity<CratePage> {
+        &self.crate_dock_panel
+    }
+
+    /// The Crate button and Ctrl+Shift+C.
+    pub fn toggle_crate_dock(&mut self, cx: &mut Context<Self>) {
+        let open = !self.crate_dock.is_open();
+        self.set_crate_dock(open, cx);
+    }
+
+    /// Open or close the docked Crate. Opening it takes the slot from the queue panel (and
+    /// leaves Now Playing, which fills the window); the choice is remembered.
+    pub fn set_crate_dock(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.crate_dock.is_open() == open {
+            return;
+        }
+        let animate = !cx.reduce_motion();
+        self.crate_dock.set(open, Instant::now(), animate);
+        if open {
+            self.queue.set(false, Instant::now(), animate);
+            if self.now_playing_open {
+                self.set_now_playing(false, cx);
+            }
+        }
+        self.save_crate_dock(open, cx);
+        cx.notify();
+    }
+
+    /// The Queue · Crate control: the other panel takes the slot.
+    pub fn show_dock(&mut self, dock: Dock, cx: &mut Context<Self>) {
+        match dock {
+            Dock::Crate => self.set_crate_dock(true, cx),
+            Dock::Queue => {
+                self.set_crate_dock(false, cx);
+                if !self.queue.is_open() {
+                    self.queue.set(true, Instant::now(), !cx.reduce_motion());
+                    self.queue_panel.update(cx, |p, cx| p.reveal_current(cx));
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// The queue was opened: it has the slot, so the Crate gives it up.
+    fn queue_takes_the_slot(&mut self, cx: &mut Context<Self>) {
+        self.set_crate_dock(false, cx);
+    }
+
+    fn save_crate_dock(&self, open: bool, cx: &mut Context<Self>) {
+        let Some(store) = self.crate_dock_store.clone() else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move { store.set(KEY_CRATE_DOCK, if open { "on" } else { "off" }) })
+            .detach();
+    }
+
+    /// Where the docked Crate's open/closed state is remembered, and the saved state applied.
+    pub fn install_crate_dock(
+        &mut self,
+        store: Option<Arc<dyn SettingsBackend>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.crate_dock_store = store.clone();
+        let Some(store) = store else { return };
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_executor()
+                .spawn(async move { store.get(KEY_CRATE_DOCK) })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                // A choice made while this was loading wins over the saved one.
+                if saved.as_deref() == Some("on") && !s.crate_dock.is_open() && !s.queue.is_open() {
+                    s.crate_dock.set(true, Instant::now(), false);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The backend is ready: search and artwork start answering (a query typed earlier goes out).
@@ -1536,7 +1951,14 @@ impl Shell {
                 Route::Settings => None,
             }
         };
-        if let Some(handle) = page.or(queue_open.then_some(queue_list)) {
+        // The docked Crate steps aside for Now Playing and for the Crate page (the same list).
+        let dock_open =
+            self.crate_dock.is_open() && !self.now_playing_open && self.route != Route::Crate;
+        let dock_list = self.crate_dock_panel.read(cx).focus_handle(cx);
+        let side = queue_open
+            .then_some(queue_list)
+            .or(dock_open.then_some(dock_list));
+        if let Some(handle) = page.or(side) {
             window.focus(&handle, cx);
             return;
         }
@@ -1658,12 +2080,58 @@ impl Render for Shell {
         if window.is_fullscreen() && !self.now_playing_open {
             window.toggle_fullscreen();
         }
+        self.sync_history(cx);
+        self.apply_pending_restore(window, cx);
         let view = self.player.read(cx).view();
         if view.accent_moving {
             window.request_animation_frame();
         }
         let accent = view.accent;
         let shell = cx.entity();
+
+        // Back and Forward, at the left of the title bar.
+        let history_buttons = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h_full()
+            .px(px(spacing::S1))
+            .child(
+                div().debug_selector(|| "history-back-slot".into()).child(
+                    IconButton::new(
+                        "history-back",
+                        &self.history_back,
+                        Icon::ChevronLeft,
+                        "Back",
+                        accent,
+                    )
+                    .size(HISTORY_BUTTON)
+                    .skip_tab()
+                    .enabled(self.can_go_back(cx))
+                    .on_click({
+                        let shell = shell.clone();
+                        move |window, cx| shell.update(cx, |s, cx| s.go_back(window, cx))
+                    }),
+                ),
+            )
+            .child(
+                div().debug_selector(|| "history-forward-slot".into()).child(
+                    IconButton::new(
+                        "history-forward",
+                        &self.history_forward,
+                        Icon::ChevronRight,
+                        "Forward",
+                        accent,
+                    )
+                    .size(HISTORY_BUTTON)
+                    .skip_tab()
+                    .enabled(self.can_go_forward())
+                    .on_click({
+                        let shell = shell.clone();
+                        move |window, cx| shell.update(cx, |s, cx| s.go_forward(window, cx))
+                    }),
+                ),
+            );
 
         // An instant playlist was just made: open its page with the title ready to rename.
         if let Some(made) = self.dialog.update(cx, |d, _| d.take_instant()) {
@@ -1705,7 +2173,12 @@ impl Render for Shell {
             }
         });
 
-        let page = div().id("page").flex_1().min_w_0().h_full();
+        let page = div()
+            .id("page")
+            .debug_selector(|| "page".into())
+            .flex_1()
+            .min_w_0()
+            .h_full();
         let page = if self.now_playing_open {
             page.child(self.now_playing.clone())
         } else if self.route == Route::Crate {
@@ -1723,6 +2196,7 @@ impl Render for Shell {
                 .child(self.route.title());
             let page = page
                 .overflow_y_scroll()
+                .track_scroll(&self.settings_scroll)
                 .px(px(spacing::S8))
                 .pt(px(spacing::S6));
             if self.route == Route::Settings {
@@ -1773,6 +2247,37 @@ impl Render for Shell {
                 )
         });
 
+        // The docked Crate slides in the same way, in the queue's place. It stays out of the way
+        // of Now Playing (which fills the window) and of the Crate page (which is the same list).
+        let (dock_level, dock_moving) = self.crate_dock.level(Instant::now());
+        if dock_moving {
+            window.request_animation_frame();
+        }
+        let dock_shown =
+            dock_level > 0.0 && !self.now_playing_open && self.route != Route::Crate;
+        // Narrow windows give the page all the width: the panel overlays its right edge instead.
+        let dock_overlays = f32::from(window.viewport_size().width) < DOCK_OVERLAY_BELOW;
+        let crate_dock = dock_shown.then(|| {
+            let slot = div()
+                .id("crate-dock-slot")
+                .h_full()
+                .w(px(layout::QUEUE_PANEL_WIDTH * dock_level))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .child(self.crate_dock_panel.clone()),
+                );
+            if dock_overlays {
+                slot.absolute().top_0().bottom_0().right_0()
+            } else {
+                slot.relative().flex_none()
+            }
+        });
+
         let page = match self.route {
             Route::Search if !self.now_playing_open => self.search.clone().into_any_element(),
             Route::Home if !self.now_playing_open => self.home_page.clone().into_any_element(),
@@ -1793,6 +2298,11 @@ impl Render for Shell {
             progress: self.progress.clone(),
             volume: self.volume.clone(),
             queue_open: self.queue.is_open() && !other_pane,
+            crate_open: self.crate_dock.is_open(),
+            on_crate_toggle: Rc::new(Box::new({
+                let shell = shell.clone();
+                move |_, cx| shell.update(cx, |s, cx| s.toggle_crate_dock(cx))
+            })),
             lyrics_open: lyrics_showing,
             on_lyrics_toggle: Rc::new(Box::new({
                 let shell = shell.clone();
@@ -1941,12 +2451,40 @@ impl Render for Shell {
                 });
             }))
             .on_action(cx.listener(|_, _: &ShowShortcuts, window, cx| cheat_sheet::toggle(window, cx)))
+            .on_action(cx.listener(|this, _: &GoBack, window, cx| {
+                if !this.overlay_open(cx) {
+                    this.go_back(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &GoForward, window, cx| {
+                if !this.overlay_open(cx) {
+                    this.go_forward(window, cx);
+                }
+            }))
+            // The mouse's side buttons.
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, window, cx| {
+                    if !this.overlay_open(cx) {
+                        this.go_back(window, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _, window, cx| {
+                    if !this.overlay_open(cx) {
+                        this.go_forward(window, cx);
+                    }
+                }),
+            )
             .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
                 this.modifiers_changed(event.modifiers, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_lyrics(cx)))
             .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| this.like_current(cx)))
             .on_action(cx.listener(|this, _: &CrateCurrent, _, cx| this.crate_current(cx)))
+            .on_action(cx.listener(|this, _: &ToggleCrateDock, _, cx| this.toggle_crate_dock(cx)))
             .on_action(cx.listener(|this, _: &AddCurrentToPlaylist, window, cx| {
                 this.add_current_to_playlist(window, cx)
             }))
@@ -1993,16 +2531,18 @@ impl Render for Shell {
             .text_color(color::text_primary())
             .bg(color::bg_base())
             .child(dismiss_tooltips_on_input())
-            .child(TitleBar)
+            .child(TitleBar::new().left(history_buttons))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .child(nav)
                     .child(page)
-                    .children(queue),
+                    .children(queue)
+                    .children(crate_dock),
             )
             .child(bar)
             .children(toast)

@@ -252,6 +252,57 @@ impl CrateModel {
         true
     }
 
+    /// Drop songs into the crate before what is at slot `slot` now (`len` or more means the
+    /// bottom). A song already in the crate moves there instead of being added twice; the songs
+    /// keep the order they are given in. Returns whether anything changed.
+    pub fn insert_at(
+        &mut self,
+        songs: Vec<(Track, Option<String>)>,
+        slot: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let before = self
+            .items
+            .iter()
+            .map(|r| r.track.video_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let mut slot = slot.min(self.items.len());
+        for (track, thumbnail) in songs {
+            let video = track.video_id.as_str();
+            if let Some(at) = self.items.iter().position(|r| r.track.video_id.as_str() == video) {
+                // Already here: it moves to the drop point (the slot is counted in the list as it
+                // is, so what sat above the point shifts the point up by one).
+                let row = self.items.remove(at);
+                if at < slot {
+                    slot -= 1;
+                }
+                self.items.insert(slot, row);
+            } else {
+                let row = CrateRow {
+                    track,
+                    thumbnail,
+                    added_ms: now_ms(),
+                };
+                if let (Some(writer), Some(key)) = (&self.writer, &self.key) {
+                    let _ = writer.send(Write::Add(key.clone(), Box::new(row.clone())));
+                }
+                self.items.insert(slot, row);
+            }
+            slot += 1;
+        }
+        let after = self
+            .items
+            .iter()
+            .map(|r| r.track.video_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        if before == after {
+            return false;
+        }
+        self.save_order();
+        cx.notify();
+        true
+    }
+
     /// Move the song at `from` so it sits before what is at slot `slot` now (`slot` counts the
     /// list as it is, so `len` means the very end). Returns whether anything moved: a song
     /// dropped where it already is changes nothing.
@@ -535,6 +586,31 @@ mod tests {
         });
         cx.run_until_parked();
         again.read_with(cx, |m, _| assert_eq!(ids(m), ["a", "b", "d", "c", "e"]));
+    }
+
+    #[gpui::test]
+    fn dropped_songs_land_at_the_drop_point_and_known_ones_move_there(cx: &mut TestAppContext) {
+        let model = cx.new(|_| CrateModel::new());
+        model.update(cx, |m, cx| {
+            for id in ["a", "b", "c"] {
+                m.add(track(id), None, cx);
+            }
+            // A new song before slot 1.
+            assert!(m.insert_at(vec![(track("x"), None)], 1, cx));
+            assert_eq!(ids(m), ["a", "x", "b", "c"]);
+            // Several at once keep their order; a slot past the end is the bottom.
+            assert!(m.insert_at(vec![(track("y"), None), (track("z"), None)], 99, cx));
+            assert_eq!(ids(m), ["a", "x", "b", "c", "y", "z"]);
+            // A song already here moves instead of doubling, from above or from below the point.
+            assert!(m.insert_at(vec![(track("a"), None)], 3, cx));
+            assert_eq!(ids(m), ["x", "b", "a", "c", "y", "z"]);
+            assert!(m.insert_at(vec![(track("z"), None)], 0, cx));
+            assert_eq!(ids(m), ["z", "x", "b", "a", "c", "y"]);
+            // Dropping a song where it already is changes nothing.
+            assert!(!m.insert_at(vec![(track("x"), None)], 1, cx));
+            assert!(!m.insert_at(vec![(track("x"), None)], 2, cx));
+            assert_eq!(ids(m), ["z", "x", "b", "a", "c", "y"]);
+        });
     }
 
     #[gpui::test]

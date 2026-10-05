@@ -33,6 +33,7 @@ use crate::style::{self, color};
 use crate::ui::anchor;
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
+use crate::ui::dock_tabs::{Dock, DockFocus, DockTabs, OnPick as DockPick};
 use crate::ui::pane_tabs::{OnPick, Pane, PaneFocus, PaneTabs};
 use crate::ui::player_bar::text_line;
 use crate::ui::playing_row;
@@ -263,6 +264,9 @@ pub struct QueuePanel {
     /// is then the panel's title).
     tabs: Option<(PaneFocus, OnPick)>,
     tabs_visible: bool,
+    /// The Queue · Crate control, drawn above the header in the main window (where this panel
+    /// shares its slot with the docked Crate).
+    dock_tabs: Option<(DockFocus, DockPick)>,
 }
 
 impl QueuePanel {
@@ -303,7 +307,13 @@ impl QueuePanel {
             on_open,
             tabs: None,
             tabs_visible: false,
+            dock_tabs: None,
         }
+    }
+
+    /// The control that swaps this panel for the docked Crate, shown outside Now Playing.
+    pub fn set_dock_tabs(&mut self, focus: DockFocus, on_pick: DockPick) {
+        self.dock_tabs = Some((focus, on_pick));
     }
 
     /// The control that switches Now Playing's right pane, shown while [`Self::set_tabs_visible`].
@@ -1163,7 +1173,12 @@ impl Render for QueuePanel {
             .clone()
             .filter(|_| self.tabs_visible)
             .map(|(focus, on_pick)| PaneTabs::new(Pane::UpNext, &focus, accent, on_pick));
-        let titled = tabs.is_none();
+        let dock_tabs = self
+            .dock_tabs
+            .clone()
+            .filter(|_| tabs.is_none())
+            .map(|(focus, on_pick)| DockTabs::new(Dock::Queue, &focus, accent, on_pick));
+        let titled = tabs.is_none() && dock_tabs.is_none();
         let header = div()
             .flex()
             .flex_row()
@@ -1338,6 +1353,7 @@ impl Render for QueuePanel {
             .border_l_1()
             .border_color(color::border_subtle())
             .children(tabs)
+            .children(dock_tabs)
             .child(header)
             .child(source)
             .child(list)
