@@ -249,6 +249,10 @@ fn the_pill_shows_the_name_and_reopens_the_picker_to_change_it(cx: &mut TestAppC
     vcx.run_until_parked();
     assert!(picker_open(&page, vcx));
     assert!(page.picker.read_with(vcx, |p, _| p.is_choosing_target()));
+    assert!(
+        !page.shell.read_with(vcx, |s, _| s.now_playing_open()),
+        "the press is the pill's, not the block's that opens Now Playing"
+    );
     // The current target carries the check; choosing another changes the target and adds nothing.
     let (id, _) = first_playlist(&page, vcx);
     let other = page.picker.read_with(vcx, |p, _| match p.playlists() {

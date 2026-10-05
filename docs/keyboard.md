@@ -24,6 +24,7 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | L | Like / unlike the playing song |
 | C | Set the playing song aside in the Crate (in the queue, Library and Search lists: the song under the cursor) |
 | P | Add to playlist: open the picker for the playing song (in the queue, Library, Search and Crate lists: the song under the cursor). Settings > Playback > "P opens the playlist picker" switches it off |
+| A | Add to the target playlist: the playing song (in the queue, Library, Search and Crate lists: the song under the cursor; with 2 or more picked, all of them). With no target set the picker opens to choose one. Settings > Playlists > "A adds to the target playlist" switches it off. See "The target playlist" |
 | Ctrl+Z | Undo the last queue change |
 | Ctrl+Shift+Z or Ctrl+Y | Redo it |
 | Esc | Close Now Playing |
@@ -42,7 +43,7 @@ later). The cursor row keeps its own ring; the picked rows are tinted with the a
 | Ctrl+A | Pick every song in the list |
 | Esc | Clear the picks (the next Esc does what it did before: leave the list, close the page) |
 | Up / Down | Move the cursor and clear the picks |
-| L / C / P / Ctrl+Enter | With 2 or more picked: like all (or un-like when all are liked) / Crate all / Add all to a playlist (the picker opens at the cursor row) / Add all to the queue (Search) |
+| L / C / P / A / Ctrl+Enter | With 2 or more picked: like all (or un-like when all are liked) / Crate all / Add all to a playlist (the picker opens at the cursor row) / Add all to the target playlist / Add all to the queue (Search) |
 
 With 2 or more picked, right-click on any picked row (or its More button) opens a menu for all
 of them: Play next, Add to queue, Add to playlist…, Add to Crate, Like, and on a playlist of your own Remove from
@@ -106,6 +107,27 @@ playlists are on top, a divider, then the rest in the order YouTube Music lists 
 A playlist that already holds the song shows its check and cannot be marked. Marks are add-only;
 taking a song out is done on the playlist's own page. A click on a row adds to it at once.
 
+## The target playlist
+
+One playlist of your own is the **target**; **A** drops a song into it with no dialog. Build a
+playlist while you browse: A, A, A.
+
+- **Choose it** from the picker (press **A** with no target set, or click the target pill), or from
+  a playlist of your own: its More menu > **Set as target** (it says **Clear target** on the one
+  that is the target now).
+- **The pill** under the artist in the player bar shows the target's name. Click it (or Tab to it
+  and press Enter) to reopen the picker and change the target. Settings > Playlists > "Show target
+  playlist in player bar" hides it; the target and the key stay.
+- **The picker, in target mode** says "Target playlist" in its caption. Enter, or a click, on a
+  playlist makes it the target (and adds the song you pressed A on, if any); a typed new name
+  makes a playlist and targets it; **Clear** (top right, only while there is a target) takes the
+  target away. The target's row carries a star, in every picker. There is nothing to mark there,
+  so Space does nothing.
+- **Adding** is silent. A song the playlist already holds is skipped, never added twice. If the
+  service refuses, the add is taken back and the usual "Couldn't add to playlist" shows.
+- **Remembered** between runs, per account: another account does not see it. Deleting the target
+  playlist clears it; renaming it keeps it under the new name.
+
 ## Learning the keys
 
 The help reads the live keymap (never a copy of it), so a key bound anywhere shows up in all of
@@ -113,7 +135,7 @@ these without further work:
 
 - **Tooltips end with their key**: "Add to Crate  C", "Mute  M", "Next  Shift+→". A button in the
   player bar or Now Playing shows only keys that work wherever focus is; a row's actions also
-  show their list's key (L, C, P in Search, Library, Queue and the Crate).
+  show their list's key (L, C, P, A in Search, Library, Queue and the Crate).
 - **Context-menu rows show the key** at their right edge (11px caption, text.secondary): Like,
   Add to Crate, Add to playlist, Remove.
 - **`?` cheat sheet** (`ui/cheat_sheet.rs`): bg.overlay panel, key caps as bg.raised pills. When

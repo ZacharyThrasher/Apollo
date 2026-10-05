@@ -1570,6 +1570,26 @@ mod tests {
     }
 
     #[test]
+    fn an_own_playlist_offers_to_be_the_target_and_to_stop_being_it() {
+        use Command::*;
+        let own = |is_target| Facts {
+            own_playlist: true,
+            is_target,
+            ..Facts::default()
+        };
+        let flat = |facts| commands_with(&card(), facts).concat();
+        assert!(flat(own(false)).contains(&SetTarget));
+        assert!(!flat(own(false)).contains(&ClearTarget));
+        assert!(flat(own(true)).contains(&ClearTarget));
+        assert!(!flat(own(true)).contains(&SetTarget));
+        let foreign = flat(Facts::default());
+        assert!(
+            !foreign.contains(&SetTarget) && !foreign.contains(&ClearTarget),
+            "only a playlist you can add to can be the target"
+        );
+    }
+
+    #[test]
     fn a_card_offers_the_library_toggle_that_matches_where_it_is() {
         use Command::*;
         let saved = |saved| Facts {
