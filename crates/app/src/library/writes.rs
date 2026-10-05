@@ -140,6 +140,13 @@ impl LibraryWrites {
                 .contains(&(playlist.id.clone(), video_id.to_owned()))
     }
 
+    /// This session added the track to the playlist (see [`LibraryWrites::holds`], which also
+    /// trusts the service's own flag, true only for the track the list was asked about).
+    pub fn added_here(&self, playlist: &PlaylistTarget, video_id: &str) -> bool {
+        self.added
+            .contains(&(playlist.id.clone(), video_id.to_owned()))
+    }
+
     pub fn notice(&self) -> Option<&Notice> {
         self.notice.as_ref()
     }

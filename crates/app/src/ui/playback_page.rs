@@ -7,7 +7,8 @@ use gpui::{div, prelude::*, Context, Entity, FocusHandle, IntoElement, Render, W
 use crate::player::PlayerModel;
 use crate::player::SKIM_SECONDS_CHOICES;
 use crate::settings::{
-    SettingsModel, ADD_PLAYS_TO_HISTORY, PAUSE_ON_OTHER_AUDIO, SKIM, SKIM_SECONDS,
+    SettingsModel, ADD_PLAYS_TO_HISTORY, PAUSE_ON_OTHER_AUDIO, PICKER_KEY, PICKER_STAY_OPEN, SKIM,
+    SKIM_SECONDS,
 };
 use crate::ui::account_page::TAB_INDEX;
 use crate::ui::blocked_dialog;
@@ -43,6 +44,8 @@ pub struct PlaybackPage {
     focus_gapless: FocusHandle,
     focus_history: FocusHandle,
     focus_other_audio: FocusHandle,
+    focus_picker_key: FocusHandle,
+    focus_picker_stay: FocusHandle,
     focus_skim: FocusHandle,
     focus_skim_seconds: FocusHandle,
     focus_blocked: FocusHandle,
@@ -68,6 +71,8 @@ impl PlaybackPage {
             focus_gapless: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
             focus_history: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
             focus_other_audio: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
+            focus_picker_key: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
+            focus_picker_stay: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
             focus_skim: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
             focus_skim_seconds: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
             focus_blocked: cx.focus_handle().tab_index(TAB_INDEX).tab_stop(true),
@@ -85,6 +90,11 @@ impl Render for PlaybackPage {
         let history = self.settings.read(cx).get(&ADD_PLAYS_TO_HISTORY);
         let (for_normalize, for_gapless) = (self.player.clone(), self.player.clone());
         let other_audio = self.settings.read(cx).get(&PAUSE_ON_OTHER_AUDIO);
+        let (picker_key, picker_stay) = {
+            let s = self.settings.read(cx);
+            (s.get(&PICKER_KEY), s.get(&PICKER_STAY_OPEN))
+        };
+        let (for_picker_key, for_picker_stay) = (self.settings.clone(), self.settings.clone());
         let settings = self.settings.clone();
         let skim = self.settings.read(cx).get(&SKIM);
         let skim_seconds = self.settings.read(cx).skim_seconds();
@@ -138,6 +148,30 @@ impl Render for PlaybackPage {
                 )
                 .on_toggle(move |value, _, cx| {
                     settings.update(cx, |m, cx| m.set(&PAUSE_ON_OTHER_AUDIO, value, cx));
+                }),
+            )
+            .row(
+                SettingsRow::switch(
+                    "setting-picker-key",
+                    &self.focus_picker_key,
+                    "P opens the playlist picker",
+                    picker_key,
+                    accent,
+                )
+                .on_toggle(move |value, _, cx| {
+                    for_picker_key.update(cx, |m, cx| m.set(&PICKER_KEY, value, cx));
+                }),
+            )
+            .row(
+                SettingsRow::switch(
+                    "setting-picker-stay-open",
+                    &self.focus_picker_stay,
+                    "Keep picker open after adding",
+                    picker_stay,
+                    accent,
+                )
+                .on_toggle(move |value, _, cx| {
+                    for_picker_stay.update(cx, |m, cx| m.set(&PICKER_STAY_OPEN, value, cx));
                 }),
             )
             .row(

@@ -54,6 +54,7 @@ actions!(
         PlayCursor,
         RemoveCursor,
         LikeCursor,
+        PlaylistCursor,
         MoveCursorUp,
         MoveCursorDown,
         ExtendUp,
@@ -74,6 +75,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("backspace", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", MoveCursorDown, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-up", ExtendUp, Some(KEY_CONTEXT)),
@@ -632,6 +634,36 @@ impl CratePage {
         cx.notify();
     }
 
+    /// The P key: the playlist picker for the song under the cursor, or for every picked song.
+    fn playlist_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::ui::playlist_picker::key_enabled(cx) {
+            return;
+        }
+        let songs: Vec<crate::ui::playlist_picker::PickerSong> = if self.selection.is_bulk() {
+            self.picked_songs()
+                .into_iter()
+                .map(|s| {
+                    crate::ui::playlist_picker::PickerSong::new(
+                        s.track.video_id.as_str(),
+                        s.track.title.clone(),
+                    )
+                })
+                .collect()
+        } else {
+            let Some(ix) = self.cursor_index(cx) else {
+                return;
+            };
+            let Some(track) = self.crate_.read(cx).items().get(ix).map(|r| r.track.clone()) else {
+                return;
+            };
+            vec![crate::ui::playlist_picker::PickerSong::new(
+                track.video_id.as_str(),
+                track.title.clone(),
+            )]
+        };
+        crate::ui::playlist_picker::open_songs(songs, None, window, cx);
+    }
+
     // ---- rows --------------------------------------------------------------------------
 
     fn rows(
@@ -1072,6 +1104,9 @@ impl Render for CratePage {
                 .on_action(cx.listener(|this, _: &PlayCursor, _, cx| this.play_cursor(cx)))
                 .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
                 .on_action(cx.listener(|this, _: &LikeCursor, window, cx| this.like_cursor(window, cx)))
+                .on_action(cx.listener(|this, _: &PlaylistCursor, window, cx| {
+                    this.playlist_cursor(window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &MoveCursorUp, _, cx| this.move_cursor(-1, cx)))
                 .on_action(cx.listener(|this, _: &MoveCursorDown, _, cx| this.move_cursor(1, cx)))
                 .size_full()

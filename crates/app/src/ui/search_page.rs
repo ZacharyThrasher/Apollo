@@ -726,6 +726,9 @@ impl SearchPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.picker.read(cx).key_enabled(cx) {
+            return;
+        }
         if self.selection.is_bulk() {
             // The picker opens at the cursor row, for every picked song.
             let ids: Vec<String> = self

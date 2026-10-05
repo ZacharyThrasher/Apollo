@@ -121,6 +121,9 @@ pub struct TextField {
     /// A plain field is for naming something (a dialog's): no search icon, no clear button, and
     /// Escape always goes to the owner.
     plain: bool,
+    /// While the field is empty a Space goes to the owner instead of typing a leading space
+    /// (the playlist picker marks the row under its cursor with it).
+    space_to_owner_when_empty: bool,
     max_chars: usize,
 }
 
@@ -148,8 +151,16 @@ impl TextField {
             last_bounds: None,
             is_selecting: false,
             plain: false,
+            space_to_owner_when_empty: false,
             max_chars: MAX_CHARS,
         }
+    }
+
+    /// While the field is empty, Space propagates to the owner's `InsertSpace` handler rather
+    /// than typing a space in front of nothing.
+    pub fn space_to_owner_when_empty(mut self) -> Self {
+        self.space_to_owner_when_empty = true;
+        self
     }
 
     /// Make this a plain naming field that takes at most `max_chars` characters.
@@ -306,6 +317,10 @@ impl TextField {
     }
 
     fn insert_space(&mut self, _: &InsertSpace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.space_to_owner_when_empty && self.content.is_empty() {
+            cx.propagate();
+            return;
+        }
         self.replace_text_in_range(None, " ", window, cx);
     }
 

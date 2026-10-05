@@ -307,22 +307,26 @@ fn a_refused_add_all_says_so(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn new_playlist_in_the_add_all_picker_saves_the_crate(cx: &mut TestAppContext) {
+fn a_new_name_in_the_add_all_picker_makes_a_playlist_of_the_whole_crate(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     fill(&page, vcx, &["crateAAAA01", "crateBBBB02", "crateCCCC03"]);
     open_crate(&page, vcx);
     click(vcx, "crate-add-to-playlist");
     vcx.run_until_parked();
     let picker = picker_of(&page, vcx);
-    vcx.update(|window, cx| picker.update(cx, |p, cx| p.new_playlist(window, cx)));
+    let field = picker.read_with(vcx, |p, _| p.field().clone());
+    field.update(vcx, |f, cx| f.set_text("Apollo crate", cx));
     vcx.run_until_parked();
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(!picker.read_with(vcx, |p, _| p.is_open()));
+    let made = page.sim.owned_ids()[0].clone();
     assert_eq!(
-        dialog_of(&page, vcx).read_with(vcx, |d, _| d.mode().cloned()),
-        Some(Mode::FromCrate {
-            name: "My Crate".into(),
-            video_ids: SAVED.map(str::to_owned).to_vec(),
-        })
+        page.sim.created_with(&made),
+        SAVED.map(str::to_owned).to_vec(),
+        "one write made the playlist with the whole crate in order"
     );
+    assert_eq!(crate_ids(&page, vcx), SAVED, "the Crate itself is kept");
 }
 
 // ---- arranging -------------------------------------------------------------------------------

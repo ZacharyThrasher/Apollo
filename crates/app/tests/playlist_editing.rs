@@ -16,7 +16,7 @@ use apollo_app::style::Fonts;
 use apollo_app::ui::library::LibraryView;
 use apollo_app::ui::nav::Route;
 use apollo_app::ui::playlist_dialog::{Mode, PlaylistDialog};
-use apollo_app::ui::playlist_picker::PlaylistPicker;
+use apollo_app::ui::playlist_picker::{PickerSong, PlaylistPicker};
 use apollo_app::ui::shell::{self, Shell};
 use apollo_app::ui::track_menu::{self, Anchor, Command, Subject, TrackMenu};
 use apollo_app::url_thumbs::NoThumbs;
@@ -783,63 +783,111 @@ fn your_own_playlists_and_liked_music_have_no_save_item(cx: &mut TestAppContext)
 
 // ---- the add-to-playlist popover -------------------------------------------------------------------
 
-#[gpui::test]
-fn the_popover_has_a_new_playlist_row_that_makes_a_playlist_holding_the_song(cx: &mut TestAppContext) {
-    let (page, vcx) = setup(cx);
-    page.picker.update_in(vcx, |p, window, cx| {
-        p.open("simTrack001", "Midnight Drive", window, cx)
-    });
+fn open_popover(page: &Page, vcx: &mut VisualTestContext, videos: &[&str]) {
+    let songs = videos
+        .iter()
+        .map(|v| PickerSong::new(*v, "Midnight Drive"))
+        .collect();
+    page.picker
+        .update_in(vcx, |p, window, cx| p.open_songs(songs, None, window, cx));
     vcx.run_until_parked();
-    assert!(on_screen(vcx, "picker-new"), "the first row is always there");
-    click(vcx, "picker-new");
+}
+
+fn type_filter(page: &Page, vcx: &mut VisualTestContext, text: &str) {
+    let field = page.picker.read_with(vcx, |p, _| p.field().clone());
+    field.update(vcx, |f, cx| f.set_text(text, cx));
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_typed_name_that_is_no_playlist_makes_one_holding_the_song(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_popover(&page, vcx, &["simTrack001"]);
+    assert!(!on_screen(vcx, "picker-create"), "nothing typed, nothing to make");
+    type_filter(&page, vcx, "Apollo test");
+    assert!(on_screen(vcx, "picker-create"));
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
     assert!(!page.picker.read_with(vcx, |p, _| p.is_open()), "the popover closes");
-    assert_eq!(
-        dialog_mode(&page, vcx),
-        Some(Mode::Create {
-            add_video: Some("simTrack001".to_owned())
-        })
-    );
-    type_name(&page, vcx, "Apollo test");
-    submit(&page, vcx);
-    assert!(!dialog_open(&page, vcx));
+    assert!(!dialog_open(&page, vcx), "no name dialog on the way");
     let made = page.sim.owned_ids()[0].clone();
     assert_eq!(
-        page.sim.added(),
-        vec![(made, "simTrack001".to_owned())],
-        "the song went into the new playlist"
+        page.sim.created_with(&made),
+        vec!["simTrack001".to_owned()],
+        "the new playlist was made with the song in it, in one write"
+    );
+    assert_eq!(notice(&page, vcx), None);
+    let settings = page.shell.read_with(vcx, |s, cx| s.settings(cx));
+    assert_eq!(
+        settings.read_with(vcx, |s, _| s.get_text(&apollo_app::settings::RECENT_PLAYLISTS)),
+        made,
+        "the new playlist is the most recent one"
     );
 }
 
 #[gpui::test]
-fn up_from_the_first_playlist_reaches_the_new_playlist_row(cx: &mut TestAppContext) {
+fn ctrl_enter_makes_the_typed_name_even_with_matches_above_it(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
-    page.picker.update_in(vcx, |p, window, cx| {
-        p.open("simTrack001", "Midnight Drive", window, cx)
-    });
+    open_popover(&page, vcx, &["simTrack001"]);
+    type_filter(&page, vcx, "road");
+    let rows = page.picker.read_with(vcx, |p, cx| p.layout(cx)).unwrap();
+    assert_eq!(rows.create.as_deref(), Some("road"));
+    assert!(!rows.rest.is_empty(), "Road Trip matches, and Create comes after it");
+    vcx.simulate_keystrokes("ctrl-enter");
     vcx.run_until_parked();
-    assert!(!page.picker.read_with(vcx, |p, _| p.on_new()));
-    vcx.simulate_keystrokes("up");
-    assert!(page.picker.read_with(vcx, |p, _| p.on_new()));
-    // Down returns to the first playlist.
-    vcx.simulate_keystrokes("down");
-    assert!(!page.picker.read_with(vcx, |p, _| p.on_new()));
-    assert_eq!(page.picker.read_with(vcx, |p, _| p.cursor()), Some(0));
-    vcx.simulate_keystrokes("up enter");
-    vcx.run_until_parked();
-    assert!(dialog_open(&page, vcx));
-    assert!(page.sim.added().is_empty());
+    assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
+    let made = page.sim.owned_ids()[0].clone();
+    assert_eq!(page.sim.created_with(&made), vec!["simTrack001".to_owned()]);
 }
 
 #[gpui::test]
-fn a_picker_that_cannot_list_playlists_still_offers_a_new_one(cx: &mut TestAppContext) {
+fn several_songs_go_into_one_new_playlist_together(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_popover(&page, vcx, &["simTrack001", "simTrack002", "simTrack003"]);
+    assert!(on_screen(vcx, "picker-caption"), "the panel says how many songs it is for");
+    type_filter(&page, vcx, "Weekend");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    let made = page.sim.owned_ids()[0].clone();
+    assert_eq!(
+        page.sim.created_with(&made),
+        ["simTrack001", "simTrack002", "simTrack003"].map(String::from).to_vec()
+    );
+}
+
+#[gpui::test]
+fn a_refused_create_says_so_and_the_new_playlist_is_not_remembered(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.sim
+        .set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Rejected));
+    open_popover(&page, vcx, &["simTrack001"]);
+    type_filter(&page, vcx, "Doomed");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(notice(&page, vcx).as_deref(), Some("Couldn't create playlist"));
+    assert!(
+        !page.sim.owned_ids().iter().any(|id| id.starts_with("PLsimnew")),
+        "nothing was made"
+    );
+    let settings = page.shell.read_with(vcx, |s, cx| s.settings(cx));
+    assert_eq!(
+        settings.read_with(vcx, |s, _| s.get_text(&apollo_app::settings::RECENT_PLAYLISTS)),
+        ""
+    );
+}
+
+#[gpui::test]
+fn a_picker_that_cannot_list_playlists_still_makes_a_new_one(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     page.sim.set_playlists_failure(Some(LoadFailure::Network));
-    page.picker.update_in(vcx, |p, window, cx| {
-        p.open("simTrack001", "Midnight Drive", window, cx)
-    });
+    open_popover(&page, vcx, &["simTrack001"]);
+    assert!(!on_screen(vcx, "picker-create"));
+    type_filter(&page, vcx, "Still works");
+    assert!(on_screen(vcx, "picker-create"));
+    vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(on_screen(vcx, "picker-new"));
-    assert!(page.picker.read_with(vcx, |p, _| p.on_new()));
+    let made = page.sim.owned_ids()[0].clone();
+    assert_eq!(page.sim.created_with(&made), vec!["simTrack001".to_owned()]);
 }
 
 // ---- the dialog itself -----------------------------------------------------------------------------

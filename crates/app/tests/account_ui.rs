@@ -698,7 +698,7 @@ fn settings_shows_the_window_switches_and_a_click_flips_one(cx: &mut TestAppCont
     // The page is taller than the window now: bring the row clear of the player bar.
     vcx.simulate_event(gpui::ScrollWheelEvent {
         position: gpui::point(gpui::px(600.0), gpui::px(400.0)),
-        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-400.0))),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-600.0))),
         ..Default::default()
     });
     vcx.run_until_parked();
