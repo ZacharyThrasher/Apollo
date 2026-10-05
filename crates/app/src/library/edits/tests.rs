@@ -351,6 +351,7 @@ fn every_failure_text_is_six_words_or_fewer_and_a_dead_session_is_named() {
     for edit in [
         Edit::Create,
         Edit::SaveQueue,
+        Edit::SaveCrate,
         Edit::Update,
         Edit::Delete,
         Edit::RemoveSong,

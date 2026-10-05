@@ -1,6 +1,6 @@
 //! The Crate page: the songs set aside with C or "Add to Crate", newest first, in the same song
-//! rows as the other lists. A header row plays, shuffles, adds the whole crate to the queue or
-//! empties it (Clear asks first). Rows play from there with the crate as the queue; More opens
+//! rows as the other lists. A header row plays, shuffles, adds the whole crate to the queue,
+//! saves it as a new playlist, adds it to an existing playlist, or empties it (Clear asks first). Rows play from there with the crate as the queue; More opens
 //! the usual song menu (add to the queue or a playlist, start a radio, remove from the crate).
 //!
 //! The list is virtual and keyboard-first like the queue panel's: one tab stop, an arrow-key
@@ -21,6 +21,9 @@ use gpui::{
 use crate::assets::Icon;
 use crate::crate_list::CrateModel;
 use crate::library::LibraryWrites;
+use crate::ui::anchor;
+use crate::ui::playlist_dialog::{self, Mode, CRATE_PLAYLIST_NAME};
+use crate::ui::playlist_picker::PlaylistPicker;
 use crate::player::{format_time, PlayerModel};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
@@ -60,14 +63,21 @@ const DURATION_WIDTH: f32 = spacing::S12;
 const TAB_PLAY: isize = 6;
 const TAB_SHUFFLE: isize = 7;
 const TAB_ADD_ALL: isize = 8;
-const TAB_CLEAR: isize = 9;
-const TAB_LIST: isize = 10;
-const TAB_SEARCH: isize = 11;
+const TAB_SAVE: isize = 9;
+const TAB_ADD_TO: isize = 10;
+const TAB_CLEAR: isize = 11;
+const TAB_LIST: isize = 12;
+const TAB_SEARCH: isize = 13;
+
+/// Where the "Add all to…" popover hangs from.
+const ADD_TO_ANCHOR: &str = "crate-add-to-playlist";
 
 struct Focus {
     play: FocusHandle,
     shuffle: FocusHandle,
     add_all: FocusHandle,
+    save: FocusHandle,
+    add_to: FocusHandle,
     clear: FocusHandle,
     confirm: FocusHandle,
     cancel: FocusHandle,
@@ -84,7 +94,7 @@ fn cursor_after_removal(ids: &[String], removed: &str) -> Option<String> {
 }
 
 /// A header button wrapped so tests (and the layout) can find it by name.
-fn named(name: &'static str, button: TextButton) -> gpui::Div {
+fn named(name: &'static str, button: impl IntoElement) -> gpui::Div {
     div().debug_selector(move || name.into()).child(button)
 }
 
@@ -101,6 +111,7 @@ pub struct CratePage {
     crate_: Entity<CrateModel>,
     player: Entity<PlayerModel>,
     writes: Entity<LibraryWrites>,
+    picker: Entity<PlaylistPicker>,
     focus: Focus,
     scroll: UniformListScrollHandle,
     /// The row the keyboard acts on (by video id), shown only while the list has focus.
@@ -118,6 +129,7 @@ impl CratePage {
         crate_: Entity<CrateModel>,
         player: Entity<PlayerModel>,
         writes: Entity<LibraryWrites>,
+        picker: Entity<PlaylistPicker>,
         on_search: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -137,6 +149,8 @@ impl CratePage {
             play: stop(cx, TAB_PLAY),
             shuffle: stop(cx, TAB_SHUFFLE),
             add_all: stop(cx, TAB_ADD_ALL),
+            save: stop(cx, TAB_SAVE),
+            add_to: stop(cx, TAB_ADD_TO),
             clear: stop(cx, TAB_CLEAR),
             // The confirmation takes the Clear button's place in the tab order.
             confirm: stop(cx, TAB_CLEAR),
@@ -148,6 +162,7 @@ impl CratePage {
             crate_,
             player,
             writes,
+            picker,
             focus,
             scroll: UniformListScrollHandle::new(),
             cursor: None,
@@ -211,6 +226,39 @@ impl CratePage {
         self.hint_covers(cx);
         self.player
             .update(cx, |p, cx| p.add_tracks_to_queue(tracks, cx));
+    }
+
+    /// The video ids of the whole crate, in the order shown.
+    fn video_ids(&self, cx: &App) -> Vec<String> {
+        self.ids(cx)
+    }
+
+    /// "Save as playlist…": the dialog opens with the whole crate as the playlist's songs.
+    pub fn save_as_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let video_ids = self.video_ids(cx);
+        if video_ids.is_empty() {
+            return;
+        }
+        playlist_dialog::open(
+            Mode::FromCrate {
+                name: CRATE_PLAYLIST_NAME.to_owned(),
+                video_ids,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// "Add all to…": the playlist picker opens to add the whole crate, in order, to one playlist.
+    pub fn add_all_to_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let video_ids = self.video_ids(cx);
+        if video_ids.is_empty() {
+            return;
+        }
+        let title = count_text(video_ids.len());
+        let at = anchor::bounds_of(ADD_TO_ANCHOR, cx);
+        self.picker
+            .update(cx, |p, cx| p.open_many(video_ids, title, at, window, cx));
     }
 
     /// Clear was pressed: ask first.
@@ -554,6 +602,39 @@ impl CratePage {
                     let page = page.clone();
                     move |_, cx| page.update(cx, |p, cx| p.add_all_to_queue(cx))
                 }),
+            ))
+            .child(named(
+                "crate-save-playlist",
+                TextButton::new(
+                    "crate-save-playlist",
+                    &self.focus.save,
+                    "Save as playlist\u{2026}",
+                    accent,
+                )
+                .enabled(has_rows)
+                .on_click({
+                    let page = page.clone();
+                    move |window, cx| page.update(cx, |p, cx| p.save_as_playlist(window, cx))
+                }),
+            ))
+            .child(named(
+                "crate-add-to-playlist",
+                anchor::anchored(
+                    ADD_TO_ANCHOR,
+                    TextButton::new(
+                        "crate-add-to-playlist",
+                        &self.focus.add_to,
+                        "Add all to\u{2026}",
+                        accent,
+                    )
+                    .enabled(has_rows)
+                    .on_click({
+                        let page = page.clone();
+                        move |window, cx| {
+                            page.update(cx, |p, cx| p.add_all_to_playlist(window, cx))
+                        }
+                    }),
+                ),
             ))
             .map(|row| {
                 if self.confirming {
