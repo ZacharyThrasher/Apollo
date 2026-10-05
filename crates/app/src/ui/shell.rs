@@ -466,6 +466,12 @@ impl Shell {
                 cx,
             )
         });
+        now_playing.update(cx, |n, _| {
+            let weak = weak.clone();
+            n.set_on_open(Rc::new(move |target, window, cx| {
+                let _ = weak.update(cx, |s, cx| s.open_target(target, window, cx));
+            }));
+        });
         let account_page = cx.new(|cx| AccountPage::new(account.clone(), player.clone(), cx));
         let playback_page =
             cx.new(|cx| PlaybackPage::new(player.clone(), settings.clone(), cx));
@@ -1728,6 +1734,12 @@ impl Render for Shell {
                 }
             })),
             target: crate::target_playlist::pill_label(cx),
+            on_open: Rc::new({
+                let shell = shell.clone();
+                move |target, window, cx| {
+                    shell.update(cx, |s, cx| s.open_target(target, window, cx))
+                }
+            }),
             on_target: Rc::new(Box::new(|window, cx| {
                 playlist_picker::open_target(
                     Vec::new(),

@@ -408,6 +408,67 @@ fn playing_another_list_ends_the_skim_and_leaves_that_list_alone(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn picking_a_song_of_the_skimmed_list_moves_the_skim_there(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    start(&page, vcx);
+    page.player
+        .update(vcx, |m, cx| m.play_tracks_from(list(), Some(2), None, None, cx));
+    assert_eq!(title(&page, vcx), "Three");
+    let view = skim(&page, vcx).expect("still skimming");
+    assert_eq!(view.label(), "Skimming 3 of 3");
+    assert_eq!(view.start_ms, START, "from its window start");
+    open_at(&page, vcx, START);
+    at(&page, vcx, START + WINDOW);
+    assert!(skim(&page, vcx).is_none(), "the list ran out after the last song");
+    assert_eq!(title(&page, vcx), "Before", "and Esc's before is still what comes back");
+}
+
+#[gpui::test]
+fn a_pick_keeps_what_esc_restores_and_stays_out_of_history(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    let before = page.reporter.seen.lock().unwrap().len();
+    start(&page, vcx);
+    page.player
+        .update(vcx, |m, cx| m.play_tracks_from(list(), Some(1), None, None, cx));
+    open_at(&page, vcx, START);
+    at(&page, vcx, START + 3_000);
+    {
+        let seen = page.reporter.seen.lock().unwrap();
+        assert!(
+            seen[before..].iter().all(Option::is_none),
+            "only 'nothing loaded' reached the reporter: {seen:?}"
+        );
+    }
+    vcx.simulate_keystrokes("escape");
+    assert!(skim(&page, vcx).is_none());
+    assert_eq!(title(&page, vcx), "Before");
+}
+
+#[gpui::test]
+fn a_pick_in_the_middle_can_go_back_to_earlier_songs(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    start(&page, vcx);
+    page.player
+        .update(vcx, |m, cx| m.play_tracks_from(list(), Some(2), None, None, cx));
+    page.player.update(vcx, |m, cx| m.previous(cx));
+    assert_eq!(title(&page, vcx), "Two");
+    assert_eq!(skim(&page, vcx).unwrap().label(), "Skimming 2 of 3");
+    page.player.update(vcx, |m, cx| {
+        m.skim_tick(cx);
+    });
+    assert!(skim(&page, vcx).is_some(), "earlier songs are still the skim's own");
+}
+
+#[gpui::test]
+fn start_skim_at_begins_at_that_song(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    page.player
+        .update(vcx, |m, cx| m.start_skim_at(list(), 1, None, cx));
+    assert_eq!(title(&page, vcx), "Two");
+    assert_eq!(skim(&page, vcx).unwrap().label(), "Skimming 2 of 3");
+}
+
+#[gpui::test]
 fn the_end_of_the_list_goes_back_to_what_was_playing(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     start(&page, vcx);

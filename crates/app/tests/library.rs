@@ -166,6 +166,98 @@ fn skim_on_a_playlist_header_auditions_it_in_order(cx: &mut TestAppContext) {
     assert!(vcx.debug_bounds("detail-play").is_some());
 }
 
+fn skim_state(page: &Page, vcx: &mut VisualTestContext) -> Option<(usize, usize)> {
+    page.player
+        .read_with(vcx, |m, _| m.view().skim.map(|s| (s.index, s.total)))
+}
+
+fn row_center(vcx: &mut VisualTestContext, ix: usize) -> gpui::Point<gpui::Pixels> {
+    let name: &'static str = Box::leak(format!("library-row-{ix}").into_boxed_str());
+    vcx.debug_bounds(name)
+        .unwrap_or_else(|| panic!("row {ix} is on screen"))
+        .center()
+}
+
+#[gpui::test]
+fn k_on_the_hovered_row_skims_the_list_from_that_song(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open(&page, vcx, LIKED_MUSIC_BROWSE_ID);
+    assert_eq!(skim_state(&page, vcx), None);
+    let at = row_center(vcx, 3);
+    vcx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+    vcx.simulate_keystrokes("k");
+    vcx.run_until_parked();
+    assert_eq!(skim_state(&page, vcx), Some((4, 6)), "from the hovered row");
+}
+
+#[gpui::test]
+fn k_with_the_pointer_off_the_rows_skims_from_the_keyboards_row(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open(&page, vcx, LIKED_MUSIC_BROWSE_ID);
+    vcx.simulate_keystrokes("down down k");
+    vcx.run_until_parked();
+    assert_eq!(skim_state(&page, vcx), Some((3, 6)));
+}
+
+#[gpui::test]
+fn k_does_nothing_with_skim_switched_off(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open(&page, vcx, LIKED_MUSIC_BROWSE_ID);
+    page.player.update(vcx, |m, cx| m.set_skim_enabled(false, cx));
+    vcx.simulate_keystrokes("down k");
+    vcx.run_until_parked();
+    assert_eq!(skim_state(&page, vcx), None);
+}
+
+#[gpui::test]
+fn clicking_a_song_while_skimming_keeps_skimming_from_it(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open(&page, vcx, LIKED_MUSIC_BROWSE_ID);
+    page.model
+        .update(vcx, |m, cx| m.request_play(PlayRequest::SKIM, cx));
+    vcx.run_until_parked();
+    assert_eq!(skim_state(&page, vcx), Some((1, 6)));
+    let at = row_center(vcx, 4);
+    vcx.simulate_click(at, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(skim_state(&page, vcx), Some((5, 6)), "still skimming, now at the clicked song");
+    // Esc still puts back what was playing before the skim.
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert_eq!(skim_state(&page, vcx), None);
+    assert_eq!(current_title(&page, vcx), "Start");
+}
+
+#[gpui::test]
+fn k_while_skimming_still_keeps_the_song_in_the_crate(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open(&page, vcx, LIKED_MUSIC_BROWSE_ID);
+    page.model
+        .update(vcx, |m, cx| m.request_play(PlayRequest::SKIM, cx));
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("k");
+    vcx.run_until_parked();
+    let crate_len = page
+        .shell
+        .read_with(vcx, |s, _| s.crate_model().clone())
+        .read_with(vcx, |m, _| m.items().len());
+    assert_eq!(crate_len, 1, "K went to the Crate, not to a new skim");
+    assert_eq!(skim_state(&page, vcx), Some((1, 6)), "and the skim carries on, not restarted");
+}
+
+#[gpui::test]
+fn enter_on_a_row_while_skimming_plays_it_normally(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open(&page, vcx, LIKED_MUSIC_BROWSE_ID);
+    page.model
+        .update(vcx, |m, cx| m.request_play(PlayRequest::SKIM, cx));
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("down down enter");
+    vcx.run_until_parked();
+    assert_eq!(skim_state(&page, vcx), None);
+    assert_eq!(queue_len(&page, vcx), 6);
+}
+
 #[gpui::test]
 fn shuffle_turns_shuffle_on_and_queues_every_track(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
