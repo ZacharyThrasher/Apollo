@@ -32,7 +32,7 @@ use apollo_domain::model::{ArtistRef, Track, VideoId};
 use apollo_media::{MediaConfig, MpvEngine};
 use apollo_resolver::diag::list_liked_music;
 use apollo_resolver::{ResolverConfig, YtDlpResolver};
-use apollo_services_common::{EventSink, LeaseStore, LoudnessFetcher, LoudnessTable};
+use apollo_services_common::{EventSink, LeaseStore, LoudnessFetcher, LoudnessTable, Throttle};
 
 use super::real_loudness::AccountLoudness;
 use super::real_search::AccountSearch;
@@ -149,6 +149,22 @@ pub fn prepare(
     .map_err(|e| e.to_string())?;
     // Outcome codes and timings only; sits beside the app's own latency lines.
     resolver.set_log_file(app_dir.join("latency.log"));
+    // One throttle for everything that asks YouTube as this account: a 429 from the resolver, a
+    // loudness lookup or any InnerTube request slows all of them (background work first).
+    let throttle = Throttle::global();
+    resolver.set_throttle(throttle.clone());
+    {
+        let (throttle, handle) = (throttle.clone(), resolver.handle());
+        innertube::set_throttle_hook(move |retry_after| {
+            let wait = throttle.report_throttled(retry_after);
+            handle.note(format!(
+                "throttled by innertube strikes={} wait_s={} retry_after_s={}",
+                throttle.strikes(),
+                wait.as_secs(),
+                retry_after.map_or(0, |d| d.as_secs())
+            ));
+        });
+    }
     // Logout: forget every resolved URL and lease, and end the helpers that hold cookies.
     let handle = resolver.handle();
     account.on_logout(move || handle.invalidate());
@@ -157,10 +173,11 @@ pub fn prepare(
     // every track simply plays at unity.
     let loudness = LoudnessTable::new();
     let loudness_fetcher = AccountLoudness::new(account.clone()).ok().map(|source| {
-        LoudnessFetcher::new(
+        LoudnessFetcher::with_throttle(
             loudness.clone(),
             source,
             SqliteLoudness::at(app_dir.join("apollo.db")),
+            throttle.clone(),
         )
     });
     let resolver: Box<dyn apollo_runtime::Resolver + Send> = match loudness_fetcher {

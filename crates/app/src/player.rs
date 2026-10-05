@@ -13,6 +13,7 @@ use apollo_domain::playback::{EngineEvent, Event, Failure, Intent, Phase};
 use apollo_domain::queue::{Heading, Queue, QueueEntry, QueueSnapshot, QueueSource, Repeat};
 use apollo_domain::undo::{put_back, UndoHistory};
 use apollo_runtime::Driver;
+use apollo_services_common::{Lane, Throttle};
 use apollo_theme::Accent;
 use gpui::{Context, RenderImage, SharedString};
 
@@ -246,6 +247,8 @@ pub struct PlayerModel {
     /// arrives next joins that step instead of making its own, so one undo takes both back.
     radio_step: Option<u64>,
     radio_inflight: bool,
+    /// A Retry is waiting for YouTube's cooldown to end (see [`PlayerModel::retry`]).
+    retry_pending: bool,
     /// The last track a radio was asked for. Not asked again until the queue's tail changes or
     /// [`RADIO_RETRY`] has passed, so a failure is not retried on every tick.
     radio_tried: Option<String>,
@@ -303,6 +306,7 @@ impl PlayerModel {
             undo: UndoHistory::new(),
             radio_step: None,
             radio_inflight: false,
+            retry_pending: false,
             radio_tried: None,
             skim: None,
             skim_enabled: true,
@@ -866,8 +870,41 @@ impl PlayerModel {
         self.handle(Event::Previous, cx);
     }
 
+    /// Try the failed track again. When the failure was YouTube's "too many requests" and its
+    /// cooldown (see `apollo_services_common::Throttle`) is still running, asking now would only
+    /// be refused again and lengthen the wait, so the retry is held until the cooldown has ended
+    /// and then goes ahead by itself. The bar keeps saying what went wrong meanwhile.
     pub fn retry(&mut self, cx: &mut Context<Self>) {
-        self.handle(Event::Play, cx);
+        let throttled = self
+            .driver
+            .as_ref()
+            .is_some_and(|d| d.coordinator().error() == Some(Failure::Throttled));
+        let wait = throttled.then(|| Throttle::global().blocked(Lane::Foreground)).flatten();
+        let Some(wait) = wait else {
+            self.handle(Event::Play, cx);
+            return;
+        };
+        if self.retry_pending {
+            return;
+        }
+        self.retry_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(wait + Duration::from_millis(250))
+                .await;
+            let _ = this.update(cx, |m, cx| {
+                m.retry_pending = false;
+                // Still the same failure on screen: a click on something else meanwhile has
+                // already moved on and needs no second Play.
+                if m.driver
+                    .as_ref()
+                    .is_some_and(|d| d.coordinator().error() == Some(Failure::Throttled))
+                {
+                    m.handle(Event::Play, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Play `track` now and carry on with the existing queue after it: the track goes in front of
@@ -1530,6 +1567,13 @@ impl PlayerModel {
         if self.radio_tried.as_deref() == Some(seed.as_str()) {
             return;
         }
+        // YouTube asked us to slow down: autoplay is speculative, so it waits for the cooldown
+        // (the tail stays "tried" meanwhile, so this is one timer and not one per sync).
+        if Throttle::global().blocked(Lane::Background).is_some() {
+            self.radio_tried = Some(seed);
+            self.retry_radio_later(cx);
+            return;
+        }
         self.radio_inflight = true;
         self.radio_tried = Some(seed.clone());
         cx.spawn(async move |this, cx| {
@@ -1600,10 +1644,14 @@ impl PlayerModel {
         self.prefetch_upcoming();
     }
 
-    /// Forget that the tail was tried after [`RADIO_RETRY`], and look again then.
+    /// Forget that the tail was tried after [`RADIO_RETRY`] (or after YouTube's cooldown, when
+    /// that is longer), and look again then.
     fn retry_radio_later(&mut self, cx: &mut Context<Self>) {
+        let wait = Throttle::global()
+            .blocked(Lane::Background)
+            .map_or(RADIO_RETRY, |cooldown| cooldown.max(RADIO_RETRY));
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(RADIO_RETRY).await;
+            cx.background_executor().timer(wait).await;
             let _ = this.update(cx, |m, cx| {
                 m.radio_tried = None;
                 m.sync(cx);

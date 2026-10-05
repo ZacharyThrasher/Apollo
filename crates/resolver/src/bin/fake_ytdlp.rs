@@ -36,8 +36,8 @@ fn millis() -> u128 {
 
 /// The warm-worker mode (`apollo-serve:`): the same one-JSON-object-per-line protocol as the
 /// real plugin (`plugin/apollo_serve.py`), with behaviour from the environment:
-/// APOLLO_FAKE_MODE (ok, rotate, wrong-id, drm, fail-bot, crash-once, crash-always, hang,
-/// startup-fail),
+/// APOLLO_FAKE_MODE (ok, rotate, wrong-id, drm, fail-bot, fail-429, ok-throttled (a stream
+/// through a fallback client after a 429), crash-once, crash-always, hang, startup-fail),
 /// APOLLO_FAKE_DELAY_MS (per resolve), APOLLO_FAKE_STARTUP_MS, APOLLO_FAKE_LOG.
 fn serve(args: &[String]) {
     use std::io::BufRead;
@@ -120,6 +120,9 @@ fn serve(args: &[String]) {
                         "error": format!("ERROR: [youtube] {vid}: Requested format is not available")}),
                     "fail-bot" => serde_json::json!({"id": id, "ok": false,
                         "error": format!("ERROR: [youtube] {vid}: Sign in to confirm you're not a bot")}),
+                    "fail-429" => serde_json::json!({"id": id, "ok": false, "throttled": true,
+                        "error": format!("ERROR: [youtube] {vid}: Unable to download API page: HTTP Error 429: Too Many Requests")}),
+                    "ok-throttled" => serde_json::json!({"id": id, "ok": true, "throttled": true, "info": doc_for(&vid, "")}),
                     _ => serde_json::json!({"id": id, "ok": true, "info": doc_for(&vid, "")}),
                 };
                 v["phases"] = phases;
