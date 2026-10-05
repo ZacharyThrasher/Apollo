@@ -29,7 +29,7 @@ fallback), no art, and a 25 s track to watch the end-of-track advance.
 | Key | Action |
 |---|---|
 | Space | play / pause (anywhere in the window) |
-| Ctrl+Right / Ctrl+Left | next / previous |
+| Shift+Right / Shift+Left | next / previous (the full list is `docs/keyboard.md`; Ctrl+Left/Right seek, Ctrl+Up/Down volume, the plain arrows only move around) |
 | Tab / Shift+Tab | move between controls (accent focus ring, keyboard focus only) |
 | Enter | activate the focused control |
 | Left / Right on a slider | seek 5 s / volume 5% |
@@ -59,7 +59,7 @@ Space is bound at the root (`Shell` key context); the text field claims it in it
 
 `cargo test -p apollo-app` runs unit tests (formatting, slider math, art/accent, the simulated
 engine against the real coordinator) and headless GPUI tests (`tests/ui.rs`): the real views on
-GPUI's test platform with the deterministic mock adapters, driving Space and Ctrl+Left/Right.
+GPUI's test platform with the deterministic mock adapters, driving Space and Shift+Left/Right.
 They do not cover pixels; screenshots on Windows do.
 
 ## Not in this slice

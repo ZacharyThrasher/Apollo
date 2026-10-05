@@ -516,29 +516,53 @@ fn the_feed_waits_for_the_account_before_asking(cx: &mut TestAppContext) {
 // ---- rows and keyboard ------------------------------------------------------------------------------
 
 #[gpui::test]
-fn left_and_right_walk_the_items_and_the_row_follows_the_focus(cx: &mut TestAppContext) {
+fn left_and_right_walk_the_columns_of_songs_and_the_row_follows_the_focus(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
     narrow(vcx);
-    let first = page.view.read_with(vcx, |v, _| v.item_stops()[0].clone());
+    let stop = |page: &Page, vcx: &mut VisualTestContext, i: usize| {
+        page.view.read_with(vcx, |v, _| v.item_stops()[i].clone())
+    };
+    let first = stop(&page, vcx, 0);
     vcx.update(|window, cx| window.focus(&first, cx));
+    // The first shelf is a grid of songs, four to a column, filled down the column first.
     vcx.simulate_keystrokes("right");
-    let second = page.view.read_with(vcx, |v, _| v.item_stops()[1].clone());
-    assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(second));
+    assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(stop(&page, vcx, 4)));
 
     // Column four of the song grid starts past the right edge of the window.
-    for _ in 0..12 {
-        vcx.simulate_keystrokes("right");
-    }
+    vcx.simulate_keystrokes("right right");
     vcx.run_until_parked();
+    assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(stop(&page, vcx, 12)));
     assert!(
         page.view.read_with(vcx, |v, _| v.row_offset(0)) < 0.0,
         "the row scrolled to show the focused song"
     );
     vcx.simulate_keystrokes("left");
-    assert_eq!(
-        vcx.update(|window, cx| window.focused(cx)),
-        Some(page.view.read_with(vcx, |v, _| v.item_stops()[12].clone()))
-    );
+    assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(stop(&page, vcx, 8)));
+}
+
+#[gpui::test]
+fn up_and_down_walk_a_column_of_songs_and_leave_it_at_its_ends(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    let stop = |page: &Page, vcx: &mut VisualTestContext, i: usize| {
+        page.view.read_with(vcx, |v, _| v.item_stops()[i].clone())
+    };
+    let first = stop(&page, vcx, 0);
+    vcx.update(|window, cx| window.focus(&first, cx));
+    vcx.simulate_keystrokes("down down");
+    assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(stop(&page, vcx, 2)));
+    vcx.simulate_keystrokes("up");
+    assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(stop(&page, vcx, 1)));
+    // The bottom of a column does not spill into the next column: it goes on to the next shelf.
+    vcx.simulate_keystrokes("down down");
+    let third_row = vcx.update(|window, cx| window.focused(cx));
+    assert_eq!(third_row, Some(stop(&page, vcx, 3)));
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("down");
+    let next_shelf = page.view.read_with(vcx, |v, cx| {
+        let shelves = page.home.read(cx).shelves();
+        v.item_stops()[shelves[0].items.len()].clone()
+    });
+    assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(next_shelf));
 }
 
 #[gpui::test]
@@ -552,8 +576,9 @@ fn a_shelf_is_one_tab_stop_that_remembers_where_you_were(cx: &mut TestAppContext
         )
     });
     vcx.update(|window, cx| window.focus(&first, cx));
+    // The first shelf is a grid of songs: each Right is a whole column of four.
     vcx.simulate_keystrokes("right right");
-    let third = page.view.read_with(vcx, |v, _| v.item_stops()[2].clone());
+    let third = page.view.read_with(vcx, |v, _| v.item_stops()[8].clone());
     assert_eq!(vcx.update(|window, cx| window.focused(cx)), Some(third.clone()));
     vcx.run_until_parked();
 

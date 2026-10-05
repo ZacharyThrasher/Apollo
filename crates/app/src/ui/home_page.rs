@@ -43,15 +43,18 @@ use crate::ui::tooltip::Tooltip;
 use crate::ui::track_menu::{self, Subject};
 use crate::url_thumbs::{Thumb, ThumbStore};
 
-actions!(home, [ShelfNext, ShelfPrevious]);
+actions!(home, [ShelfNext, ShelfPrevious, ShelfAbove, ShelfBelow]);
 
-/// Key context of a shelf: Left and Right move to the neighbouring item.
+/// Key context of a shelf: Left and Right move to the neighbouring item; Up and Down move
+/// within a grid of songs and otherwise pass on (to the shelf above or below).
 pub const SHELF_CONTEXT: &str = "HomeShelf";
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("right", ShelfNext, Some(SHELF_CONTEXT)),
         KeyBinding::new("left", ShelfPrevious, Some(SHELF_CONTEXT)),
+        KeyBinding::new("down", ShelfBelow, Some(SHELF_CONTEXT)),
+        KeyBinding::new("up", ShelfAbove, Some(SHELF_CONTEXT)),
     ]);
 }
 
@@ -112,6 +115,15 @@ pub fn visible_range(offset: f32, viewport: f32, step: f32, count: usize) -> Ran
     let first = (left / step).floor().max(0.0) as usize;
     let last = ((left + viewport) / step).ceil() as usize + 1;
     first.saturating_sub(1)..last.min(count)
+}
+
+/// Which way an arrow key moves inside a shelf.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShelfStep {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 /// A sideways scroll in progress.
@@ -207,23 +219,54 @@ impl HomeView {
         &self.action_focus
     }
 
-    /// Left / Right: move focus to the next or previous item of the shelf whose items are stops
-    /// `first..first + count`, staying inside it.
+    /// Where the first arrow press lands: the item of the first shelf that Tab would stop on.
+    pub fn main_focus(&self) -> Option<FocusHandle> {
+        let first = self.rows.first()?;
+        self.stops.get(first.tab).cloned()
+    }
+
+    /// Left / Right / Up / Down: move focus inside the shelf whose items are stops
+    /// `first..first + count`. A song grid is columns of [`COLUMN_ROWS`], filled down the column
+    /// first: Up / Down step within a column, Left / Right a whole column. A row of cards moves
+    /// one card with Left / Right. Returns whether focus moved; at an edge it does not, and
+    /// Left at the very first item asks the sidebar to take the focus.
     fn step_focus(
         &mut self,
         first: usize,
         count: usize,
-        by: isize,
+        songs: bool,
+        step: ShelfStep,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(at) = (0..count).find(|k| self.stops[first + k].is_focused(window)) else {
-            return;
+            return false;
         };
-        let to = at as isize + by;
-        if (0..count as isize).contains(&to) {
+        let across = if songs { COLUMN_ROWS as isize } else { 1 };
+        let to = match step {
+            ShelfStep::Left => at as isize - across,
+            ShelfStep::Right => at as isize + across,
+            // Up and Down only mean something inside a column of songs.
+            ShelfStep::Up | ShelfStep::Down if !songs => return false,
+            ShelfStep::Up => at as isize - 1,
+            ShelfStep::Down => at as isize + 1,
+        };
+        let inside = (0..count as isize).contains(&to);
+        let same_column = songs && matches!(step, ShelfStep::Up | ShelfStep::Down)
+            && to.div_euclid(across) == (at as isize).div_euclid(across);
+        let moves = match step {
+            ShelfStep::Left | ShelfStep::Right => inside,
+            ShelfStep::Up | ShelfStep::Down => inside && same_column,
+        };
+        if moves {
             window.focus(&self.stops[first + to as usize], cx);
+            return true;
         }
+        if step == ShelfStep::Left && at < across as usize {
+            window.dispatch_action(Box::new(crate::ui::shell::FocusSidebar), cx);
+            return true;
+        }
+        false
     }
 
     /// Back to the top, every row at its first column (a different account's feed).
@@ -721,10 +764,22 @@ impl HomeView {
                         .aria_label(SharedString::from(plan.shelf.title.clone()))
                         .key_context(SHELF_CONTEXT)
                         .on_action(cx.listener(move |this, _: &ShelfNext, window, cx| {
-                            this.step_focus(first, count, 1, window, cx)
+                            this.step_focus(first, count, songs, ShelfStep::Right, window, cx);
                         }))
                         .on_action(cx.listener(move |this, _: &ShelfPrevious, window, cx| {
-                            this.step_focus(first, count, -1, window, cx)
+                            this.step_focus(first, count, songs, ShelfStep::Left, window, cx);
+                        }))
+                        // Up / Down that stay inside a column are the shelf's; at the end of a
+                        // column, and in a row of cards, they go on to the shelf above or below.
+                        .on_action(cx.listener(move |this, _: &ShelfBelow, window, cx| {
+                            if !this.step_focus(first, count, songs, ShelfStep::Down, window, cx) {
+                                cx.propagate();
+                            }
+                        }))
+                        .on_action(cx.listener(move |this, _: &ShelfAbove, window, cx| {
+                            if !this.step_focus(first, count, songs, ShelfStep::Up, window, cx) {
+                                cx.propagate();
+                            }
                         }))
                         .flex()
                         .flex_row()

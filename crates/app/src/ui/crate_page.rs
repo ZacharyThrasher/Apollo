@@ -78,6 +78,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("a", TargetCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("left", crate::ui::shell::FocusSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", MoveCursorDown, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-up", ExtendUp, Some(KEY_CONTEXT)),
