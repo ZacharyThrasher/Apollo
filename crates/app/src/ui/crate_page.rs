@@ -33,7 +33,7 @@ use crate::ui::track_menu::{self, Subject};
 
 actions!(
     apollo_crate,
-    [CursorUp, CursorDown, PlayCursor, RemoveCursor, LikeCursor]
+    [CursorUp, CursorDown, PlayCursor, RemoveCursor, LikeCursor, PlaylistCursor]
 );
 
 /// Key context of the list's focus handle.
@@ -47,6 +47,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("backspace", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -326,6 +327,24 @@ impl CratePage {
         if let Some(video) = self.cursor.clone() {
             self.writes.update(cx, |w, cx| w.toggle_like(&video, cx));
         }
+    }
+
+    /// The P key: the playlist picker for the song under the cursor.
+    fn playlist_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::ui::playlist_picker::key_enabled(cx) {
+            return;
+        }
+        let Some(ix) = self.cursor_index(cx) else {
+            return;
+        };
+        let Some(track) = self.crate_.read(cx).items().get(ix).map(|r| r.track.clone()) else {
+            return;
+        };
+        let song = crate::ui::playlist_picker::PickerSong::new(
+            track.video_id.as_str(),
+            track.title.clone(),
+        );
+        crate::ui::playlist_picker::open_songs(vec![song], None, window, cx);
     }
 
     // ---- rows --------------------------------------------------------------------------
@@ -670,6 +689,9 @@ impl Render for CratePage {
                 .on_action(cx.listener(|this, _: &PlayCursor, _, cx| this.play_cursor(cx)))
                 .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
                 .on_action(cx.listener(|this, _: &LikeCursor, _, cx| this.like_cursor(cx)))
+                .on_action(cx.listener(|this, _: &PlaylistCursor, window, cx| {
+                    this.playlist_cursor(window, cx)
+                }))
                 .size_full()
                 .child(
                     uniform_list(

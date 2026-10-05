@@ -1094,6 +1094,9 @@ impl LibraryView {
             }
         }))
         .on_action(cx.listener(|this, _: &AddRowToPlaylist, window, cx| {
+            if !this.picker.read(cx).key_enabled(cx) {
+                return;
+            }
             if let Some((video, title)) = this.selected_track(cx) {
                 let at = playlist_anchor(this.selected);
                 this.picker

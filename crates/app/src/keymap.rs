@@ -26,6 +26,7 @@ actions!(
         ToggleLyrics,
         LikeCurrent,
         CrateCurrent,
+        AddCurrentToPlaylist,
         UndoQueue,
         RedoQueue,
         ToggleFullscreen
@@ -55,6 +56,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-l", ToggleLyrics, plain),
         KeyBinding::new("l", LikeCurrent, plain),
         KeyBinding::new("c", CrateCurrent, plain),
+        KeyBinding::new("p", AddCurrentToPlaylist, plain),
         KeyBinding::new("ctrl-z", UndoQueue, plain),
         KeyBinding::new("ctrl-shift-z", RedoQueue, plain),
         KeyBinding::new("ctrl-y", RedoQueue, plain),

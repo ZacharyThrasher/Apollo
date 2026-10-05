@@ -60,6 +60,16 @@ pub const PERSONAL_SHELVES: BoolSetting = BoolSetting::new("personal_shelves", t
 /// Home > Mood chips: the row of mood chips ("Relax", "Workout") under Home's title, which filter
 /// the feed the way YouTube Music's do. Off hides the row and shows the ordinary feed.
 pub const MOOD_CHIPS: BoolSetting = BoolSetting::new("mood_chips", true);
+/// Playback > Keep picker open after adding: the add-to-playlist picker stays open once songs are
+/// added, so one song can go into several playlists in one visit. Off closes it after the add.
+pub const PICKER_STAY_OPEN: BoolSetting = BoolSetting::new("picker_stay_open", false);
+/// Playback > P opens the playlist picker: the P key opens the picker for the song under the
+/// cursor (or the playing one). Off leaves P unbound.
+pub const PICKER_KEY: BoolSetting = BoolSetting::new("picker_key", true);
+/// The playlists most recently added to through the picker, newest first, as bare ids separated
+/// by commas. Shown on top of the picker. Kept per app, not per account (an id of another
+/// account's playlist is simply never found in the list).
+pub const RECENT_PLAYLISTS: TextSetting = TextSetting::new("picker_recent_playlists", "");
 /// Window > Close to tray: the close button hides the window and playback continues.
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
@@ -122,6 +132,8 @@ pub const REPORTED_KEYS: &[&str] = &[
     KEY_RELATED_OPEN,
     ADD_PLAYS_TO_HISTORY.key,
     PERSONAL_SHELVES.key,
+    PICKER_STAY_OPEN.key,
+    PICKER_KEY.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
     PAUSE_ON_OTHER_AUDIO.key,

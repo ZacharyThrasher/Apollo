@@ -14,6 +14,7 @@ use apollo_app::library::model::{LibraryModel, Load, Tab};
 use apollo_app::library::sim::{SimLibrary, WriteBehaviour};
 use apollo_app::library::writes::LibraryWrites;
 use apollo_app::player::PlayerModel;
+use apollo_app::settings::{SettingsModel, PICKER_KEY, PICKER_STAY_OPEN, RECENT_PLAYLISTS};
 use apollo_app::search::SearchSource;
 use apollo_app::style::Fonts;
 use apollo_app::ui::library::LibraryView;
@@ -744,6 +745,246 @@ fn the_pickers_cursor_stops_at_both_ends(cx: &mut TestAppContext) {
     assert_eq!(page.picker.read_with(vcx, |p, _| p.cursor()), Some(last));
 }
 
+fn type_filter(page: &Page, vcx: &mut VisualTestContext, text: &str) {
+    let field = page.picker.read_with(vcx, |p, _| p.field().clone());
+    field.update(vcx, |f, cx| f.set_text(text, cx));
+    vcx.run_until_parked();
+}
+
+fn picker_settings(page: &Page, vcx: &mut VisualTestContext) -> Entity<SettingsModel> {
+    page.shell.read_with(vcx, |s, cx| s.settings(cx))
+}
+
+fn sorted(mut pairs: Vec<(String, String)>) -> Vec<(String, String)> {
+    pairs.sort();
+    pairs
+}
+
+#[gpui::test]
+fn the_picker_opens_with_the_caret_in_the_filter_box(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_picker(&page, vcx, PLAIN);
+    let field = page.picker.read_with(vcx, |p, _| p.field().clone());
+    let focused = vcx.update(|window, cx| field.read(cx).focus_handle(cx).is_focused(window));
+    assert!(focused);
+    assert!(on_screen(vcx, "picker-filter"));
+    assert_eq!(page.picker.read_with(vcx, |p, _| p.songs().len()), 1);
+}
+
+#[gpui::test]
+fn typing_narrows_the_list_and_enter_adds_to_the_first_match(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_picker(&page, vcx, PLAIN);
+    type_filter(&page, vcx, "long");
+    let rows = page.picker.read_with(vcx, |p, cx| p.layout(cx)).unwrap();
+    assert_eq!(rows.rest, vec![1, 3], "Long Haul and the long title, in the service's order");
+    assert_eq!(page.picker.read_with(vcx, |p, _| p.cursor()), Some(0), "the cursor starts on the first");
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(page.sim.added(), [("PLsimlong".to_owned(), PLAIN.to_owned())]);
+    assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
+}
+
+#[gpui::test]
+fn a_name_that_matches_nothing_and_no_playlist_shows_only_the_create_row(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_picker(&page, vcx, PLAIN);
+    type_filter(&page, vcx, "zzz nothing");
+    assert!(on_screen(vcx, "picker-create"));
+    assert!(!on_screen(vcx, "picker-row-0"));
+    // A name that is a playlist already offers no second one.
+    type_filter(&page, vcx, "long haul");
+    assert!(!on_screen(vcx, "picker-create"));
+}
+
+#[gpui::test]
+fn space_marks_and_enter_adds_to_every_marked_playlist(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_picker(&page, vcx, PLAIN);
+    vcx.simulate_keystrokes("space");
+    assert_eq!(page.picker.read_with(vcx, |p, _| p.marked().to_vec()), ["PLsimroad"]);
+    assert!(log(&page).is_empty(), "a mark writes nothing");
+    vcx.simulate_keystrokes("down down space");
+    assert_eq!(
+        page.picker.read_with(vcx, |p, _| p.marked().to_vec()),
+        ["PLsimroad", "PLsimempty"]
+    );
+    // A second Space takes a mark back.
+    vcx.simulate_keystrokes("space");
+    assert_eq!(page.picker.read_with(vcx, |p, _| p.marked().to_vec()), ["PLsimroad"]);
+    vcx.simulate_keystrokes("space up enter");
+    assert_eq!(
+        sorted(page.sim.added()),
+        [
+            ("PLsimempty".to_owned(), PLAIN.to_owned()),
+            ("PLsimroad".to_owned(), PLAIN.to_owned()),
+        ],
+        "both marked playlists, not the one the cursor ended on"
+    );
+    assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
+}
+
+#[gpui::test]
+fn once_something_is_typed_space_is_a_space_and_ctrl_space_marks(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_picker(&page, vcx, PLAIN);
+    type_filter(&page, vcx, "long");
+    vcx.simulate_keystrokes("space");
+    let field = page.picker.read_with(vcx, |p, _| p.field().clone());
+    assert_eq!(field.read_with(vcx, |f, _| f.text().to_owned()), "long ");
+    assert!(page.picker.read_with(vcx, |p, _| p.marked().is_empty()));
+    vcx.simulate_keystrokes("ctrl-space");
+    assert_eq!(page.picker.read_with(vcx, |p, _| p.marked().to_vec()), ["PLsimlong"]);
+}
+
+#[gpui::test]
+fn a_playlist_that_holds_the_song_takes_no_mark(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_picker(&page, vcx, LIKED);
+    vcx.simulate_keystrokes("space"); // Road Trip already has it
+    assert!(page.picker.read_with(vcx, |p, _| p.marked().is_empty()));
+    assert!(page.picker.read_with(vcx, |p, _| p.is_open()));
+}
+
+#[gpui::test]
+fn the_playlists_added_to_come_first_next_time(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_picker(&page, vcx, PLAIN);
+    vcx.simulate_keystrokes("down down enter"); // Nothing Yet
+    let settings = picker_settings(&page, vcx);
+    assert_eq!(
+        settings.read_with(vcx, |s, _| s.get_text(&RECENT_PLAYLISTS)),
+        "PLsimempty"
+    );
+    open_picker(&page, vcx, LIKED);
+    let rows = page.picker.read_with(vcx, |p, cx| p.layout(cx)).unwrap();
+    assert_eq!(rows.recent, vec![2]);
+    assert_eq!(rows.row(0), Some(playlist_picker::Row::Playlist(2)));
+    assert_eq!(rows.rest.first(), Some(&0), "the rest keep the service's order");
+    vcx.simulate_keystrokes("down down enter"); // the third row is "Long Haul"
+    assert_eq!(
+        settings.read_with(vcx, |s, _| s.get_text(&RECENT_PLAYLISTS)),
+        "PLsimlong,PLsimempty"
+    );
+}
+
+#[gpui::test]
+fn keep_open_leaves_the_picker_up_with_the_marks_and_filter_cleared(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    let settings = picker_settings(&page, vcx);
+    settings.update(vcx, |s, cx| s.set(&PICKER_STAY_OPEN, true, cx));
+    open_picker(&page, vcx, PLAIN);
+    type_filter(&page, vcx, "long");
+    vcx.simulate_keystrokes("enter");
+    assert!(page.picker.read_with(vcx, |p, _| p.is_open()), "stays open");
+    let field = page.picker.read_with(vcx, |p, _| p.field().clone());
+    assert_eq!(field.read_with(vcx, |f, _| f.text().to_owned()), "", "filter cleared");
+    // The check shows at once, and the next playlist goes in on the same visit.
+    let long = page.picker.read_with(vcx, |p, cx| p.holds_all(1, cx));
+    assert!(long);
+    vcx.simulate_keystrokes("space enter"); // first row: the recent one, Long Haul, is held
+    assert!(page.picker.read_with(vcx, |p, _| p.marked().is_empty()));
+    vcx.simulate_keystrokes("down space enter");
+    assert_eq!(
+        sorted(page.sim.added()),
+        [
+            ("PLsimlong".to_owned(), PLAIN.to_owned()),
+            ("PLsimroad".to_owned(), PLAIN.to_owned()),
+        ]
+    );
+    vcx.simulate_keystrokes("escape");
+    assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
+}
+
+#[gpui::test]
+fn escape_closes_even_with_text_in_the_filter(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    open_picker(&page, vcx, PLAIN);
+    type_filter(&page, vcx, "road");
+    vcx.simulate_keystrokes("escape");
+    assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
+    assert!(log(&page).is_empty());
+}
+
+#[gpui::test]
+fn several_songs_go_into_a_playlist_one_after_another(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    let songs = vec![
+        playlist_picker::PickerSong::new(PLAIN, "Plain Song"),
+        playlist_picker::PickerSong::new("otherTrk01", "Other"),
+        playlist_picker::PickerSong::new("otherTrk02", "Another"),
+    ];
+    page.picker
+        .update_in(vcx, |p, window, cx| p.open_songs(songs, None, window, cx));
+    vcx.run_until_parked();
+    assert!(on_screen(vcx, "picker-caption"));
+    let target = page.picker.read_with(vcx, |p, _| match p.playlists() {
+        Some(Load::Ready(list)) => list[0].clone(),
+        _ => unreachable!(),
+    });
+    vcx.simulate_keystrokes("enter"); // Road Trip
+    assert!(
+        page.writes.read_with(vcx, |w, _| {
+            w.holds(&target, PLAIN)
+                && w.added_here(&target, "otherTrk01")
+                && w.added_here(&target, "otherTrk02")
+        }),
+        "every song shows as held at once"
+    );
+    assert_eq!(page.sim.added().len(), 1, "but the writes are paced: one has gone out");
+    for _ in 0..2 {
+        vcx.executor()
+            .advance_clock(apollo_app::library::writes::ADD_PACE);
+        vcx.run_until_parked();
+    }
+    assert_eq!(
+        page.sim.added(),
+        [PLAIN, "otherTrk01", "otherTrk02"]
+            .map(|v| ("PLsimroad".to_owned(), v.to_owned()))
+            .to_vec()
+    );
+    assert_eq!(notice(&page, vcx), None);
+}
+
+#[gpui::test]
+fn p_opens_the_picker_for_the_playing_song_and_the_setting_switches_it_off(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    vcx.simulate_keystrokes("p");
+    vcx.run_until_parked();
+    assert!(page.picker.read_with(vcx, |p, _| p.is_open()));
+    assert_eq!(
+        page.picker.read_with(vcx, |p, _| p.video().map(str::to_owned)),
+        Some(LIKED.to_owned()),
+        "the song that is playing"
+    );
+    vcx.simulate_keystrokes("escape");
+    assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
+
+    let settings = picker_settings(&page, vcx);
+    settings.update(vcx, |s, cx| s.set(&PICKER_KEY, false, cx));
+    vcx.simulate_keystrokes("p");
+    vcx.run_until_parked();
+    assert!(!page.picker.read_with(vcx, |p, _| p.is_open()), "P does nothing while it is off");
+}
+
+#[gpui::test]
+fn p_in_a_list_still_opens_it_for_the_cursor_row_and_follows_the_switch(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    open_liked_music(&page, vcx);
+    vcx.simulate_keystrokes("p");
+    vcx.run_until_parked();
+    assert!(page.picker.read_with(vcx, |p, _| p.is_open()));
+    vcx.simulate_keystrokes("escape");
+    let settings = picker_settings(&page, vcx);
+    settings.update(vcx, |s, cx| s.set(&PICKER_KEY, false, cx));
+    vcx.simulate_keystrokes("p");
+    vcx.run_until_parked();
+    assert!(!page.picker.read_with(vcx, |p, _| p.is_open()));
+}
+
 #[gpui::test]
 fn a_list_that_fails_to_load_says_so_and_retry_asks_again(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx);
@@ -865,6 +1106,24 @@ fn the_l_key_likes_the_queue_row_under_the_cursor(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("down down l");
     assert_eq!(liked(&page, vcx, PLAIN), Some(true));
     assert_eq!(log(&page), [entry("like", PLAIN)]);
+}
+
+#[gpui::test]
+fn the_p_key_opens_the_picker_for_the_queue_row_under_the_cursor(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (page, vcx) = setup(cx);
+    open_queue(&page, vcx);
+    let panel = page.shell.read_with(vcx, |s, _| s.queue_panel().clone());
+    vcx.update(|window, cx| {
+        let focus = gpui::Focusable::focus_handle(panel.read(cx), cx);
+        window.focus(&focus, cx);
+    });
+    vcx.simulate_keystrokes("down down p");
+    vcx.run_until_parked();
+    assert_eq!(
+        page.picker.read_with(vcx, |p, _| p.video().map(str::to_owned)),
+        Some(PLAIN.to_owned())
+    );
 }
 
 #[gpui::test]

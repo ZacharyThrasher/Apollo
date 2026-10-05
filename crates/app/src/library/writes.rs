@@ -30,6 +30,9 @@ use crate::player::PlayerModel;
 /// How long an error stays on screen.
 pub const NOTICE_FOR: Duration = Duration::from_secs(4);
 
+/// The pause between two adds of one batch (several songs into one playlist).
+pub const ADD_PACE: Duration = Duration::from_millis(400);
+
 /// What the screens learn from the writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WritesEvent {
@@ -498,6 +501,13 @@ impl LibraryWrites {
 
     // ---- add to a playlist ---------------------------------------------------------------
 
+    /// This session added the track to the playlist (see [`LibraryWrites::holds`], which also
+    /// trusts the service's own flag, true only for the track the list was asked about).
+    pub fn added_here(&self, playlist: &PlaylistTarget, video_id: &str) -> bool {
+        self.added
+            .contains(&(playlist.id.clone(), video_id.to_owned()))
+    }
+
     /// Add a track to a playlist: shown as held at once, taken back (with an error) if the
     /// service does not take it.
     pub fn add_to_playlist(
@@ -506,60 +516,75 @@ impl LibraryWrites {
         video_id: &str,
         cx: &mut Context<Self>,
     ) {
-        if self.holds(playlist, video_id) {
+        self.add_songs_to_playlist(playlist, &[video_id.to_owned()], cx);
+    }
+
+    /// Add several tracks to a playlist, in order (`playlist.holds_track` speaks for the first).
+    /// Each is shown as held at once and taken back
+    /// (with an error) if the service does not take it. The writes go out one after another, a
+    /// short pause apart, never all at once; a track the playlist already holds is skipped (the
+    /// service skips repeats too, but there is no reason to ask).
+    pub fn add_songs_to_playlist(
+        &mut self,
+        playlist: &PlaylistTarget,
+        video_ids: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let mut keys: Vec<(String, String)> = Vec::new();
+        for (n, video) in video_ids.iter().enumerate() {
+            let key = (playlist.id.clone(), video.clone());
+            // The service's own flag speaks for the first track only: the one the list was
+            // asked about.
+            let held = self.added.contains(&key) || (n == 0 && playlist.holds_track);
+            if !held && !keys.contains(&key) {
+                self.added.insert(key.clone());
+                keys.push(key);
+            }
+        }
+        if keys.is_empty() {
             return;
         }
-        let key = (playlist.id.clone(), video_id.to_owned());
-        self.added.insert(key.clone());
         // The playlist's page and the library list (its track count) are about to change.
         if let Some(cache) = PageCache::try_global(cx) {
             cache.invalidate_collection(&playlist.id);
         }
         cx.notify();
         let Some(source) = self.source(cx) else {
-            self.add_failed(&key, WriteFailure::Unsupported, cx);
+            for key in &keys {
+                self.add_failed(key, WriteFailure::Unsupported, cx);
+            }
             return;
         };
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let (playlist_id, video) = key.clone();
-            let result = {
-                let source = source.clone();
-                cx.background_executor()
-                    .spawn(async move { source.add_to_playlist(&playlist_id, &video) })
-                    .await
-            };
-            let result = match result {
-                Err(failure) if failure.outcome_unknown() => {
-                    // Read it back: the list says which playlists hold the track.
-                    let (playlist_id, video) = key.clone();
-                    let held = cx
-                        .background_executor()
-                        .spawn(async move {
-                            source.playlists_for(&video).ok().map(|list| {
-                                list.iter().any(|p| p.id == playlist_id && p.holds_track)
-                            })
-                        })
-                        .await;
-                    match held {
-                        Some(true) => Ok(()),
-                        _ => Err(failure),
-                    }
+            for (n, key) in keys.into_iter().enumerate() {
+                if n > 0 {
+                    cx.background_executor().timer(ADD_PACE).await;
                 }
-                other => other,
-            };
-            let _ = this.update(cx, |m, cx| {
-                if m.generation != generation {
+                let result = {
+                    let (source, key) = (source.clone(), key.clone());
+                    cx.background_executor()
+                        .spawn(async move { add_one(source.as_ref(), &key) })
+                        .await
+                };
+                let settled = this.update(cx, |m, cx| {
+                    if m.generation != generation {
+                        return false;
+                    }
+                    // Landed or not, a page fetched while the write was out may predate it.
+                    if let Some(cache) = PageCache::try_global(cx) {
+                        cache.invalidate_collection(&key.0);
+                    }
+                    if let Err(failure) = result {
+                        m.add_failed(&key, failure, cx);
+                    }
+                    true
+                });
+                // The account changed, or the model is gone: the rest would go to the wrong place.
+                if !matches!(settled, Ok(true)) {
                     return;
                 }
-                // Landed or not, a page fetched while the write was out may predate it.
-                if let Some(cache) = PageCache::try_global(cx) {
-                    cache.invalidate_collection(&key.0);
-                }
-                if let Err(failure) = result {
-                    m.add_failed(&key, failure, cx);
-                }
-            });
+            }
         })
         .detach();
     }
@@ -603,6 +628,26 @@ impl LibraryWrites {
         if self.notice.take().is_some() {
             cx.notify();
         }
+    }
+}
+
+/// One add, with the outcome settled when it is unknown: a reply that never came is not retried,
+/// the playlists list says whether the track is there.
+fn add_one(source: &dyn LibrarySource, key: &(String, String)) -> Result<(), WriteFailure> {
+    let (playlist_id, video) = key;
+    match source.add_to_playlist(playlist_id, video) {
+        Err(failure) if failure.outcome_unknown() => {
+            // Read it back: the list says which playlists hold the track.
+            let held = source
+                .playlists_for(video)
+                .ok()
+                .map(|list| list.iter().any(|p| &p.id == playlist_id && p.holds_track));
+            match held {
+                Some(true) => Ok(()),
+                _ => Err(failure),
+            }
+        }
+        other => other,
     }
 }
 

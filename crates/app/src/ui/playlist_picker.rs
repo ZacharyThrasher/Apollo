@@ -1,37 +1,58 @@
-//! The add-to-playlist picker: a small popover listing the account's playlists, anchored to the
-//! add-to-playlist action (or the selected row) that opened it. With no anchor it sits in the
-//! middle of the window. There is no scrim: the page behind stays as it is, and a click on it
-//! closes the popover.
+//! The add-to-playlist picker: a small popover for putting one song (or several) into your
+//! playlists, anchored to the action (or the selected row) that opened it. With no anchor it sits
+//! in the middle of the window. There is no scrim: the page behind stays as it is, and a click on
+//! it closes the popover.
 //!
-//! Choosing a playlist closes the panel at once; the add itself is optimistic and rolls back
-//! with an error if the service refuses (see `library::writes`). A playlist that already holds
-//! the track shows a check and does nothing. Keyboard: Up and Down move, Enter or Space adds,
-//! Escape closes; Tab stays inside. Clicking outside closes.
+//! The keyboard is the main way in. Focus lands in the filter box at the top; typing narrows the
+//! list (every word must be in the name). The playlists added to most recently sit on top, then a
+//! divider, then the rest in the order the service gave. When what you typed is not the name of
+//! any playlist, a last row offers to create it, with the song in it.
+//!
+//! * Up and Down move the cursor.
+//! * Space marks the playlist under the cursor (a check in the accent colour) while the filter is
+//!   empty, since a space is a letter once you are typing; Ctrl+Space marks at any time.
+//! * Enter adds to every marked playlist, or to the one under the cursor when none is marked, and
+//!   closes. On the Create row it creates. Ctrl+Enter creates the typed name from anywhere.
+//! * Escape closes. A click on a row adds to it at once.
+//! * Marks are add-only: a playlist that already holds the song shows its check and cannot be
+//!   marked or unmarked. Taking a song out is done on the playlist's own page.
+//!
+//! The add is optimistic and rolls back with an error if the service refuses (see
+//! `library::writes`). Settings > Playback can keep the picker open after an add, and switch the
+//! P key off. The playlists added to are remembered as a settings value (`RECENT_PLAYLISTS`).
+//!
+//! The picker takes a list of songs ([`PickerSong`]); several songs go into each chosen playlist
+//! one after another, a short pause apart, and a new playlist is made holding all of them in one
+//! write. `playlists_for` is asked about the first song only, so for several songs only that one's
+//! membership is known up front.
 
-use apollo_domain::library::PlaylistTarget;
+use apollo_domain::library::{
+    bare_playlist_id, clean_playlist_title, PlaylistTarget, MAX_PLAYLIST_TITLE,
+};
 use apollo_domain::listing::LoadFailure;
 use apollo_theme::tokens::{layout, radius, spacing, typography};
 use apollo_theme::Accent;
 use gpui::{
     actions, div, prelude::*, px, AnyElement, App, Bounds, Context, Entity, FocusHandle,
-    Focusable, IntoElement, KeyBinding, MouseButton, ParentElement, Pixels, Render, ScrollHandle,
-    SharedString, Styled, Window,
+    Focusable, Global, IntoElement, KeyBinding, MouseButton, ParentElement, Pixels, Render,
+    ScrollHandle, SharedString, Styled, Subscription, Window,
 };
 
 use crate::assets::Icon;
+use crate::library::edits::{Edit, EditEvent, LibraryEdits};
 use crate::library::model::Load;
 use crate::library::writes::LibraryWrites;
 use crate::player::PlayerModel;
+use crate::settings::{SettingsModel, PICKER_KEY, PICKER_STAY_OPEN, RECENT_PLAYLISTS};
 use crate::style::{self, color};
 use crate::ui::button::keyboard_focused;
-use crate::ui::playlist_dialog::{self, Mode};
 use crate::ui::skeleton;
 use crate::ui::text_button::TextButton;
-use crate::ui::tooltip::Tooltip;
+use crate::ui::text_field::{self, TextField, TextFieldEvent};
 
 actions!(
     apollo_picker,
-    [PickerUp, PickerDown, PickerChoose, PickerClose, PickerStay]
+    [PickerUp, PickerDown, PickerMark, PickerCreate, PickerClose, PickerStay]
 );
 
 /// Key context of the picker.
@@ -41,8 +62,10 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", PickerUp, Some(KEY_CONTEXT)),
         KeyBinding::new("down", PickerDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("enter", PickerChoose, Some(KEY_CONTEXT)),
-        KeyBinding::new("space", PickerChoose, Some(KEY_CONTEXT)),
+        // The filter box types its own spaces once it has text, and its own Escape.
+        KeyBinding::new("space", PickerMark, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-space", PickerMark, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-enter", PickerCreate, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", PickerClose, Some(KEY_CONTEXT)),
         // Focus stays in the panel while it is open.
         KeyBinding::new("tab", PickerStay, Some(KEY_CONTEXT)),
@@ -52,22 +75,231 @@ pub fn bind_keys(cx: &mut App) {
 
 pub const PANEL_WIDTH: f32 = 280.0;
 pub const PANEL_MAX_HEIGHT: f32 = 320.0;
-const ROW_HEIGHT: f32 = 40.0;
+/// Rows match the track menu's: 32px.
+const ROW_HEIGHT: f32 = layout::MIN_HIT_TARGET;
 /// The shortest the popover gets, however little room there is.
 const MIN_HEIGHT: f32 = 160.0;
 const SKELETON_ROWS: usize = 5;
 /// Gap between the anchor and the popover, and the least it keeps from the window's edge.
 const ANCHOR_GAP: f32 = spacing::S1;
 const EDGE_MARGIN: f32 = spacing::S2;
+/// How many recently used playlists are remembered.
+pub const RECENTS_MAX: usize = 8;
+/// The filter box takes no more than a playlist name can be.
+const FILTER_MAX: usize = MAX_PLAYLIST_TITLE;
+
+/// A song the picker is opened for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickerSong {
+    pub video_id: String,
+    pub title: SharedString,
+}
+
+impl PickerSong {
+    pub fn new(video_id: impl Into<String>, title: impl Into<SharedString>) -> Self {
+        Self {
+            video_id: video_id.into(),
+            title: title.into(),
+        }
+    }
+}
+
+// ---- what the list shows -----------------------------------------------------------------------
+
+/// One row of the list, from the top.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Row {
+    /// A playlist: its position in the loaded list.
+    Playlist(usize),
+    /// Make a playlist of this name.
+    Create(String),
+}
+
+/// Which playlists the list shows and in what order: recent ones, then the rest, then the Create
+/// row (when the typed name is not a playlist). The numbers are positions in the loaded list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Layout {
+    pub recent: Vec<usize>,
+    pub rest: Vec<usize>,
+    pub create: Option<String>,
+}
+
+impl Layout {
+    pub fn len(&self) -> usize {
+        self.recent.len() + self.rest.len() + usize::from(self.create.is_some())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The `n`th row from the top.
+    pub fn row(&self, n: usize) -> Option<Row> {
+        let playlists = self.recent.len() + self.rest.len();
+        if n < self.recent.len() {
+            Some(Row::Playlist(self.recent[n]))
+        } else if n < playlists {
+            Some(Row::Playlist(self.rest[n - self.recent.len()]))
+        } else if n == playlists {
+            self.create.clone().map(Row::Create)
+        } else {
+            None
+        }
+    }
+
+    /// Where the playlist at `list_ix` sits among the rows.
+    pub fn position_of(&self, list_ix: usize) -> Option<usize> {
+        self.recent
+            .iter()
+            .chain(self.rest.iter())
+            .position(|&i| i == list_ix)
+    }
+
+    /// A divider sits between the recent playlists and the rest.
+    fn divider_after_recent(&self) -> bool {
+        !self.recent.is_empty() && !self.rest.is_empty()
+    }
+
+    /// A divider sits above the Create row when something is above it.
+    fn divider_before_create(&self) -> bool {
+        self.create.is_some() && self.recent.len() + self.rest.len() > 0
+    }
+
+    /// The `n`th row's place among the list's children, dividers counted (for scrolling to it).
+    fn child_index(&self, n: usize) -> usize {
+        let mut child = n;
+        if self.divider_after_recent() && n >= self.recent.len() {
+            child += 1;
+        }
+        if self.divider_before_create() && n >= self.recent.len() + self.rest.len() {
+            child += 1;
+        }
+        child
+    }
+}
+
+/// Every word of `query` appears in `title`, in any case; an empty query keeps everything.
+fn matches(title: &str, words: &[String]) -> bool {
+    let title = title.to_lowercase();
+    words.iter().all(|w| title.contains(w.as_str()))
+}
+
+/// Lay the list out for what is typed. `recents` are bare playlist ids, newest first; ones the
+/// list does not hold are ignored.
+pub fn arrange(list: &[PlaylistTarget], recents: &[String], query: &str) -> Layout {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let recent_all: Vec<usize> = recents
+        .iter()
+        .filter_map(|id| list.iter().position(|t| &t.id == id))
+        .collect();
+    let keep = |ix: &usize| matches(&list[*ix].title, &words);
+    let recent: Vec<usize> = {
+        let mut seen = Vec::new();
+        recent_all
+            .iter()
+            .copied()
+            .filter(|ix| {
+                let fresh = !seen.contains(ix);
+                seen.push(*ix);
+                fresh
+            })
+            .filter(keep)
+            .collect()
+    };
+    let rest: Vec<usize> = (0..list.len())
+        .filter(|ix| !recent_all.contains(ix))
+        .filter(keep)
+        .collect();
+    let create = clean_playlist_title(query).filter(|name| {
+        let lower = name.to_lowercase();
+        !list.iter().any(|t| t.title.to_lowercase() == lower)
+    });
+    Layout {
+        recent,
+        rest,
+        create,
+    }
+}
+
+/// What Enter does.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Plan {
+    /// Playlists to add the songs to, as positions in the loaded list.
+    pub add: Vec<usize>,
+    /// A playlist to make, holding the songs.
+    pub create: Option<String>,
+}
+
+impl Plan {
+    pub fn is_empty(&self) -> bool {
+        self.add.is_empty() && self.create.is_none()
+    }
+}
+
+/// What Enter does with `marked` playlists (ids, in the order they were marked) and the cursor on
+/// row `cursor`: with marks, add to those (and create when the cursor is on the Create row);
+/// without, act on the row under the cursor. A playlist that already holds the songs is left out.
+pub fn plan(
+    layout: &Layout,
+    list: &[PlaylistTarget],
+    marked: &[String],
+    cursor: usize,
+    held: &dyn Fn(usize) -> bool,
+) -> Plan {
+    let on_cursor = layout.row(cursor);
+    if marked.is_empty() {
+        return match on_cursor {
+            Some(Row::Playlist(ix)) if !held(ix) => Plan {
+                add: vec![ix],
+                create: None,
+            },
+            Some(Row::Create(name)) => Plan {
+                add: Vec::new(),
+                create: Some(name),
+            },
+            _ => Plan::default(),
+        };
+    }
+    Plan {
+        add: marked
+            .iter()
+            .filter_map(|id| list.iter().position(|t| &t.id == id))
+            .filter(|&ix| !held(ix))
+            .collect(),
+        create: match on_cursor {
+            Some(Row::Create(name)) => Some(name),
+            _ => None,
+        },
+    }
+}
+
+/// Parse the stored recents: bare ids separated by commas.
+pub fn parse_recents(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Put `id` first (it was just used), keeping at most [`RECENTS_MAX`].
+pub fn push_recent(recents: &mut Vec<String>, id: &str) {
+    recents.retain(|r| r != id);
+    recents.insert(0, id.to_owned());
+    recents.truncate(RECENTS_MAX);
+}
+
+// ---- the picker ---------------------------------------------------------------------------------
 
 struct Open {
-    video_id: String,
-    /// The track being added, shown under the panel title.
-    title: SharedString,
+    songs: Vec<PickerSong>,
     playlists: Load<Vec<PlaylistTarget>>,
+    /// The row the keyboard is on, counted from the top of the list (Create row included).
     cursor: usize,
-    /// The cursor is on the fixed "New playlist\u{2026}" row above the list.
-    on_new: bool,
+    /// Ids of the playlists marked for Enter, in the order they were marked.
+    marked: Vec<String>,
+    /// Playlists made here, which hold every song.
+    created: Vec<String>,
     /// Answers for an older request (Retry, reopen) are dropped.
     request: u64,
     /// Where keyboard focus returns to when the panel closes.
@@ -79,29 +311,78 @@ struct Open {
 pub struct PlaylistPicker {
     player: Entity<PlayerModel>,
     writes: Entity<LibraryWrites>,
+    edits: Entity<LibraryEdits>,
+    settings: Entity<SettingsModel>,
     focus: FocusHandle,
     retry_focus: FocusHandle,
+    field: Entity<TextField>,
+    /// Listens to the filter box (Enter, typing); made on the first open, which has a window.
+    field_events: Option<Subscription>,
     scroll: ScrollHandle,
     open: Option<Open>,
     next_request: u64,
+    /// The name of a playlist this picker asked to be made, until it exists.
+    awaiting_create: Option<String>,
+}
+
+/// The shell's picker, reachable from any screen.
+#[derive(Clone)]
+pub struct PickerHandle(pub Entity<PlaylistPicker>);
+
+impl Global for PickerHandle {}
+
+/// Open the shell's picker for `songs`, next to the element that recorded `anchor` (see
+/// `ui::anchor`) or in the middle of the window. Does nothing where there is no shell.
+pub fn open_songs(
+    songs: Vec<PickerSong>,
+    anchor: Option<&str>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(handle) = cx.try_global::<PickerHandle>().map(|h| h.0.clone()) else {
+        return;
+    };
+    let bounds = anchor.and_then(|key| crate::ui::anchor::bounds_of(key, cx));
+    handle.update(cx, |p, cx| p.open_songs(songs, bounds, window, cx));
+}
+
+/// The P key is on (Settings > Playback), for the shell's picker.
+pub fn key_enabled(cx: &App) -> bool {
+    cx.try_global::<PickerHandle>()
+        .is_none_or(|h| h.0.read(cx).key_enabled(cx))
 }
 
 impl PlaylistPicker {
     pub fn new(
         player: Entity<PlayerModel>,
         writes: Entity<LibraryWrites>,
+        edits: Entity<LibraryEdits>,
+        settings: Entity<SettingsModel>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&edits, |m, _, event: &EditEvent, cx| m.edited(event, cx))
+            .detach();
+        let (field_focus, clear_focus) = (cx.focus_handle(), cx.focus_handle());
+        let field = cx.new(|_| {
+            TextField::new("Find or create a playlist", field_focus, clear_focus)
+                .plain(FILTER_MAX)
+                .space_to_owner_when_empty()
+        });
         Self {
             player,
             writes,
+            edits,
+            settings,
             focus: cx.focus_handle(),
             retry_focus: cx.focus_handle().tab_stop(true),
+            field,
+            field_events: None,
             scroll: ScrollHandle::new(),
             open: None,
             next_request: 1,
+            awaiting_create: None,
         }
     }
 
@@ -109,9 +390,17 @@ impl PlaylistPicker {
         self.open.is_some()
     }
 
-    /// The track the panel is open for.
+    /// The first song the panel is open for.
     pub fn video(&self) -> Option<&str> {
-        self.open.as_ref().map(|o| o.video_id.as_str())
+        self.open
+            .as_ref()
+            .and_then(|o| o.songs.first())
+            .map(|s| s.video_id.as_str())
+    }
+
+    /// Every song the panel is open for.
+    pub fn songs(&self) -> &[PickerSong] {
+        self.open.as_ref().map_or(&[], |o| o.songs.as_slice())
     }
 
     pub fn playlists(&self) -> Option<&Load<Vec<PlaylistTarget>>> {
@@ -123,13 +412,63 @@ impl PlaylistPicker {
         self.open.as_ref().and_then(|o| o.anchor)
     }
 
+    /// The row the keyboard is on, counted from the top of the list.
     pub fn cursor(&self) -> Option<usize> {
         self.open.as_ref().map(|o| o.cursor)
     }
 
-    /// The cursor is on the "New playlist\u{2026}" row.
-    pub fn on_new(&self) -> bool {
-        self.open.as_ref().is_some_and(|o| o.on_new)
+    /// The playlists marked for Enter (ids, in the order marked).
+    pub fn marked(&self) -> &[String] {
+        self.open.as_ref().map_or(&[], |o| o.marked.as_slice())
+    }
+
+    /// The filter box.
+    pub fn field(&self) -> &Entity<TextField> {
+        &self.field
+    }
+
+    /// The playlists the list is made of: the loaded ones, none when loading them failed (a new
+    /// playlist can still be made), nothing yet while they load.
+    fn list(&self) -> Option<&[PlaylistTarget]> {
+        match &self.open.as_ref()?.playlists {
+            Load::Ready(list) => Some(list.as_slice()),
+            Load::Failed(_) => Some(&[]),
+            Load::Idle | Load::Loading => None,
+        }
+    }
+
+    /// The rows the list shows now (none until the playlists are loaded).
+    pub fn layout(&self, cx: &App) -> Option<Layout> {
+        let list = self.list()?;
+        let recents = self.recent_ids(cx);
+        Some(arrange(list, &recents, self.field.read(cx).text()))
+    }
+
+    /// The P key is on (Settings > Playback).
+    pub fn key_enabled(&self, cx: &App) -> bool {
+        self.settings.read(cx).get(&PICKER_KEY)
+    }
+
+    fn stay_open(&self, cx: &App) -> bool {
+        self.settings.read(cx).get(&PICKER_STAY_OPEN)
+    }
+
+    /// The recently used playlists' ids, newest first.
+    pub fn recent_ids(&self, cx: &App) -> Vec<String> {
+        parse_recents(&self.settings.read(cx).get_text(&RECENT_PLAYLISTS))
+    }
+
+    fn remember(&self, ids: &[String], cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut recents = self.recent_ids(cx);
+        for id in ids {
+            push_recent(&mut recents, id);
+        }
+        let text = recents.join(",");
+        self.settings
+            .update(cx, |s, cx| s.set_text(&RECENT_PLAYLISTS, &text, cx));
     }
 
     /// Open the panel for a track in the middle of the window. Focus moves into it and comes
@@ -167,22 +506,51 @@ impl PlaylistPicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_songs(vec![PickerSong::new(video_id, title)], anchor, window, cx);
+    }
+
+    /// Open the panel for one or more songs (none does nothing).
+    pub fn open_songs(
+        &mut self,
+        songs: Vec<PickerSong>,
+        anchor: Option<Bounds<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if songs.is_empty() {
+            return;
+        }
         let return_focus = self
             .open
             .as_ref()
             .and_then(|o| o.return_focus.clone())
-            .or_else(|| window.focused(cx));
+            .or_else(|| window.focused(cx))
+            // Focus that sits in the panel itself is not a place to come back to.
+            .filter(|handle| !self.focus.contains(handle, window));
+        if self.field_events.is_none() {
+            let field = self.field.clone();
+            self.field_events = Some(cx.subscribe_in(
+                &field,
+                window,
+                |m, _, event: &TextFieldEvent, window, cx| match event {
+                    TextFieldEvent::Submit => m.commit(window, cx),
+                    TextFieldEvent::Changed => m.typed(cx),
+                },
+            ));
+        }
         self.open = Some(Open {
-            video_id: video_id.to_owned(),
-            title: title.into(),
+            songs,
             playlists: Load::Loading,
             cursor: 0,
-            on_new: false,
+            marked: Vec::new(),
+            created: Vec::new(),
             request: 0,
             return_focus,
             anchor,
         });
-        window.focus(&self.focus, cx);
+        self.field.update(cx, |f, cx| f.set_text("", cx));
+        text_field::focus(&self.field, window, cx);
+        self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         self.load(cx);
         cx.notify();
     }
@@ -218,7 +586,8 @@ impl PlaylistPicker {
         };
         open.request = request;
         open.playlists = Load::Loading;
-        let video = open.video_id.clone();
+        // The service says which playlists hold one song: the first.
+        let video = open.songs[0].video_id.clone();
         let source = self.player.read(cx).library_source();
         cx.spawn(async move |this, cx| {
             let result = match source {
@@ -244,8 +613,6 @@ impl PlaylistPicker {
         let Some(open) = self.open.as_mut().filter(|o| o.request == request) else {
             return;
         };
-        // With no playlist to land on, the cursor rests on the way to make one.
-        open.on_new = !matches!(&result, Ok(list) if !list.is_empty());
         open.playlists = match result {
             Ok(list) => Load::Ready(list),
             Err(failure) => Load::Failed(failure),
@@ -254,89 +621,246 @@ impl PlaylistPicker {
         cx.notify();
     }
 
+    /// The filter changed: the cursor goes back to the first row.
+    fn typed(&mut self, cx: &mut Context<Self>) {
+        if let Some(open) = self.open.as_mut() {
+            open.cursor = 0;
+            self.scroll.scroll_to_item(0);
+        }
+        cx.notify();
+    }
+
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(len) = self.layout(cx).map(|l| l.len()) else {
+            return;
+        };
         let Some(open) = self.open.as_mut() else {
             return;
         };
-        let len = match &open.playlists {
-            Load::Ready(list) => list.len(),
-            _ => 0,
-        };
-        if open.on_new {
-            // Down leaves the New playlist row for the first playlist, if there is one.
-            if delta > 0 && len > 0 {
-                open.on_new = false;
-                open.cursor = 0;
-                self.scroll.scroll_to_item(0);
-                cx.notify();
-            }
-            return;
-        }
-        if delta < 0 && (len == 0 || open.cursor == 0) {
-            open.on_new = true;
-            cx.notify();
-            return;
-        }
         if len == 0 {
             return;
         }
         open.cursor = (open.cursor as isize + delta).clamp(0, len as isize - 1) as usize;
-        self.scroll.scroll_to_item(open.cursor);
+        let cursor = open.cursor;
+        if let Some(layout) = self.layout(cx) {
+            self.scroll.scroll_to_item(layout.child_index(cursor));
+        }
         cx.notify();
     }
 
-    /// Close the picker and ask for a name for a new playlist that will hold the song.
-    pub fn new_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(video) = self.open.as_ref().map(|o| o.video_id.clone()) else {
+    /// Whether the playlist at `list_ix` already holds every song (for several songs, only what
+    /// was added here is known beyond the first).
+    pub fn holds_all(&self, list_ix: usize, cx: &App) -> bool {
+        let Some(open) = self.open.as_ref() else {
+            return false;
+        };
+        let Load::Ready(list) = &open.playlists else {
+            return false;
+        };
+        let Some(target) = list.get(list_ix) else {
+            return false;
+        };
+        if open.created.contains(&target.id) {
+            return true;
+        }
+        let writes = self.writes.read(cx);
+        open.songs.iter().enumerate().all(|(n, song)| {
+            if n == 0 {
+                writes.holds(target, &song.video_id)
+            } else {
+                writes.added_here(target, &song.video_id)
+            }
+        })
+    }
+
+    /// Space: mark the playlist under the cursor for Enter, or take its mark back. A playlist
+    /// that already holds the songs, and the Create row, take no mark.
+    pub fn mark_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(layout) = self.layout(cx) else {
             return;
         };
-        self.close(window, cx);
-        playlist_dialog::open(
-            Mode::Create {
-                add_video: Some(video),
+        let Some(cursor) = self.open.as_ref().map(|o| o.cursor) else {
+            return;
+        };
+        let Some(Row::Playlist(ix)) = layout.row(cursor) else {
+            return;
+        };
+        if self.holds_all(ix, cx) {
+            return;
+        }
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let Load::Ready(list) = &open.playlists else {
+            return;
+        };
+        let id = list[ix].id.clone();
+        if let Some(at) = open.marked.iter().position(|m| m == &id) {
+            open.marked.remove(at);
+        } else {
+            open.marked.push(id);
+        }
+        cx.notify();
+    }
+
+    /// What Enter would do now.
+    pub fn plan(&self, cx: &App) -> Plan {
+        let (Some(layout), Some(list), Some(open)) =
+            (self.layout(cx), self.list(), self.open.as_ref())
+        else {
+            return Plan::default();
+        };
+        plan(&layout, list, &open.marked, open.cursor, &|ix| {
+            self.holds_all(ix, cx)
+        })
+    }
+
+    /// Enter: add to the marked playlists, or the one under the cursor, or create; then close
+    /// (or stay, with Keep picker open after adding). Nothing to do leaves the panel as it is.
+    pub fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let plan = self.plan(cx);
+        self.run(plan, window, cx);
+    }
+
+    /// Ctrl+Enter: create the typed name, whatever row the cursor is on.
+    pub fn create_typed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let create = self.layout(cx).and_then(|l| l.create);
+        if create.is_some() {
+            self.run(
+                Plan {
+                    add: Vec::new(),
+                    create,
+                },
+                window,
+                cx,
+            );
+        }
+    }
+
+    /// Add the songs to the playlist at `index` of the loaded list at once (a click on its row).
+    /// A playlist that already holds them does nothing.
+    pub fn choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.holds_all(index, cx) {
+            return;
+        }
+        self.run(
+            Plan {
+                add: vec![index],
+                create: None,
             },
             window,
             cx,
         );
     }
 
-    /// Add the track to the playlist at `index` and close. A playlist that already holds it
-    /// does nothing.
-    pub fn choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.on_new() {
-            self.new_playlist(window, cx);
+    /// Make a playlist named `name` holding the songs (a click on the Create row).
+    pub fn create(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.run(
+            Plan {
+                add: Vec::new(),
+                create: Some(name),
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn run(&mut self, plan: Plan, window: &mut Window, cx: &mut Context<Self>) {
+        if plan.is_empty() {
             return;
         }
-        let Some(open) = self.open.as_ref() else {
+        let (Some(list), Some(open)) = (self.list(), self.open.as_ref()) else {
             return;
         };
-        let Load::Ready(list) = &open.playlists else {
-            return;
-        };
-        let Some(target) = list.get(index).cloned() else {
-            return;
-        };
-        let video = open.video_id.clone();
-        if self.writes.read(cx).holds(&target, &video) {
-            return;
+        let videos: Vec<String> = open.songs.iter().map(|s| s.video_id.clone()).collect();
+        let targets: Vec<PlaylistTarget> =
+            plan.add.iter().filter_map(|&ix| list.get(ix).cloned()).collect();
+        for target in &targets {
+            self.writes
+                .update(cx, |w, cx| w.add_songs_to_playlist(target, &videos, cx));
         }
-        self.writes
-            .update(cx, |w, cx| w.add_to_playlist(&target, &video, cx));
-        self.close(window, cx);
+        let ids: Vec<String> = targets.iter().map(|t| t.id.clone()).collect();
+        self.remember(&ids, cx);
+        if let Some(name) = plan.create {
+            self.awaiting_create = Some(name.clone());
+            self.edits
+                .update(cx, |e, cx| e.create_holding(name, videos, Edit::Create, cx));
+        }
+        if self.stay_open(cx) {
+            // Ready for the next playlist: marks and filter cleared, the checks stay.
+            if let Some(open) = self.open.as_mut() {
+                open.marked.clear();
+                open.cursor = 0;
+            }
+            self.field.update(cx, |f, cx| f.set_text("", cx));
+            text_field::focus(&self.field, window, cx);
+            cx.notify();
+        } else {
+            self.close(window, cx);
+        }
+    }
+
+    /// A playlist this picker asked for now exists: it is on top of the recents, and in the list
+    /// if the panel is still open.
+    fn edited(&mut self, event: &EditEvent, cx: &mut Context<Self>) {
+        match event {
+            EditEvent::Created(collection)
+                if self.awaiting_create.as_deref() == Some(collection.title.as_str()) =>
+            {
+                self.awaiting_create = None;
+                let id = bare_playlist_id(collection.id.as_str()).to_owned();
+                self.remember(std::slice::from_ref(&id), cx);
+                if let Some(open) = self.open.as_mut() {
+                    if let Load::Ready(list) = &mut open.playlists {
+                        list.insert(
+                            0,
+                            PlaylistTarget {
+                                id: id.clone(),
+                                title: collection.title.clone(),
+                                thumbnail: None,
+                                holds_track: true,
+                            },
+                        );
+                        open.created.push(id);
+                    }
+                }
+                cx.notify();
+            }
+            EditEvent::Failed(Edit::Create) => self.awaiting_create = None,
+            _ => {}
+        }
     }
 }
 
 impl Focusable for PlaylistPicker {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        // Keyboard focus sits in the filter box.
+        self.field.read(cx).focus_handle(cx)
     }
 }
 
 /// What the panel says when the list could not be loaded.
 pub const LOAD_FAILED: &str = "Couldn't load playlists";
 pub const NO_PLAYLISTS: &str = "No playlists yet";
-/// The fixed first row.
-pub const NEW_PLAYLIST: &str = "New playlist\u{2026}";
+/// What the panel says when the filter leaves nothing and no name can be made of it.
+pub const NO_MATCHES: &str = "No matches";
+
+/// The Create row's label for a typed name.
+pub fn create_label(name: &str) -> String {
+    format!("Create \u{201C}{name}\u{201D}")
+}
+
+/// What one playlist row shows. A later "target playlist" star is one more field here and one
+/// more element in [`playlist_row`].
+struct RowView {
+    ix: usize,
+    title: SharedString,
+    /// Already in the playlist: a dim check, nothing to do.
+    held: bool,
+    /// Marked for Enter: a check in the accent colour.
+    marked: bool,
+    cursor: bool,
+}
 
 impl Render for PlaylistPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -344,13 +868,13 @@ impl Render for PlaylistPicker {
             return div().into_any_element();
         };
         let (accent, _) = self.player.read(cx).accent_now();
-        let ring = keyboard_focused(&self.focus, window);
+        let ring = keyboard_focused(&self.field.read(cx).focus_handle(cx), window);
 
         let body: AnyElement = match &open.playlists {
             Load::Idle | Load::Loading => skeleton_rows(!cx.reduce_motion()),
             Load::Failed(_) => {
                 let entity = cx.entity();
-                message(
+                let failed = message(
                     LOAD_FAILED,
                     Some(
                         TextButton::new("picker-retry", &self.retry_focus, "Retry", accent)
@@ -358,36 +882,78 @@ impl Render for PlaylistPicker {
                             .on_click(move |_, cx| entity.update(cx, |m, cx| m.load(cx))),
                     ),
                     cx,
-                )
-            }
-            Load::Ready(list) if list.is_empty() => message(NO_PLAYLISTS, None, cx),
-            Load::Ready(list) => {
-                let held: Vec<bool> = {
-                    let writes = self.writes.read(cx);
-                    list.iter()
-                        .map(|t| writes.holds(t, &open.video_id))
-                        .collect()
-                };
-                let rows: Vec<AnyElement> = list
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, target)| {
-                        let cursor = !open.on_new && ix == open.cursor;
-                        playlist_row(ix, target, held[ix], cursor, ring, accent, cx)
-                    })
-                    .collect();
+                );
+                // A new playlist can still be made from what is typed.
+                let create = self.layout(cx).and_then(|rows| rows.create).map(|name| {
+                    create_row(name, open.cursor == 0, cx)
+                });
                 div()
-                    .id("picker-list")
-                    .role(gpui::Role::ListBox)
                     .flex()
                     .flex_col()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .children(rows)
+                    .child(failed)
+                    .children(create)
                     .into_any_element()
             }
+            Load::Ready(list) => {
+                let rows = self.layout(cx).unwrap_or_default();
+                if list.is_empty() && rows.is_empty() {
+                    message(NO_PLAYLISTS, None, cx)
+                } else if rows.is_empty() {
+                    message(NO_MATCHES, None, cx)
+                } else {
+                    let mut children: Vec<AnyElement> = Vec::new();
+                    for n in 0..rows.len() {
+                        let cursor = n == open.cursor;
+                        match rows.row(n) {
+                            Some(Row::Playlist(ix)) => {
+                                if n == rows.recent.len() && rows.divider_after_recent() {
+                                    children.push(divider());
+                                }
+                                let target = &list[ix];
+                                children.push(playlist_row(
+                                    RowView {
+                                        ix,
+                                        title: target.title.clone().into(),
+                                        held: self.holds_all(ix, cx),
+                                        marked: open.marked.contains(&target.id),
+                                        cursor,
+                                    },
+                                    accent,
+                                    cx,
+                                ));
+                            }
+                            Some(Row::Create(name)) => {
+                                if rows.divider_before_create() {
+                                    children.push(divider());
+                                }
+                                children.push(create_row(name, cursor, cx));
+                            }
+                            None => {}
+                        }
+                    }
+                    div()
+                        .id("picker-list")
+                        .role(gpui::Role::ListBox)
+                        .flex()
+                        .flex_col()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .children(children)
+                        .into_any_element()
+                }
+            }
         };
+
+        let caption = (open.songs.len() > 1).then(|| {
+            style::text_style(div(), typography::CAPTION, cx)
+                .debug_selector(|| "picker-caption".into())
+                .flex_none()
+                .px(px(spacing::S3))
+                .pb(px(spacing::S1))
+                .text_color(color::text_secondary())
+                .child(format!("{} songs", open.songs.len()))
+        });
 
         let panel = div()
             .id("playlist-picker")
@@ -401,7 +967,7 @@ impl Render for PlaylistPicker {
             .w(px(PANEL_WIDTH))
             .max_w_full()
             .max_h(px(PANEL_MAX_HEIGHT))
-            .p(px(spacing::S2))
+            .p(px(spacing::S1))
             .rounded(px(radius::MEDIUM))
             .bg(color::bg_overlay())
             .border_1()
@@ -410,40 +976,22 @@ impl Render for PlaylistPicker {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_action(cx.listener(|m, _: &PickerUp, _, cx| m.move_cursor(-1, cx)))
             .on_action(cx.listener(|m, _: &PickerDown, _, cx| m.move_cursor(1, cx)))
-            .on_action(cx.listener(|m, _: &PickerChoose, window, cx| {
-                let at = m.open.as_ref().map(|o| o.cursor);
-                if let Some(ix) = at {
-                    m.choose(ix, window, cx);
-                }
-            }))
+            .on_action(cx.listener(|m, _: &PickerMark, _, cx| m.mark_cursor(cx)))
+            .on_action(cx.listener(|m, _: &PickerCreate, window, cx| m.create_typed(window, cx)))
             .on_action(cx.listener(|m, _: &PickerClose, window, cx| m.close(window, cx)))
+            // The plain filter box passes Escape on to here.
+            .on_action(cx.listener(|m, _: &text_field::Escape, window, cx| m.close(window, cx)))
             .on_action(cx.listener(|_, _: &PickerStay, _, _| {}))
+            .children(caption)
             .child(
                 div()
-                    .flex()
-                    .flex_col()
+                    .debug_selector(|| "picker-filter".into())
+                    .relative()
                     .flex_none()
-                    .px(px(spacing::S2))
-                    .pt(px(spacing::S2))
-                    .pb(px(spacing::S3))
-                    .child(
-                        style::text_style(div(), typography::SECTION, cx)
-                            .text_color(color::text_primary())
-                            .child("Add to playlist"),
-                    )
-                    .child(
-                        style::text_style(div(), typography::BODY, cx)
-                            .id("picker-track")
-                            .truncate()
-                            .text_color(color::text_secondary())
-                            .tooltip({
-                                let full = open.title.clone();
-                                move |_, cx| Tooltip::view(full.clone(), cx)
-                            })
-                            .child(open.title.clone()),
-                    ),
+                    .mb(px(spacing::S1))
+                    .child(self.field.clone())
+                    .when(ring, |d| d.child(focus_ring_inset(accent, radius::SMALL))),
             )
-            .child(new_row(open.on_new, ring, accent, cx))
             .child(body);
 
         // A transparent layer under the popover catches the click that closes it (no scrim);
@@ -524,17 +1072,28 @@ pub fn popover_position(anchor: Bounds<Pixels>, window: gpui::Size<Pixels>) -> P
     }
 }
 
+fn divider() -> AnyElement {
+    div()
+        .flex_none()
+        .h(px(1.0))
+        .my(px(spacing::S1))
+        .bg(color::border_subtle())
+        .into_any_element()
+}
+
 fn playlist_row(
-    ix: usize,
-    target: &PlaylistTarget,
-    holds: bool,
-    cursor: bool,
-    ring: bool,
+    view: RowView,
     accent: Accent,
     cx: &mut Context<PlaylistPicker>,
 ) -> AnyElement {
-    let title: SharedString = target.title.clone().into();
-    let title_color = if holds {
+    let RowView {
+        ix,
+        title,
+        held,
+        marked,
+        cursor,
+    } = view;
+    let title_color = if held {
         color::text_secondary()
     } else {
         color::text_primary()
@@ -550,11 +1109,11 @@ fn playlist_row(
         .gap(px(spacing::S3))
         .h(px(ROW_HEIGHT))
         .px(px(spacing::S3))
-        .rounded(px(radius::MEDIUM))
+        .rounded(px(radius::SMALL))
         .role(gpui::Role::ListBoxOption)
         .aria_label(title.clone())
         .aria_selected(cursor)
-        .when(!holds, |d| d.cursor_pointer())
+        .when(!held, |d| d.cursor_pointer())
         .bg(if cursor {
             color::state_selected()
         } else {
@@ -562,10 +1121,6 @@ fn playlist_row(
         })
         .hover(|s| s.bg(color::state_hover()))
         .on_click(cx.listener(move |m, _: &gpui::ClickEvent, window, cx| {
-            if let Some(open) = m.open.as_mut() {
-                open.cursor = ix;
-                open.on_new = false;
-            }
             m.choose(ix, window, cx);
         }))
         .child(
@@ -575,35 +1130,30 @@ fn playlist_row(
                 .min_w_0()
                 .truncate()
                 .text_color(title_color)
-                .tooltip({
-                    let full = title.clone();
-                    move |_, cx| Tooltip::view(full.clone(), cx)
-                })
                 .child(title),
         )
-        .when(holds, |d| {
+        .when(held || marked, |d| {
             d.child(
                 gpui::svg()
                     .path(Icon::Checkmark.path())
                     .size(px(layout::ICON_SIZE))
                     .flex_none()
-                    .text_color(color::text_secondary()),
+                    .text_color(if marked {
+                        color::accent(accent)
+                    } else {
+                        color::text_secondary()
+                    }),
             )
         })
-        .when(cursor && ring, |d| d.child(focus_ring_inset(accent)))
         .into_any_element()
 }
 
-/// The fixed first row: a way to make a playlist for the song.
-fn new_row(
-    cursor: bool,
-    ring: bool,
-    accent: Accent,
-    cx: &mut Context<PlaylistPicker>,
-) -> AnyElement {
+/// The last row: make a playlist of what was typed, with the songs in it.
+fn create_row(name: String, cursor: bool, cx: &mut Context<PlaylistPicker>) -> AnyElement {
+    let label = create_label(&name);
     div()
-        .id("picker-new")
-        .debug_selector(|| "picker-new".into())
+        .id("picker-create")
+        .debug_selector(|| "picker-create".into())
         .relative()
         .flex()
         .flex_row()
@@ -612,17 +1162,19 @@ fn new_row(
         .gap(px(spacing::S3))
         .h(px(ROW_HEIGHT))
         .px(px(spacing::S3))
-        .rounded(px(radius::MEDIUM))
+        .rounded(px(radius::SMALL))
         .cursor_pointer()
         .role(gpui::Role::Button)
-        .aria_label(NEW_PLAYLIST)
+        .aria_label(label.clone())
         .bg(if cursor {
             color::state_selected()
         } else {
             gpui::transparent_black()
         })
         .hover(|s| s.bg(color::state_hover()))
-        .on_click(cx.listener(|m, _: &gpui::ClickEvent, window, cx| m.new_playlist(window, cx)))
+        .on_click(cx.listener(move |m, _: &gpui::ClickEvent, window, cx| {
+            m.create(name.clone(), window, cx)
+        }))
         .child(
             gpui::svg()
                 .path(Icon::Add.path())
@@ -636,18 +1188,17 @@ fn new_row(
                 .min_w_0()
                 .truncate()
                 .text_color(color::text_primary())
-                .child(NEW_PLAYLIST),
+                .child(label),
         )
-        .when(cursor && ring, |d| d.child(focus_ring_inset(accent)))
         .into_any_element()
 }
 
-/// The keyboard cursor's ring, drawn inside the row so neighbours do not clip it.
-fn focus_ring_inset(accent: Accent) -> impl IntoElement {
+/// The filter box's focus ring, drawn inside it.
+fn focus_ring_inset(accent: Accent, corner: f32) -> impl IntoElement {
     div()
         .absolute()
         .size_full()
-        .rounded(px(radius::MEDIUM))
+        .rounded(px(corner))
         .border(px(layout::FOCUS_RING_WIDTH))
         .border_color(color::accent(accent))
 }
@@ -694,6 +1245,141 @@ fn message(text: &'static str, action: Option<TextButton>, cx: &App) -> AnyEleme
 mod tests {
     use super::*;
     use gpui::{point, size};
+
+    fn target(id: &str, title: &str, holds: bool) -> PlaylistTarget {
+        PlaylistTarget {
+            id: id.into(),
+            title: title.into(),
+            thumbnail: None,
+            holds_track: holds,
+        }
+    }
+
+    fn sample() -> Vec<PlaylistTarget> {
+        vec![
+            target("PLa", "Road Trip", false),
+            target("PLb", "Gym Mix", false),
+            target("PLc", "Focus", false),
+            target("PLd", "Late Night Gym", false),
+        ]
+    }
+
+    fn strings(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn with_no_recents_and_no_query_every_playlist_is_listed_in_the_services_order() {
+        let at = arrange(&sample(), &[], "");
+        assert_eq!(at.recent, Vec::<usize>::new());
+        assert_eq!(at.rest, vec![0, 1, 2, 3]);
+        assert_eq!(at.create, None);
+        assert_eq!(at.len(), 4);
+    }
+
+    #[test]
+    fn recents_come_first_newest_first_and_leave_the_rest_in_place() {
+        let at = arrange(&sample(), &strings(&["PLc", "PLa", "PLgone"]), "");
+        assert_eq!(at.recent, vec![2, 0], "an id the list lacks is ignored");
+        assert_eq!(at.rest, vec![1, 3]);
+        assert_eq!(at.row(0), Some(Row::Playlist(2)));
+        assert_eq!(at.row(2), Some(Row::Playlist(1)));
+        assert_eq!(at.row(4), None);
+    }
+
+    #[test]
+    fn typing_keeps_playlists_with_every_word_in_any_case_in_both_groups() {
+        let at = arrange(&sample(), &strings(&["PLd", "PLc"]), "  gYM ");
+        assert_eq!(at.recent, vec![3]);
+        assert_eq!(at.rest, vec![1]);
+        let at = arrange(&sample(), &[], "night gym");
+        assert_eq!(at.rest, vec![3]);
+    }
+
+    #[test]
+    fn a_typed_name_that_is_no_playlist_offers_to_create_it_last() {
+        let at = arrange(&sample(), &[], "  Gym   Rats ");
+        assert_eq!(at.rest, Vec::<usize>::new());
+        assert_eq!(at.create.as_deref(), Some("Gym Rats"), "cleaned like any playlist name");
+        assert_eq!(at.row(0), Some(Row::Create("Gym Rats".into())));
+        let at = arrange(&sample(), &[], "gym");
+        assert_eq!(at.rest, vec![1, 3]);
+        assert_eq!(at.row(2), Some(Row::Create("gym".into())), "after the matches");
+    }
+
+    #[test]
+    fn a_name_that_is_a_playlist_already_does_not_offer_to_create_it() {
+        let at = arrange(&sample(), &[], "gym mix");
+        assert_eq!(at.create, None);
+        assert_eq!(at.rest, vec![1]);
+        assert_eq!(arrange(&sample(), &[], "   ").create, None, "nothing typed, nothing to make");
+    }
+
+    #[test]
+    fn dividers_sit_between_the_groups_and_scrolling_counts_them() {
+        let at = arrange(&sample(), &strings(&["PLa"]), "");
+        assert!(at.divider_after_recent());
+        assert_eq!(at.child_index(0), 0);
+        assert_eq!(at.child_index(1), 2, "the divider is child 1");
+        let at = arrange(&sample(), &strings(&["PLa"]), "zzz");
+        assert!(!at.divider_after_recent() && !at.divider_before_create());
+        assert_eq!(at.child_index(0), 0);
+        let at = arrange(&sample(), &strings(&["PLa"]), "road");
+        assert!(at.divider_before_create());
+        assert_eq!(at.child_index(1), 2);
+    }
+
+    #[test]
+    fn enter_adds_the_row_under_the_cursor_when_nothing_is_marked() {
+        let list = sample();
+        let at = arrange(&list, &[], "");
+        let none = |_: usize| false;
+        assert_eq!(plan(&at, &list, &[], 2, &none), Plan { add: vec![2], create: None });
+        assert!(plan(&at, &list, &[], 2, &|ix| ix == 2).is_empty(), "already held");
+        assert!(plan(&at, &list, &[], 9, &none).is_empty(), "no such row");
+    }
+
+    #[test]
+    fn enter_on_the_create_row_creates_the_typed_name() {
+        let list = sample();
+        let at = arrange(&list, &[], "Brand New");
+        let p = plan(&at, &list, &[], 0, &|_| false);
+        assert_eq!(p, Plan { add: vec![], create: Some("Brand New".into()) });
+    }
+
+    #[test]
+    fn enter_adds_to_the_marked_playlists_in_the_order_marked_and_ignores_the_cursor_row() {
+        let list = sample();
+        let at = arrange(&list, &[], "");
+        let marked = strings(&["PLd", "PLb"]);
+        let p = plan(&at, &list, &marked, 0, &|_| false);
+        assert_eq!(p, Plan { add: vec![3, 1], create: None });
+        let p = plan(&at, &list, &marked, 0, &|ix| ix == 3);
+        assert_eq!(p.add, vec![1], "a playlist that holds the songs is not added to again");
+        // Marks and the Create row together do both.
+        let at = arrange(&list, &[], "Fresh");
+        let p = plan(&at, &list, &marked, 0, &|_| false);
+        assert_eq!(p, Plan { add: vec![3, 1], create: Some("Fresh".into()) });
+    }
+
+    #[test]
+    fn recents_are_parsed_and_kept_short_with_the_newest_first() {
+        assert_eq!(parse_recents(" PLa,,PLb , "), strings(&["PLa", "PLb"]));
+        assert!(parse_recents("").is_empty());
+        let mut r = strings(&["PLa", "PLb", "PLc"]);
+        push_recent(&mut r, "PLb");
+        assert_eq!(r, strings(&["PLb", "PLa", "PLc"]));
+        for n in 0..20 {
+            push_recent(&mut r, &format!("PLx{n}"));
+        }
+        assert_eq!(r.len(), RECENTS_MAX);
+        assert_eq!(r[0], "PLx19");
+    }
+
+    #[test]
+    fn the_create_row_names_what_will_be_made() {
+        assert_eq!(create_label("gym"), "Create \u{201C}gym\u{201D}");
+    }
 
     fn anchor(x: f32, y: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(x), px(y)), size(px(32.0), px(32.0)))

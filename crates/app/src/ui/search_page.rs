@@ -589,6 +589,9 @@ impl SearchPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.picker.read(cx).key_enabled(cx) {
+            return;
+        }
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
             let at = playlist_anchor(self.selected.unwrap_or_default());
             self.picker.update(cx, |p, cx| {

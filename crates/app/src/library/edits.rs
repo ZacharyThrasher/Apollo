@@ -738,6 +738,18 @@ impl LibraryEdits {
         video_ids: Vec<String>,
         cx: &mut Context<Self>,
     ) {
+        self.create_holding(title, video_ids, Edit::SaveQueue, cx);
+    }
+
+    /// The same write for a playlist made from the add-to-playlist picker (a typed name and the
+    /// songs the picker was opened for): `kind` only changes what a failure says.
+    pub fn create_holding(
+        &mut self,
+        title: String,
+        video_ids: Vec<String>,
+        kind: Edit,
+        cx: &mut Context<Self>,
+    ) {
         let known = self.membership.playlists.clone();
         let asked = title.clone();
         self.run(
@@ -762,7 +774,7 @@ impl LibraryEdits {
                     }
                     cx.emit(EditEvent::Created(collection));
                 }
-                Err(failure) => m.fail(Edit::SaveQueue, failure, cx),
+                Err(failure) => m.fail(kind, failure, cx),
             },
         );
     }

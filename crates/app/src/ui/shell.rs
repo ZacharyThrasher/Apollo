@@ -16,7 +16,7 @@ use crate::crate_list::{CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
-    CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward, ToggleFullscreen, ToggleLyrics,
+    AddCurrentToPlaylist, CrateCurrent, LikeCurrent, RedoQueue, SeekBack, SeekForward, ToggleFullscreen, ToggleLyrics,
     ToggleMute, UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
 };
@@ -47,7 +47,7 @@ use crate::ui::playback_page::PlaybackPage;
 use crate::ui::player_bar::{BarFocus, PlayerBar};
 use crate::ui::blocked_dialog::{self, BlockedDialog, BlockedDialogHandle};
 use crate::ui::playlist_dialog::{self, DialogHandle, PlaylistDialog};
-use crate::ui::playlist_picker::{self, PlaylistPicker};
+use crate::ui::playlist_picker::{self, PickerHandle, PickerSong, PlaylistPicker};
 use crate::ui::queue_panel::QueuePanel;
 use crate::ui::related_pane::RelatedPane;
 use crate::ui::search_page::{self, SearchPage};
@@ -267,7 +267,10 @@ impl Shell {
         let weak = cx.weak_entity();
         let writes = cx.new(|cx| LibraryWrites::new(player.clone(), cx));
         let edits = cx.new(|_| LibraryEdits::new(player.clone(), writes.clone()));
-        let picker = cx.new(|cx| PlaylistPicker::new(player.clone(), writes.clone(), cx));
+        let picker = cx.new(|cx| {
+            PlaylistPicker::new(player.clone(), writes.clone(), edits.clone(), settings.clone(), cx)
+        });
+        cx.set_global(PickerHandle(picker.clone()));
         let dialog = cx.new(|cx| PlaylistDialog::new(player.clone(), edits.clone(), cx));
         cx.observe(&dialog, |_, _, cx| cx.notify()).detach();
         cx.set_global(DialogHandle(dialog.clone()));
@@ -1031,6 +1034,31 @@ impl Shell {
         }
     }
 
+    /// The P key: the playlist picker for the playing song (next to its Now Playing button when
+    /// that is on screen). The keys on a list's own cursor row are the list's.
+    fn add_current_to_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.picker.read(cx).key_enabled(cx) {
+            return;
+        }
+        let track = self
+            .player
+            .read(cx)
+            .coordinator()
+            .and_then(|c| c.queue().current().map(|e| e.track.clone()));
+        let Some(track) = track else {
+            return;
+        };
+        let anchor = self
+            .now_playing_open
+            .then_some(crate::ui::now_playing::PLAYLIST_ANCHOR);
+        playlist_picker::open_songs(
+            vec![PickerSong::new(track.video_id.as_str(), track.title.clone())],
+            anchor,
+            window,
+            cx,
+        );
+    }
+
     pub fn crate_model(&self) -> &Entity<CrateModel> {
         &self.crate_model
     }
@@ -1574,6 +1602,9 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_lyrics(cx)))
             .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| this.like_current(cx)))
             .on_action(cx.listener(|this, _: &CrateCurrent, _, cx| this.crate_current(cx)))
+            .on_action(cx.listener(|this, _: &AddCurrentToPlaylist, window, cx| {
+                this.add_current_to_playlist(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &UndoQueue, _, cx| this.undo_queue(cx)))
             .on_action(cx.listener(|this, _: &RedoQueue, _, cx| this.redo_queue(cx)))
             .on_action(cx.listener(|_, _: &FocusNextControl, window, cx| window.focus_next(cx)))
