@@ -16,8 +16,10 @@ use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
 use crate::ui::row_actions::{heart_icon, heart_label};
+use crate::ui::search_page::OpenTarget;
 use crate::ui::slider::{Slider, SliderState};
 use crate::ui::tooltip::Tooltip;
+use crate::ui::track_links::track_links;
 use crate::ui::transport::{self, TransportFocus};
 
 const VOLUME_WIDTH: f32 = 96.0;
@@ -99,6 +101,8 @@ pub struct PlayerBar {
     pub target: Option<SharedString>,
     /// Opens the picker to change the target.
     pub on_target: Rc<Handler>,
+    /// Opens an artist's page from the artist names.
+    pub on_open: OpenTarget,
 }
 
 fn volume_icon(volume: u8, muted: bool) -> Icon {
@@ -123,13 +127,27 @@ impl RenderOnce for PlayerBar {
         let art = art_tile(layout::PLAYER_BAR_ART, v.art.clone());
 
         let player = self.player.clone();
-        let artist_line = text_line(
-            "artist",
-            v.artist.clone(),
-            typography::BODY,
-            color::text_secondary(),
-            cx,
-        );
+        // Each artist with a page is a link; with none (or while nothing plays) it is plain text.
+        let artist_line = if v.artists.iter().any(|a| a.id.is_some()) {
+            track_links(
+                "artist",
+                &v.artists,
+                None,
+                typography::BODY,
+                &self.on_open,
+                cx,
+            )
+            .into_any_element()
+        } else {
+            text_line(
+                "artist",
+                v.artist.clone(),
+                typography::BODY,
+                color::text_secondary(),
+                cx,
+            )
+            .into_any_element()
+        };
         // While skimming, a pill says where in the list it is.
         let skim_pill = v.skim.map(|skim| {
             style::text_style(div(), typography::CAPTION, cx)
