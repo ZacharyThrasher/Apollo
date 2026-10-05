@@ -15,7 +15,8 @@ use crate::search::{HIDE_MUSIC_VIDEOS, SAVE_RECENT_SEARCHES};
 use crate::settings::{
     BoolSetting, SettingsModel, CLOSE_TO_TRAY, DISCORD_PRESENCE, GLOBAL_HOTKEYS, HUD_AUTO_HIDE,
     MINI_COLLAPSE_ON_BLUR, MINI_DIM, MINI_FADE_CONTROLS, MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP,
-    MINI_SHOW_LYRICS, MINI_SHOW_VOLUME, MOOD_CHIPS, PERSONAL_SHELVES, START_MINIMIZED_TO_TRAY,
+    MINI_SHOW_LYRICS, MINI_SHOW_VOLUME, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES,
+    START_MINIMIZED_TO_TRAY,
 };
 use crate::ui::account_page::{self, AccountPage};
 use crate::ui::audio_page::AudioPage;
@@ -105,7 +106,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(17, cx);
+        let h = self.handles(18, cx);
 
         let home_section = SettingsSection::new("Home")
             .row(self.bool_row(
@@ -124,6 +125,15 @@ impl Render for SettingsPage {
                 accent,
                 cx,
             ));
+
+        let playlists_section = SettingsSection::new("Playlists").row(self.bool_row(
+            "setting-more-like-this",
+            "Show More like this on playlists",
+            &MORE_LIKE_THIS,
+            &h[17],
+            accent,
+            cx,
+        ));
 
         let search_section = SettingsSection::new("Search")
             .row(self.bool_row(
@@ -277,6 +287,7 @@ impl Render for SettingsPage {
             .child(self.account_page.clone())
             .child(self.playback_page.clone())
             .child(home_section)
+            .child(playlists_section)
             .child(self.audio_page.clone())
             .child(search_section)
             .child(window_section)
