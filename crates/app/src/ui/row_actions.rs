@@ -13,6 +13,7 @@ use gpui::{
 };
 
 use crate::assets::Icon;
+use crate::shortcuts::{self, Scope};
 use crate::style::color;
 use crate::ui::anchor;
 use crate::ui::tooltip::Tooltip;
@@ -47,7 +48,7 @@ pub fn row_action(
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let label: SharedString = label.into();
-    let tip = label.clone();
+    let used = label.clone();
     div()
         .id(id)
         .size(px(ACTION_SIZE))
@@ -60,7 +61,7 @@ pub fn row_action(
         .hover(|s| s.bg(color::state_hover()))
         .active(|s| s.bg(color::state_pressed()))
         .role(gpui::Role::Button)
-        .aria_label(label)
+        .aria_label(label.clone())
         // The row's own click (play) must not fire as well.
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |event: &ClickEvent, window, cx| {
@@ -70,9 +71,15 @@ pub fn row_action(
                 }
             }
             cx.stop_propagation();
-            on_click(window, cx)
+            on_click(window, cx);
+            if matches!(event, ClickEvent::Mouse(_)) {
+                shortcuts::note_mouse_use_label(&used, Scope::Any, cx);
+            }
         })
-        .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
+        .tooltip({
+            let label = label.clone();
+            move |_, cx| Tooltip::view(shortcuts::tip_text(&label, Scope::Any, cx), cx)
+        })
         .child(
             svg()
                 .path(icon.path())

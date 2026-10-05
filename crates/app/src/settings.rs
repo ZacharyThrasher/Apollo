@@ -78,6 +78,15 @@ pub const DISCORD_PRESENCE: BoolSetting = BoolSetting::new("discord_presence", f
 /// while Apollo is not focused.
 pub const GLOBAL_HOTKEYS: BoolSetting = BoolSetting::new("global_hotkeys", false);
 
+/// Keyboard > Show shortcut hints: tooltips and menu rows name their key, and the third time a
+/// command is done with the mouse a one-line tip names it (once ever per command).
+pub const SHOW_SHORTCUT_HINTS: BoolSetting = BoolSetting::new("show_shortcut_hints", true);
+/// Keyboard > Hold Ctrl for key badges: holding Ctrl for a moment shows each button's key on it.
+pub const KEY_BADGES: BoolSetting = BoolSetting::new("key_badges", true);
+/// How often each command was done with the mouse and whether its tip was shown
+/// (`shortcuts::HintLedger`). Not a switch and not worth a report line.
+pub const SHORTCUT_HINT_STATE: TextSetting = TextSetting::new("shortcut_hint_state", "");
+
 /// Mini player > HUD mode: the mini player becomes an always-on-top, click-through
 /// overlay that never takes the keyboard (for watching and controlling music over a game).
 pub const MINI_PLAYER_HUD: BoolSetting = BoolSetting::new("mini_player_hud", false);
@@ -128,6 +137,8 @@ pub const REPORTED_KEYS: &[&str] = &[
     MINI_PLAYER_ON_TOP.key,
     DISCORD_PRESENCE.key,
     GLOBAL_HOTKEYS.key,
+    SHOW_SHORTCUT_HINTS.key,
+    KEY_BADGES.key,
     MINI_PLAYER_HUD.key,
     HUD_AUTO_HIDE.key,
     MINI_FADE_CONTROLS.key,

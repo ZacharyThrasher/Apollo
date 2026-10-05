@@ -84,6 +84,8 @@ pub fn toast(
 
 /// How long the undo pill stays, fade-out included.
 pub const PILL_FOR: Duration = Duration::from_secs(2);
+/// How long a shortcut tip ("Tip: press C") stays, in the same pill.
+pub const TIP_FOR: Duration = Duration::from_secs(4);
 
 /// The one success message the app shows: after Ctrl+Z / Ctrl+Shift+Z, because putting the queue
 /// back is otherwise invisible. The same pill as the error toast without the icon: bg.overlay,
