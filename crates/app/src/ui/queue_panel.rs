@@ -284,6 +284,7 @@ impl QueuePanel {
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         cx.observe(&thumbs, |_, _, cx| cx.notify()).detach();
+        crate::confirm::watch(cx);
         Self {
             focus_shuffle: stop(cx, TAB_SHUFFLE),
             focus_repeat: stop(cx, TAB_REPEAT),
@@ -870,6 +871,11 @@ impl QueuePanel {
             .px(px(spacing::S2))
             .rounded(px(radius::SMALL))
             .cursor_pointer()
+            // A song just added to the queue lights up where it landed.
+            .children(upcoming_ix.and_then(|_| {
+                crate::confirm::row_pulse(crate::confirm::Place::Queue, &row.video_id, cx)
+                    .map(|seq| crate::confirm::highlight(seq, radius::SMALL))
+            }))
             .when(selected, |d| d.bg(playing_row::tint()))
             .when(picked, |d| d.bg(pick_tint))
             .hover(move |s| {
