@@ -223,6 +223,20 @@ impl ExploreView {
             .map_or(0.0, |g| f32::from(g.scroll.offset().x))
     }
 
+    /// How far the page is scrolled; the window's history keeps it. Nothing while a mood page is
+    /// open (the tiles' own position is kept for its Back).
+    pub fn scroll_offset(&self, cx: &App) -> Option<Point<Pixels>> {
+        self.model
+            .read(cx)
+            .mood()
+            .is_none()
+            .then(|| self.page.offset())
+    }
+
+    pub fn set_scroll_offset(&self, offset: Point<Pixels>) {
+        self.page.set_offset(offset);
+    }
+
     /// Back to the top, nothing open (a different account's page).
     pub fn rewind(&mut self, cx: &mut Context<Self>) {
         self.groups.clear();

@@ -18,6 +18,7 @@ pub mod library;
 pub mod lyrics_pane;
 pub mod mini_player;
 pub mod nav;
+pub mod nav_history;
 pub mod now_playing;
 pub mod pane_tabs;
 pub mod player_bar;
