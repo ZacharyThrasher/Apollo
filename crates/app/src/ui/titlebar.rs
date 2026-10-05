@@ -7,8 +7,8 @@
 
 use apollo_theme::tokens::layout;
 use gpui::{
-    div, prelude::*, px, App, ElementId, IntoElement, ParentElement, RenderOnce, Styled, Window,
-    WindowControlArea,
+    div, prelude::*, px, AnyElement, App, ElementId, IntoElement, ParentElement, RenderOnce,
+    Styled, Window, WindowControlArea,
 };
 
 use crate::style::color;
@@ -18,8 +18,23 @@ const CAPTION_BUTTON_WIDTH: f32 = 46.0;
 /// Glyph size inside a caption button.
 const CAPTION_GLYPH_PX: f32 = 10.0;
 
-#[derive(IntoElement)]
-pub struct TitleBar;
+#[derive(IntoElement, Default)]
+pub struct TitleBar {
+    /// What sits at the left edge: the Back and Forward buttons.
+    left: Option<AnyElement>,
+}
+
+impl TitleBar {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Controls at the left edge. They take clicks themselves: the rest of the bar drags.
+    pub fn left(mut self, element: impl IntoElement) -> Self {
+        self.left = Some(element.into_any_element());
+        self
+    }
+}
 
 impl RenderOnce for TitleBar {
     fn render(self, window: &mut Window, _: &mut App) -> impl IntoElement {
@@ -32,6 +47,7 @@ impl RenderOnce for TitleBar {
             .flex_none()
             .w_full()
             .h(px(layout::TITLE_BAR_HEIGHT))
+            .children(self.left.map(|left| div().occlude().flex_none().child(left)))
             .child(div().flex_1())
             .child(
                 div()

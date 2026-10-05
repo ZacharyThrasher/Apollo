@@ -45,6 +45,8 @@ pub struct IconButton {
     circle: bool,
     ring: Hsla,
     enabled: bool,
+    /// Tab stops on the button (off for the title bar's Back and Forward, which have keys).
+    tab_stop: bool,
     spin: bool,
     toggled: Option<bool>,
     on_click: Option<Handler>,
@@ -72,10 +74,17 @@ impl IconButton {
             circle: false,
             ring: color::accent(accent),
             enabled: true,
+            tab_stop: true,
             spin: false,
             toggled: None,
             on_click: None,
         }
+    }
+
+    /// Keep the button out of the Tab order (its command has a key of its own).
+    pub fn skip_tab(mut self) -> Self {
+        self.tab_stop = false;
+        self
     }
 
     /// The accessible name, when the tooltip text is not the right one: a toggle already
@@ -231,7 +240,7 @@ impl RenderOnce for IconButton {
             .size(px(self.size))
             .rounded(px(radius_px))
             .when_some(self.fill, |d, c| d.bg(c))
-            .track_focus(&self.focus.clone().tab_stop(enabled))
+            .track_focus(&self.focus.clone().tab_stop(enabled && self.tab_stop))
             .aria_label(self.name.clone().unwrap_or_else(|| self.label.clone()))
             .role(gpui::Role::Button)
             .when_some(self.toggled, |d, on| {

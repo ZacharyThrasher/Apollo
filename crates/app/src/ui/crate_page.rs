@@ -220,6 +220,15 @@ pub struct CratePage {
 }
 
 impl CratePage {
+    /// How far the list is scrolled; the window's history keeps it.
+    pub fn scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
+        self.scroll.0.borrow().base_handle.offset()
+    }
+
+    pub fn set_scroll_offset(&self, offset: gpui::Point<gpui::Pixels>) {
+        self.scroll.0.borrow().base_handle.set_offset(offset);
+    }
+
     pub fn new(
         crate_: Entity<CrateModel>,
         player: Entity<PlayerModel>,

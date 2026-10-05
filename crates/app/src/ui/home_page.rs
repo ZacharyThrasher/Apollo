@@ -227,6 +227,15 @@ impl HomeView {
         }
     }
 
+    /// How far the page is scrolled; the window's history keeps it.
+    pub fn scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
+        self.page.offset()
+    }
+
+    pub fn set_scroll_offset(&self, offset: gpui::Point<gpui::Pixels>) {
+        self.page.set_offset(offset);
+    }
+
     /// Back to the top, every row at its first column (a different account's feed).
     pub fn rewind(&mut self, cx: &mut Context<Self>) {
         self.rows.clear();
