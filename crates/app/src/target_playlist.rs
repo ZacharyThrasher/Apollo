@@ -388,6 +388,11 @@ pub fn has_target(cx: &App) -> bool {
         .is_some_and(|h| h.0.read(cx).target(cx).is_some())
 }
 
+/// The bare id of the target playlist, when there is one.
+pub fn current_id(cx: &App) -> Option<String> {
+    cx.try_global::<TargetHandle>()?.0.read(cx).target(cx).map(|t| t.id)
+}
+
 /// `playlist_id` (bare or not) is the target, and its pill is on show.
 pub fn is_target(playlist_id: &str, cx: &App) -> bool {
     let Some(handle) = cx.try_global::<TargetHandle>() else {

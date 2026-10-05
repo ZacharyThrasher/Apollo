@@ -240,6 +240,8 @@ pub enum Command {
     PlayNext,
     AddToQueue,
     StartRadio,
+    /// Skim the song's radio, keeping what fits into the Crate ("Dig from here").
+    Dig,
     AddToPlaylist,
     ToggleLike,
     GoToArtist,
@@ -346,6 +348,8 @@ pub struct Facts {
     /// The song is in the Crate and not known to be explicit: it can be swapped for the explicit
     /// version. For a selection, true when any of its songs is.
     pub swappable: bool,
+    /// A song's menu offers Dig from here: Skim is on, which a dig runs on.
+    pub dig: bool,
 }
 
 /// The menu's items in groups (a separator sits between groups). `liked` is the song's heart.
@@ -414,20 +418,30 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                     item(Command::PlayNext, Icon::PlayNext, "Play next"),
                     item(Command::AddToQueue, Icon::QueueAdd, "Add to queue"),
                 ],
-                vec![
-                    item(Command::StartRadio, Icon::Radio, "Start radio"),
-                    item(Command::AddToPlaylist, Icon::PlaylistAdd, "Add to playlist\u{2026}"),
-                    if facts.in_crate {
+                {
+                    let mut group = vec![item(Command::StartRadio, Icon::Radio, "Start radio")];
+                    if facts.dig {
+                        group.push(item(Command::Dig, Icon::SearchRegular, "Dig from here"));
+                    }
+                    group.push(item(
+                        Command::AddToPlaylist,
+                        Icon::PlaylistAdd,
+                        "Add to playlist\u{2026}",
+                    ));
+                    group.push(if facts.in_crate {
                         item(Command::RemoveFromCrate, Icon::BoxFilled, "Remove from Crate")
                     } else {
                         item(Command::AddToCrate, Icon::BoxRegular, "Add to Crate")
-                    },
-                ]
-                .into_iter()
-                .chain(facts.swappable.then(|| {
-                    item(Command::SwapToExplicit, Icon::ArrowSwap, "Swap to explicit version")
-                }))
-                .collect(),
+                    });
+                    if facts.swappable {
+                        group.push(item(
+                            Command::SwapToExplicit,
+                            Icon::ArrowSwap,
+                            "Swap to explicit version",
+                        ));
+                    }
+                    group
+                },
                 {
                     let mut group = vec![if liked {
                         item(Command::ToggleLike, Icon::HeartFilled, "Remove from Liked")
@@ -970,6 +984,7 @@ impl TrackMenu {
                         .read(cx)
                         .song_saved(t.track.video_id.as_str(), cx),
                     artist_blocked: blocked(blocked_artist_of(&t.track)),
+                    dig: self.player.read(cx).skim_enabled(),
                     ..Facts::default()
                 },
             ),
@@ -1280,6 +1295,10 @@ impl TrackMenu {
             (Command::StartRadio, Subject::Track(t)) => {
                 let name = t.track.title.clone();
                 self.start_radio(t.track, t.thumbnail, name, cx);
+            }
+            (Command::Dig, Subject::Track(t)) => {
+                self.player
+                    .update(cx, |p, cx| p.dig_from(t.track, t.thumbnail, cx));
             }
             (Command::StartRadio, Subject::Collection(c)) => {
                 // A collection's radio is seeded from its first song.
@@ -1660,6 +1679,7 @@ fn shortcut_of(command: Command) -> Option<&'static str> {
         Command::AddToCrate => Some("crate"),
         Command::AddToPlaylist => Some("playlist"),
         Command::RemoveFromQueue | Command::RemoveFromCrate => Some("remove"),
+        Command::Dig => Some("dig"),
         Command::CrateToTop => Some("crate-top"),
         Command::CrateToBottom => Some("crate-bottom"),
         _ => None,

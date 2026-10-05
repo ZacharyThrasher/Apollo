@@ -174,6 +174,12 @@ pub const ENTRIES: &[Entry] = &[
     entry("undo", "Undo", Group::Collect, &["UndoQueue"]),
     entry("redo", "Redo", Group::Collect, &["RedoQueue"]).all_keys(),
     entry("skim-from", "Skim from here", Group::Play, &["SkimRow", "SkimCursor"]),
+    entry(
+        "dig",
+        "Dig from here",
+        Group::Play,
+        &["DigCurrent", "DigSelected", "DigRow", "DigCursor"],
+    ),
     entry("skim-crate", "While skimming: keep in Crate", Group::Collect, &["SkimCrate"]),
     entry("skim-toss", "Skimming the Crate: remove this song", Group::Collect, &["SkimDrop"]),
     entry("skim-keep", "Skim: keep this song", Group::Play, &["SkimKeep"]),

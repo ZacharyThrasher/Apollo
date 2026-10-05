@@ -98,6 +98,12 @@ pub const AUTO_ADVANCE: BoolSetting = BoolSetting::new("auto_advance", true);
 /// (A, the P picker, "Add all to…") leaves the Crate. Ctrl+Z puts it back. Off: a song can belong
 /// in two playlists, so nothing leaves unasked.
 pub const CRATE_FILE_AND_FORGET: BoolSetting = BoolSetting::new("crate_file_and_forget", false);
+/// Playlists > Dig key: D on a song asks for its radio and skims it ("Dig from here"). Off leaves D
+/// unbound; the song menu's item stays.
+pub const DIG_KEY: BoolSetting = BoolSetting::new("dig_key", true);
+/// Playlists > Leave out songs I already have: a dig's radio drops songs that are in the Crate,
+/// the target playlist, the liked songs or the local play log. Off keeps them in.
+pub const DIG_LEAVE_OUT: BoolSetting = BoolSetting::new("dig_leave_out", true);
 /// Playlists > Mark songs already in the target playlist: Crate rows the target playlist holds
 /// carry a small check, and "Hide filed" can hide them. Off: no marks, and the target's songs are
 /// never read for it.
@@ -194,6 +200,8 @@ pub const REPORTED_KEYS: &[&str] = &[
     INSTANT_PLAYLISTS.key,
     AUTO_ADVANCE.key,
     CRATE_FILE_AND_FORGET.key,
+    DIG_KEY.key,
+    DIG_LEAVE_OUT.key,
     CRATE_MARK_FILED.key,
     PREFER_EXPLICIT.key,
     CRATE_MORE_LIKE.key,

@@ -17,7 +17,7 @@ use crate::crate_list::{CrateEvent, CrateHandle, CrateModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
-    AddCurrentToPlaylist, AddCurrentToTarget, CrateCurrent, GoBack, GoForward, LikeCurrent,
+    AddCurrentToPlaylist, AddCurrentToTarget, CrateCurrent, DigCurrent, GoBack, GoForward, LikeCurrent,
     NavigateDown, NavigateLeft, NavigateRight, NavigateUp, RedoQueue, SeekBack, SeekForward,
     ToggleCrateDock, ShowShortcuts, SkimCancel, SkimCrate, SkimDrop, SkimKeep, ToggleFullscreen, ToggleLyrics,
     ToggleMute,
@@ -1562,6 +1562,22 @@ impl Shell {
         }
     }
 
+    /// The D key with no list under it: dig from the playing song (while skimming, the one being
+    /// skimmed: "more like this one"). A list's own cursor row is the list's.
+    fn dig_current(&mut self, cx: &mut Context<Self>) {
+        if !crate::dig::key_enabled(cx) {
+            return;
+        }
+        let track = self
+            .player
+            .read(cx)
+            .coordinator()
+            .and_then(|c| c.queue().current().map(|e| e.track.clone()));
+        if let Some(track) = track {
+            self.player.update(cx, |m, cx| m.dig_from(track, None, cx));
+        }
+    }
+
     /// The P key: the playlist picker for the playing song (next to its Now Playing button when
     /// that is on screen). The keys on a list's own cursor row are the list's.
     fn add_current_to_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2672,6 +2688,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_lyrics(cx)))
             .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| this.like_current(cx)))
             .on_action(cx.listener(|this, _: &CrateCurrent, _, cx| this.crate_current(cx)))
+            .on_action(cx.listener(|this, _: &DigCurrent, _, cx| this.dig_current(cx)))
             .on_action(cx.listener(|this, _: &ToggleCrateDock, window, cx| this.jump_crate_dock(window, cx)))
             .on_action(cx.listener(|this, _: &AddCurrentToPlaylist, window, cx| {
                 this.add_current_to_playlist(window, cx)

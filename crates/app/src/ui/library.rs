@@ -79,6 +79,7 @@ actions!(
         AddRowToPlaylist,
         AddRowToTarget,
         SkimRow,
+        DigRow,
         ExtendUp,
         ExtendDown,
         SelectAllRows,
@@ -107,6 +108,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("p", AddRowToPlaylist, Some(LIST_CONTEXT)),
         KeyBinding::new("a", AddRowToTarget, Some(LIST_CONTEXT)),
         KeyBinding::new("k", SkimRow, Some(LIST_CONTEXT)),
+        KeyBinding::new("d", DigRow, Some(LIST_CONTEXT)),
         KeyBinding::new("shift-up", ExtendUp, Some(LIST_CONTEXT)),
         KeyBinding::new("shift-down", ExtendDown, Some(LIST_CONTEXT)),
         KeyBinding::new("ctrl-a", SelectAllRows, Some(LIST_CONTEXT)),
@@ -1363,6 +1365,7 @@ impl LibraryView {
             }
         }))
         .on_action(cx.listener(|this, _: &SkimRow, _, cx| this.skim_from_row(cx)))
+        .on_action(cx.listener(|this, _: &DigRow, _, cx| this.dig_from_row(cx)))
         .on_action(cx.listener(|this, _: &AddRowToTarget, window, cx| {
             if !crate::target_playlist::key_enabled(cx) {
                 return;
@@ -1608,16 +1611,33 @@ impl LibraryView {
 
     /// The track row the keyboard is on, whole (none in the lists of playlists and albums).
     fn selected_full_track(&self, cx: &App) -> Option<(Track, Option<String>)> {
+        self.full_track_at(self.selected, cx)
+    }
+
+    /// Row `index` of the list as shown, whole.
+    fn full_track_at(&self, index: usize, cx: &App) -> Option<(Track, Option<String>)> {
         let model = self.model.read(cx);
         let row = if let Some(artist) = model.artist() {
-            artist.content()?.top_songs.get(self.selected)?.clone()
+            artist.content()?.top_songs.get(index)?.clone()
         } else if self.history_open(cx) {
-            model.history_at(self.selected)?
+            model.history_at(index)?
         } else {
-            let real = self.visible(cx).get(self.selected)?;
+            let real = self.visible(cx).get(index)?;
             model.list_rows().get(real)?.clone()
         };
         Some((row.track, row.thumbnail))
+    }
+
+    /// D: dig from the song the pointer is on, or from the keyboard's row when the pointer is on
+    /// none. Only the keypress asks; hovering never does. The Settings switch is the key's.
+    fn dig_from_row(&mut self, cx: &mut Context<Self>) {
+        if !crate::dig::key_enabled(cx) {
+            return;
+        }
+        let index = self.hover.hovered().unwrap_or(self.selected);
+        if let Some((track, thumbnail)) = self.full_track_at(index, cx) {
+            self.player.update(cx, |p, cx| p.dig_from(track, thumbnail, cx));
+        }
     }
 
     /// K on a playlist, album or Songs list. While a skim runs K keeps its skim meaning (the
