@@ -62,6 +62,10 @@ const EDGE_MARGIN: f32 = spacing::S2;
 
 struct Open {
     video_id: String,
+    /// Every song being added when the panel was opened for several (the Crate's "Add all to…");
+    /// empty for one song. `video_id` is then the first of them, which only the list's
+    /// "already held" marks are read for, so those are not shown.
+    all: Vec<String>,
     /// The track being added, shown under the panel title.
     title: SharedString,
     playlists: Load<Vec<PlaylistTarget>>,
@@ -167,6 +171,34 @@ impl PlaylistPicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_songs(video_id, Vec::new(), title, anchor, window, cx);
+    }
+
+    /// Open the panel to add all of `video_ids` (in order) to one playlist, anchored like
+    /// [`Self::open_with`]. Nothing opens for an empty list.
+    pub fn open_many(
+        &mut self,
+        video_ids: Vec<String>,
+        title: impl Into<SharedString>,
+        anchor: Option<Bounds<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(first) = video_ids.first().cloned() else {
+            return;
+        };
+        self.open_songs(&first, video_ids, title, anchor, window, cx);
+    }
+
+    fn open_songs(
+        &mut self,
+        video_id: &str,
+        all: Vec<String>,
+        title: impl Into<SharedString>,
+        anchor: Option<Bounds<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let return_focus = self
             .open
             .as_ref()
@@ -174,6 +206,7 @@ impl PlaylistPicker {
             .or_else(|| window.focused(cx));
         self.open = Some(Open {
             video_id: video_id.to_owned(),
+            all,
             title: title.into(),
             playlists: Load::Loading,
             cursor: 0,
@@ -287,17 +320,30 @@ impl PlaylistPicker {
 
     /// Close the picker and ask for a name for a new playlist that will hold the song.
     pub fn new_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(video) = self.open.as_ref().map(|o| o.video_id.clone()) else {
+        let Some(open) = self.open.as_ref() else {
             return;
         };
+        let video = open.video_id.clone();
+        let many = open.all.clone();
         self.close(window, cx);
-        playlist_dialog::open(
-            Mode::Create {
-                add_video: Some(video),
-            },
-            window,
-            cx,
-        );
+        if many.is_empty() {
+            playlist_dialog::open(
+                Mode::Create {
+                    add_video: Some(video),
+                },
+                window,
+                cx,
+            );
+        } else {
+            playlist_dialog::open(
+                Mode::FromCrate {
+                    name: playlist_dialog::CRATE_PLAYLIST_NAME.to_owned(),
+                    video_ids: many,
+                },
+                window,
+                cx,
+            );
+        }
     }
 
     /// Add the track to the playlist at `index` and close. A playlist that already holds it
@@ -316,6 +362,13 @@ impl PlaylistPicker {
         let Some(target) = list.get(index).cloned() else {
             return;
         };
+        if !open.all.is_empty() {
+            let videos = open.all.clone();
+            self.writes
+                .update(cx, |w, cx| w.add_many_to_playlist(&target, &videos, cx));
+            self.close(window, cx);
+            return;
+        }
         let video = open.video_id.clone();
         if self.writes.read(cx).holds(&target, &video) {
             return;
@@ -365,7 +418,8 @@ impl Render for PlaylistPicker {
                 let held: Vec<bool> = {
                     let writes = self.writes.read(cx);
                     list.iter()
-                        .map(|t| writes.holds(t, &open.video_id))
+                        // For several songs the marks would speak of the first one only.
+                        .map(|t| open.all.is_empty() && writes.holds(t, &open.video_id))
                         .collect()
                 };
                 let rows: Vec<AnyElement> = list
