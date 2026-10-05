@@ -20,6 +20,7 @@ pub mod art;
 pub mod confirm;
 pub mod crate_arrange;
 pub mod crate_list;
+pub mod crate_more;
 pub mod crate_swap;
 pub mod explicit_marks;
 pub mod instant_playlist;

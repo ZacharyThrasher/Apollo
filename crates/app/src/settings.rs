@@ -101,6 +101,9 @@ pub const CRATE_FILE_AND_FORGET: BoolSetting = BoolSetting::new("crate_file_and_
 /// Playlists > Prefer explicit versions: a clean song added to the Crate is swapped for its
 /// explicit version at once, when the service has one. Off until the owner asks for it.
 pub const PREFER_EXPLICIT: BoolSetting = BoolSetting::new("prefer_explicit", false);
+/// Playlists > More like the Crate: the Crate page and the docked panel end with a few songs like
+/// the Crate's own, each with a + that sets it aside too. Off hides the rail and fetches nothing.
+pub const CRATE_MORE_LIKE: BoolSetting = BoolSetting::new("crate_more_like", true);
 /// Window > Close to tray: the close button hides the window and playback continues.
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
@@ -188,6 +191,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     AUTO_ADVANCE.key,
     CRATE_FILE_AND_FORGET.key,
     PREFER_EXPLICIT.key,
+    CRATE_MORE_LIKE.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
     PAUSE_ON_OTHER_AUDIO.key,

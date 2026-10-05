@@ -32,6 +32,8 @@
 //! the menu of a picked row (right-click or More) acts on every picked row, with Remove from
 //! Crate. A drag still moves the one row it is started on.
 
+mod rail;
+
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
@@ -350,6 +352,8 @@ pub struct CratePage {
     /// Esc in the docked list with nothing picked: focus goes back to where it was before the
     /// jump into the dock (the shell's).
     on_leave: Option<Rc<Handler>>,
+    /// More like the Crate, under the list.
+    rail: rail::Rail,
 }
 
 impl CratePage {
@@ -448,6 +452,7 @@ impl CratePage {
             layout,
             dock_tabs: None,
             on_leave: None,
+            rail: rail::Rail::new(cx),
         }
     }
 
@@ -1333,6 +1338,7 @@ impl CratePage {
         if !ids.is_empty() {
             self.player.update(cx, |m, cx| m.request_thumbs(ids, cx));
         }
+        self.rail_art(&range, cx);
         range.map(|ix| self.row(ix, window, cx)).collect()
     }
 
@@ -1352,7 +1358,11 @@ impl CratePage {
 
     fn row(&self, ix: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
-            return self.end_slot(ix, cx);
+            // After the end slot come the suggestions of More like the Crate.
+            return match ix.checked_sub(self.rows.len() + 1) {
+                Some(slot) if slot < self.rail_rows() => self.rail_row(slot, window, cx),
+                _ => self.end_slot(ix, cx),
+            };
         };
         let docked = self.docked();
         // Names that tell the docked list's rows from the page's, so tests find the right ones.
@@ -2016,6 +2026,7 @@ impl Render for CratePage {
         self.refresh_selection();
         let accent = self.accent;
         let count = self.rows.len();
+        self.sync_rail(count != total, cx);
 
         let docked = self.docked();
         let header = if docked {
@@ -2067,7 +2078,8 @@ impl Render for CratePage {
                     uniform_list(
                         if docked { "crate-dock-rows" } else { "crate-rows" },
                         // One more than the songs: the slot a row can be dropped into at the end.
-                        count + 1,
+                        // Then the rows of More like the Crate.
+                        count + 1 + self.rail_rows(),
                         cx.processor(|this, range: Range<usize>, window, cx| {
                             this.rows(range, window, cx)
                         }),
