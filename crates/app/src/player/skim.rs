@@ -125,6 +125,33 @@ impl PlayerModel {
         self.skim.as_ref()?.dig.clone()
     }
 
+    /// Whether the skim running is of the list that named itself `name` when it started (the
+    /// queue's source), so a list can give the keys its own meaning while it is the one skimmed.
+    pub fn skimming_from(&self, name: &str) -> bool {
+        self.skim.is_some()
+            && self
+                .driver
+                .as_ref()
+                .and_then(|d| d.coordinator().queue().source().map(|s| s.name == name))
+                .unwrap_or(false)
+    }
+
+    /// The song being skimmed is dealt with (kept or tossed): on to the next one at once, or
+    /// back to what was playing when it was the last.
+    pub fn skim_pass(&mut self, cx: &mut Context<Self>) {
+        if self.skim.is_some() {
+            self.skim_next(cx);
+        }
+    }
+
+    /// A song left the list being skimmed (the Crate's Delete): a song picked from that list
+    /// later still counts as the same list. The skim's length and place are not changed.
+    pub fn skim_forget(&mut self, video: &str) {
+        if let Some(skim) = self.skim.as_mut() {
+            skim.list.retain(|id| id.as_str() != video);
+        }
+    }
+
     /// Where Skim stands, for the views; none while not skimming.
     pub fn skim_view(&self) -> Option<SkimView> {
         let skim = self.skim.as_ref()?;

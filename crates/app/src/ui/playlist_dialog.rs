@@ -712,13 +712,25 @@ impl Render for PlaylistDialog {
                 let clear_crate = matches!(mode, Mode::FromCrate { .. }).then(|| {
                     let entity = entity.clone();
                     let on = open.clear_crate;
+                    // Only part of the Crate is being saved (the picked songs): only those leave.
+                    let partial = match (&mode, crate_list::handle(cx)) {
+                        (Mode::FromCrate { video_ids, .. }, Some(model)) => {
+                            video_ids.len() < model.read(cx).len()
+                        }
+                        _ => false,
+                    };
+                    let label = if partial {
+                        "Take these songs out of the Crate after saving"
+                    } else {
+                        "Clear Crate after saving"
+                    };
                     div()
                         .debug_selector(|| "playlist-dialog-clear-crate".into())
                         .child(
                             LabeledSwitch::new(
                                 "playlist-dialog-clear-crate",
                                 &self.clear_crate_focus,
-                                "Clear Crate after saving",
+                                label,
                                 on,
                                 accent,
                             )

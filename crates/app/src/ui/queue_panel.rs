@@ -248,6 +248,8 @@ pub struct QueuePanel {
     focus_list: FocusHandle,
     focus_search: FocusHandle,
     scroll: UniformListScrollHandle,
+    /// The add (see `confirm::scroll_to`) this list last scrolled for.
+    scrolled: u64,
     /// The row the keyboard acts on; shown only while the list has focus.
     cursor: Option<QueueEntryId>,
     /// Rows picked for bulk verbs, by queue entry.
@@ -299,6 +301,7 @@ impl QueuePanel {
             player,
             writes,
             scroll: UniformListScrollHandle::new(),
+            scrolled: 0,
             cursor: None,
             selection: Selection::new(),
             bulk_menu: None,
@@ -339,6 +342,11 @@ impl QueuePanel {
     /// How many rows are picked for bulk verbs (tests and diagnostics).
     pub fn picked(&self) -> usize {
         self.selection.len()
+    }
+
+    /// How far the list is scrolled (tests).
+    pub fn scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
+        self.scroll.0.borrow().base_handle.offset()
     }
 
     /// Scroll so what is playing sits at the top, with the history above it.
@@ -1204,6 +1212,22 @@ impl Render for QueuePanel {
         self.items = flatten(&view);
         self.view = view;
         self.refresh_selection();
+        // Songs just added are brought into view: the last of them, among what is up next.
+        if let Some((seq, videos)) = crate::confirm::scroll_to(crate::confirm::Place::Queue, cx) {
+            if seq != self.scrolled {
+                self.scrolled = seq;
+                let at = self.items.iter().rposition(|item| {
+                    matches!(item, Item::Upcoming(_))
+                        && self
+                            .view
+                            .row(*item)
+                            .is_some_and(|r| videos.iter().any(|v| *v == r.video_id))
+                });
+                if let Some(ix) = at {
+                    self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+                }
+            }
+        }
         let ready = player_view.status == Status::Ready;
         let has_upcoming = !self.view.upcoming.is_empty();
         let has_current = self.view.current.is_some();
