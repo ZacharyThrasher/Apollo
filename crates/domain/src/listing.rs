@@ -150,6 +150,19 @@ impl<T: ListItem> Listing<T> {
         before - self.items.len()
     }
 
+    /// Put one item at the end (a row shown before the service has confirmed it). Paging state
+    /// is untouched. An item whose key is already held is not added twice; returns whether it
+    /// was added.
+    pub fn push(&mut self, item: T) -> bool {
+        if let Some(k) = item.dedup_key() {
+            if !self.keys.insert(k) {
+                return false;
+            }
+        }
+        self.items.push(item);
+        true
+    }
+
     /// Take the row at `from` and put it before the insertion slot `slot` (0 above the first row,
     /// `len` below the last). Returns whether anything moved. Paging state is untouched.
     pub fn move_item(&mut self, from: usize, slot: usize) -> bool {

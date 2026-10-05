@@ -28,7 +28,7 @@ use crate::page_cache::PageCache;
 use crate::player::PlayerModel;
 use crate::related::RelatedModel;
 use crate::search::{SearchModel, SearchSource};
-use crate::settings::{SettingsModel, MOOD_CHIPS, PERSONAL_SHELVES};
+use crate::settings::{SettingsModel, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES};
 use crate::settings::{LibrarySortStore, LyricsOpenStore, RelatedOpenStore};
 use crate::style::{self, color};
 use crate::ui::account_page::AccountPage;
@@ -477,6 +477,17 @@ impl Shell {
         // So does Home > Mood chips.
         let chips_on = settings.read(cx).get(&MOOD_CHIPS);
         home.update(cx, |h, cx| h.set_chips_enabled(chips_on, cx));
+        // Playlists > Show More like this follows its switch.
+        {
+            let on = settings.read(cx).get(&MORE_LIKE_THIS);
+            library.update(cx, |l, cx| l.set_more_like_enabled(on, cx));
+            let library = library.clone();
+            cx.observe(&settings, move |_, settings, cx| {
+                let on = settings.read(cx).get(&MORE_LIKE_THIS);
+                library.update(cx, |l, cx| l.set_more_like_enabled(on, cx));
+            })
+            .detach();
+        }
         {
             let home = home.clone();
             cx.observe(&settings, move |_, settings, cx| {
