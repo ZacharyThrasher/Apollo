@@ -136,6 +136,9 @@ pub struct PlayerView {
     pub artist: SharedString,
     /// Artists and album on one line, for Now Playing.
     pub subtitle: SharedString,
+    /// The playing track's artists and album, for the names that open their pages.
+    pub artists: Vec<apollo_domain::model::ArtistRef>,
+    pub album: Option<apollo_domain::model::AlbumRef>,
     pub art: Option<Arc<RenderImage>>,
     /// Blurred artwork for the Now Playing background.
     pub ambient: Option<Arc<RenderImage>>,
@@ -1002,6 +1005,12 @@ impl PlayerModel {
         if tracks.is_empty() || self.driver.is_none() {
             return;
         }
+        // A song picked from the list being skimmed keeps the skim going from that song.
+        if let Some(start) = start {
+            if self.skim_pick(&tracks, start, source.as_ref(), cx) {
+                return;
+            }
+        }
         self.skim_yield();
         let before = self.undo_capture();
         let seed = self.next_seed();
@@ -1700,6 +1709,8 @@ impl PlayerModel {
             title: SharedString::default(),
             artist: SharedString::default(),
             subtitle: SharedString::default(),
+            artists: Vec::new(),
+            album: None,
             art: None,
             ambient: None,
             playing: false,
@@ -1737,6 +1748,8 @@ impl PlayerModel {
                 .unwrap_or_default(),
             artist: current.map(|e| artist_line(&e.track)).unwrap_or_default(),
             subtitle: current.map(|e| subtitle_line(&e.track)).unwrap_or_default(),
+            artists: current.map(|e| e.track.artists.clone()).unwrap_or_default(),
+            album: current.and_then(|e| e.track.album.clone()),
             art,
             ambient,
             playing,

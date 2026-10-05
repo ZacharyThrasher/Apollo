@@ -102,6 +102,16 @@ There is no whole-playlist sort. Each move shows at once and goes to YouTube Mus
 "move before" edit, one at a time through the page's edit queue; a refused one puts the playlist
 back as YouTube Music holds it and leaves the usual notice.
 
+### Skim from here
+
+| Key | Does |
+|---|---|
+| K (in a playlist, album or Songs list, while not skimming) | Skim the list from the song under the pointer, or from the keyboard's row when the pointer is on none |
+
+Settings > Playback > Skim off turns it off. Once a skim runs, clicking any
+song of that same list moves the skim to that song and goes on skimming from there; Enter on a
+row (or on the song being skimmed, below) leaves skim and plays normally.
+
 ### While skimming
 
 Skim (the **Skim** button beside Play and Shuffle on playlist, album and Songs headers, and on
@@ -221,7 +231,7 @@ row gets its key from `shortcut_of` in `ui/track_menu.rs`.
 ### Why the letters are what they are
 
 One letter, one meaning, the same in every list: **L**ike, **C**rate, **P**laylist, **M**ute; the
-planned **K**eep (Skim) and **A**dd (target playlist) follow the same rule. Chords for what
+**K** (Skim from here, Keep while skimming) and **A**dd (target playlist) follow the same rule. Chords for what
 reaches further: Ctrl+K / Ctrl+F search, Ctrl+L lyrics, Ctrl+Z undo (queue and playlists), Ctrl+Y redo of a queue change.
 Space, the arrows, Esc and F11 are the ones every player has.
 
