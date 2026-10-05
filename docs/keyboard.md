@@ -26,6 +26,19 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Esc | Close Now Playing |
 | F11 | Fullscreen while Now Playing is open (leaves fullscreen when Now Playing closes) |
 
+## In lists
+
+| Key | Does |
+|---|---|
+| Up / Down | Move the cursor |
+| Enter | Play the row |
+| L | Like / unlike the row |
+| C | Set the row aside in the Crate (queue, Library, Search) |
+| Delete / Backspace | Remove the row (queue, Crate) |
+| Alt+Up / Alt+Down | Move the row one place up / down (up-next in the queue; the Crate). The row keeps the cursor. |
+
+The Crate also drags: pick a row up and let go where it should go (an accent line shows the place; below the last song sends it to the bottom). New songs land at the bottom.
+
 Undo covers what changes the queue: playing a new list (replacing it), Clear, Remove, reorder,
 Play next / Add to queue, Start radio (with the radio that follows it, as one step), and the
 Shuffle switch. Fifty steps are kept for the session. It never interrupts the song that is

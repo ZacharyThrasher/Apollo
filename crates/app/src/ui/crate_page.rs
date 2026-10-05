@@ -1,7 +1,13 @@
-//! The Crate page: the songs set aside with C or "Add to Crate", newest first, in the same song
-//! rows as the other lists. A header row plays, shuffles, adds the whole crate to the queue,
-//! saves it as a new playlist, adds it to an existing playlist, or empties it (Clear asks first). Rows play from there with the crate as the queue; More opens
-//! the usual song menu (add to the queue or a playlist, start a radio, remove from the crate).
+//! The Crate page: the songs set aside with C or "Add to Crate", top to bottom in the order the
+//! owner arranged them (a new song lands at the bottom), in the same song rows as the other
+//! lists. A header row plays, shuffles, adds the whole crate to the queue, saves it as a new
+//! playlist, adds it to an existing playlist, or empties it (Clear asks first). Rows play from
+//! there with the crate as the queue; More opens the usual song menu (add to the queue or a
+//! playlist, start a radio, remove from the crate).
+//!
+//! Arranging is local and free: a row drags to a new place (an accent line shows where it
+//! lands; a footer after the last row takes a drop at the end), or Alt+Up / Alt+Down moves the
+//! row under the cursor one place. Save as playlist and Add all follow the order shown.
 //!
 //! The list is virtual and keyboard-first like the queue panel's: one tab stop, an arrow-key
 //! cursor, Enter plays, L likes, Delete removes.
@@ -36,7 +42,15 @@ use crate::ui::track_menu::{self, Subject};
 
 actions!(
     apollo_crate,
-    [CursorUp, CursorDown, PlayCursor, RemoveCursor, LikeCursor]
+    [
+        CursorUp,
+        CursorDown,
+        PlayCursor,
+        RemoveCursor,
+        LikeCursor,
+        MoveCursorUp,
+        MoveCursorDown
+    ]
 );
 
 /// Key context of the list's focus handle.
@@ -50,6 +64,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("backspace", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
+        KeyBinding::new("alt-down", MoveCursorDown, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -58,6 +74,10 @@ const ROW_HEIGHT: f32 = 56.0;
 const ROW_INSET: f32 = spacing::S1;
 const ART: f32 = 40.0;
 const DURATION_WIDTH: f32 = spacing::S12;
+/// The insertion line a dragged row shows where it would land.
+const DROP_LINE: f32 = 2.0;
+/// The ghost that follows the pointer while a row is dragged.
+const DRAG_GHOST_WIDTH: f32 = 360.0;
 
 /// Tab order: after the nav rail (1-5), in the slots the Library page uses.
 const TAB_PLAY: isize = 6;
@@ -91,6 +111,59 @@ fn cursor_after_removal(ids: &[String], removed: &str) -> Option<String> {
     ids.get(pos + 1)
         .or_else(|| pos.checked_sub(1).and_then(|p| ids.get(p)))
         .cloned()
+}
+
+/// The song row being dragged to a new place in the crate.
+#[derive(Clone)]
+struct DraggedRow {
+    from: usize,
+    title: SharedString,
+    artist: SharedString,
+}
+
+struct DragGhost(DraggedRow);
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // On bg.overlay, so the lowest text tier is text.secondary.
+        div()
+            .w(px(DRAG_GHOST_WIDTH))
+            .h(px(ROW_HEIGHT - 2.0 * ROW_INSET))
+            .px(px(spacing::S3))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .rounded(px(radius::MEDIUM))
+            .bg(color::bg_overlay())
+            .border_1()
+            .border_color(color::border_strong())
+            .child(
+                style::text_style(div(), typography::BODY, cx)
+                    .truncate()
+                    .text_color(color::text_primary())
+                    .child(self.0.title.clone()),
+            )
+            .child(
+                style::text_style(div(), typography::BODY, cx)
+                    .truncate()
+                    .text_color(color::text_secondary())
+                    .child(self.0.artist.clone()),
+            )
+    }
+}
+
+/// The accent line a dragged row shows above the row it would land before.
+fn drop_line(group: SharedString, accent: Accent) -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .left(px(ROW_INSET))
+        .right(px(ROW_INSET))
+        .h(px(DROP_LINE))
+        .rounded_full()
+        .bg(color::accent(accent))
+        .opacity(0.0)
+        .group_drag_over::<DraggedRow>(group, |s| s.opacity(1.0))
 }
 
 /// A header button wrapped so tests (and the layout) can find it by name.
@@ -364,6 +437,40 @@ impl CratePage {
         }
     }
 
+    /// Alt+Up / Alt+Down: the row under the cursor moves one place; the cursor goes with it.
+    fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(video) = self.cursor.clone() else {
+            return;
+        };
+        let moved = self
+            .crate_
+            .update(cx, |m, cx| m.nudge(&video, delta, cx));
+        if moved {
+            if let Some(ix) = self.cursor_index(cx) {
+                self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+            }
+            cx.notify();
+        }
+    }
+
+    /// A dragged row was let go before slot `slot` (`len` is the end): the crate reorders. The
+    /// row keeps the keyboard cursor with it.
+    fn drop_row(&mut self, from: usize, slot: usize, cx: &mut Context<Self>) {
+        let video = self
+            .crate_
+            .read(cx)
+            .items()
+            .get(from)
+            .map(|r| r.track.video_id.as_str().to_owned());
+        let moved = self.crate_.update(cx, |m, cx| m.move_row(from, slot, cx));
+        if moved {
+            if self.cursor.is_some() {
+                self.cursor = video;
+            }
+            cx.notify();
+        }
+    }
+
     fn remove_cursor(&mut self, cx: &mut Context<Self>) {
         if let Some(video) = self.cursor.clone() {
             self.remove(&video, cx);
@@ -396,9 +503,26 @@ impl CratePage {
         range.map(|ix| self.row(ix, window, cx)).collect()
     }
 
+    /// The empty slot after the last row: a row dropped here goes to the bottom.
+    fn end_slot(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let group: SharedString = format!("crate-drop-{ix}").into();
+        div()
+            .debug_selector(|| "crate-end".into())
+            .relative()
+            .h(px(ROW_HEIGHT))
+            .w_full()
+            .flex_none()
+            .group(group.clone())
+            .child(drop_line(group, self.accent))
+            .on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
+                this.drop_row(dragged.from, ix, cx)
+            }))
+            .into_any_element()
+    }
+
     fn row(&self, ix: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
-            return div().into_any_element();
+            return self.end_slot(ix, cx);
         };
         let video: String = row.track.video_id.as_str().to_owned();
         let playing = self.player.read(cx).current_video().as_deref() == Some(video.as_str());
@@ -411,7 +535,7 @@ impl CratePage {
         let thumb = self.player.read(cx).thumb(&video);
         let liked = self.writes.read(cx).is_liked(&video);
         let title: SharedString = row.track.title.clone().into();
-        let artists: SharedString = row
+        let artists_line: SharedString = row
             .track
             .artists
             .iter()
@@ -419,6 +543,7 @@ impl CratePage {
             .collect::<Vec<_>>()
             .join(", ")
             .into();
+        let artists = artists_line.clone();
         let duration: SharedString = row
             .track
             .duration
@@ -546,16 +671,31 @@ impl CratePage {
             )
             .child(more)
             .child(remove)
-            .when(ring, |d| d.child(focus_ring(accent, radius::SMALL)));
+            .when(ring, |d| d.child(focus_ring(accent, radius::SMALL)))
+            .on_drag(
+                DraggedRow {
+                    from: ix,
+                    title: title.clone(),
+                    artist: artists_line.clone(),
+                },
+                |dragged, _, _, cx| cx.new(|_| DragGhost(dragged.clone())),
+            );
 
         let surface = track_menu::on_context_menu(surface, subject);
+        // Any row takes a dragged row's place: the line above it shows where it would land.
+        let drop_group: SharedString = format!("crate-drop-{ix}").into();
         div()
             .relative()
             .h(px(ROW_HEIGHT))
             .w_full()
             .flex_none()
             .py(px(ROW_INSET))
+            .group(drop_group.clone())
+            .child(drop_line(drop_group, self.accent))
             .child(surface)
+            .on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
+                this.drop_row(dragged.from, ix, cx)
+            }))
             .into_any_element()
     }
 
@@ -751,11 +891,14 @@ impl Render for CratePage {
                 .on_action(cx.listener(|this, _: &PlayCursor, _, cx| this.play_cursor(cx)))
                 .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
                 .on_action(cx.listener(|this, _: &LikeCursor, _, cx| this.like_cursor(cx)))
+                .on_action(cx.listener(|this, _: &MoveCursorUp, _, cx| this.move_cursor(-1, cx)))
+                .on_action(cx.listener(|this, _: &MoveCursorDown, _, cx| this.move_cursor(1, cx)))
                 .size_full()
                 .child(
                     uniform_list(
                         "crate-rows",
-                        count,
+                        // One more than the songs: the slot a row can be dropped into at the end.
+                        count + 1,
                         cx.processor(|this, range: Range<usize>, window, cx| {
                             this.rows(range, window, cx)
                         }),

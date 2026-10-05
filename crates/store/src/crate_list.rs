@@ -21,8 +21,8 @@ pub struct CrateRow {
 }
 
 impl Store {
-    /// The crate of `account_key`, newest first. Rows of any other account are deleted: private
-    /// state never crosses identities.
+    /// The crate of `account_key`, top to bottom as arranged. Rows of any other account are
+    /// deleted: private state never crosses identities.
     pub fn crate_load(&mut self, account_key: &str) -> Result<Vec<CrateRow>, StoreError> {
         self.conn.execute(
             "DELETE FROM crate_items WHERE account_key <> ?1",
@@ -30,7 +30,7 @@ impl Store {
         )?;
         let mut items = self.conn.prepare(
             "SELECT video_id, title, album_title, album_id, duration_ms, thumbnail, added_ms
-             FROM crate_items WHERE account_key = ?1 ORDER BY added_ms DESC, rowid DESC",
+             FROM crate_items WHERE account_key = ?1 ORDER BY pos, rowid",
         )?;
         let mut artists = self.conn.prepare(
             "SELECT name, browse_id FROM crate_artists
@@ -73,7 +73,7 @@ impl Store {
         Ok(out)
     }
 
-    /// Add a song. One already in the crate stays where it is.
+    /// Add a song at the bottom. One already in the crate stays where it is.
     pub fn crate_add(&mut self, account_key: &str, row: &CrateRow) -> Result<(), StoreError> {
         let t = &row.track;
         let tx = self.conn.transaction()?;
@@ -88,8 +88,10 @@ impl Store {
         if !exists {
             tx.execute(
                 "INSERT INTO crate_items
-                    (account_key, video_id, title, album_title, album_id, duration_ms, thumbnail, added_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    (account_key, video_id, title, album_title, album_id, duration_ms, thumbnail,
+                     added_ms, pos)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                         (SELECT COALESCE(MAX(pos) + 1, 0) FROM crate_items WHERE account_key = ?1))",
                 params![
                     account_key,
                     t.video_id.as_str(),
@@ -117,6 +119,26 @@ impl Store {
                         a.id.as_ref().map(|b| b.as_str())
                     ],
                 )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Put the crate in this order: the songs of `video_ids` take places 0, 1, 2… top to bottom.
+    /// A song not named keeps its old place, so a stale list can never lose one.
+    pub fn crate_reorder(
+        &mut self,
+        account_key: &str,
+        video_ids: &[String],
+    ) -> Result<(), StoreError> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut set = tx.prepare(
+                "UPDATE crate_items SET pos = ?3 WHERE account_key = ?1 AND video_id = ?2",
+            )?;
+            for (at, id) in video_ids.iter().enumerate() {
+                set.execute(params![account_key, id, at as i64])?;
             }
         }
         tx.commit()?;

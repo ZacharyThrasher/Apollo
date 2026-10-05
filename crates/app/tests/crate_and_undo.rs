@@ -329,7 +329,7 @@ fn c_sets_the_playing_song_aside_once(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("c");
     assert_eq!(crate_ids(&page, vcx), [LIST[0]], "pressing it again adds nothing");
     vcx.simulate_keystrokes("shift-right c");
-    assert_eq!(crate_ids(&page, vcx), [LIST[1], LIST[0]], "newest first");
+    assert_eq!(crate_ids(&page, vcx), [LIST[0], LIST[1]], "the new song goes below");
     // The queue was not touched.
     assert_eq!(queue(&page, vcx).0, LIST[1]);
 }
@@ -404,24 +404,24 @@ fn the_crate_page_lists_plays_and_queues_the_crate(cx: &mut TestAppContext) {
         assert!(vcx.debug_bounds(id).is_some(), "row {ix} is listed");
     }
 
-    // Add all to queue: the crate (newest first) goes up next, like any other "add to queue".
+    // Add all to queue: the crate, top to bottom, goes up next like any other "add to queue".
     click(vcx, "crate-add-all");
     assert_eq!(
         queue(&page, vcx).1[..3],
-        ["crateCCCC03", "crateBBBB02", "crateAAAA01"]
+        ["crateAAAA01", "crateBBBB02", "crateCCCC03"]
     );
 
     // A row plays with the crate as the queue.
     click(vcx, "crate-row-1");
     assert_eq!(
         queue(&page, vcx),
-        ("crateBBBB02".to_owned(), vec!["crateAAAA01".to_owned()])
+        ("crateBBBB02".to_owned(), vec!["crateCCCC03".to_owned()])
     );
     assert_eq!(state(&page, vcx).0, Intent::Playing);
 
     // Play starts the crate from the top.
     click(vcx, "crate-play");
-    assert_eq!(queue(&page, vcx).0, "crateCCCC03");
+    assert_eq!(queue(&page, vcx).0, "crateAAAA01");
 }
 
 #[gpui::test]
@@ -473,10 +473,23 @@ impl CrateStore for Memory {
     fn load(&self, key: &str) -> Vec<CrateRow> {
         let mut rows = self.rows.lock().unwrap();
         rows.retain(|(k, _)| k == key);
-        rows.iter().rev().map(|(_, r)| r.clone()).collect()
+        rows.iter().map(|(_, r)| r.clone()).collect()
     }
     fn add(&self, key: &str, row: &CrateRow) {
         self.rows.lock().unwrap().push((key.into(), row.clone()));
+    }
+    fn reorder(&self, key: &str, video_ids: &[String]) {
+        let mut rows = self.rows.lock().unwrap();
+        rows.sort_by_key(|(k, r)| {
+            if k == key {
+                video_ids
+                    .iter()
+                    .position(|id| id == r.track.video_id.as_str())
+                    .unwrap_or(usize::MAX)
+            } else {
+                0
+            }
+        });
     }
     fn remove(&self, key: &str, video_id: &str) {
         self.rows

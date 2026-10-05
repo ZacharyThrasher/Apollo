@@ -219,7 +219,7 @@ Applied to the Library's Stats tab (`ui/library/stats.rs`, `library/model/stats.
 ## Crate and queue undo decisions (coordinator brief, 2026-10-04)
 Applied to the Crate (`crate_list.rs`, `ui/crate_page.rs`, the nav rail and the song menu) and to Ctrl+Z / Ctrl+Shift+Z on the queue (`player.rs`, domain `undo.rs`).
 1. **Nav:** the Crate is an item under Library with the Fluent box icon (filled when selected). Its song count sits at the right of the label in caption text.tertiary (tabular numerals) and is hidden at zero and in the collapsed rail.
-2. **Page:** the "Crate" page title, a text.tertiary "N songs" line, then Play (the primary button), Shuffle, Add all to queue and Clear as text buttons. Clear asks first: the button turns into "Clear N songs?" with Clear and Cancel. Rows are the shared 56px song rows, newest first, with the heart, More and a remove button (Fluent dismiss) shown on hover or under the cursor. Empty: "Nothing set aside yet" with Search.
+2. **Page:** the "Crate" page title, a text.tertiary "N songs" line, then Play (the primary button), Shuffle, Add all to queue and Clear as text buttons. Clear asks first: the button turns into "Clear N songs?" with Clear and Cancel. Rows are the shared 56px song rows, top to bottom in the order you arranged them (see Crate arranging below), with the heart, More and a remove button (Fluent dismiss) shown on hover or under the cursor. Empty: "Nothing set aside yet" with Search.
 3. **Adding:** C sets the playing song aside (in the queue, Library and Search lists, the song under the cursor); "Add to Crate" in a song's menu does the same and becomes "Remove from Crate" once it is in. A song is in the crate once, and adding is silent (the count changes, no toast).
 4. **Undo:** Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y too). The only success feedback in the app is a small pill, bottom-centre above the player bar, on bg.overlay in text.secondary: "Queue restored" (or "Queue redone") for 2 seconds, fading in and out over 150 ms. Nothing is shown when there is nothing to undo.
 
@@ -274,3 +274,10 @@ The end of a playlist page you own (`ui/library/more_like.rs`, `more_like.rs`). 
 
 ## Out of scope for v1
 Light theme, user themes, visualizers, animated backgrounds beyond the ambient glow.
+
+## Crate arranging decisions (coordinator brief, 2026-10-05; built choices flagged)
+Applied to `crate_list.rs`, `ui/crate_page.rs` and the `crate_items.pos` column (migration 9).
+1. **Order:** the Crate reads top to bottom like a playlist being built. A new song goes to the bottom; songs already there keep the order the page showed (newest on top) when the migration ran. Arranging is local only: no account writes until you save or add it to a playlist, which follow the order shown.
+2. **Mouse:** a row drags to a new place with a ghost of the row under the pointer (the same ghost as the queue and playlist pages). The row it would land before shows a 2px rounded line in the accent above it, as wide as the row's content. An empty row-high slot after the last song takes a drop at the bottom. Built choice: the brief asked for the accent; the queue and playlist-page lines are text.secondary, so the three lines now differ in colour. Dropping a row on itself or just after itself changes nothing.
+3. **Keyboard:** Alt+Up / Alt+Down move the row under the cursor one place, the cursor and scroll follow it (same keys as the queue). Nothing moves until the cursor is on a row; the ends stay put.
+4. **Undo:** Ctrl+Z still covers the queue only. A Crate reorder is not undoable; Alt+Up / Alt+Down undoes a keyboard move.
