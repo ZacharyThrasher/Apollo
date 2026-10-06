@@ -31,6 +31,7 @@ use crate::library::LibraryWrites;
 use crate::player::PlayerModel;
 use crate::recent::{self, RecentModel, RecentRow};
 use crate::style::{self, color};
+use crate::target_playlist::{TargetHandle, TargetModel};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler};
 use crate::ui::player_bar::text_line;
@@ -96,11 +97,18 @@ const END_WIDTH: f32 = spacing::S12;
 const HEADER_HEIGHT: f32 = spacing::S12;
 const SECTION_ROWS: f32 = 4.0;
 const CHEVRON: f32 = 16.0;
+/// The check a row shows when the target playlist already holds the song (the Crate's mark).
+const FILED_MARK: f32 = 12.0;
 
 /// The page's own tab stops, in the slot after the Crate page's controls; the dock's, in the
 /// slot of the Crate panel's list (the two panels never show together).
 const TAB_SECTION: isize = 16;
 const DOCK_TAB_LIST: isize = 17;
+
+/// The shell's target playlist model, where there is a shell.
+fn target_model(cx: &App) -> Option<Entity<TargetModel>> {
+    cx.try_global::<TargetHandle>().map(|h| h.0.clone())
+}
 
 /// A row: the song and when it was played (a song heard twice, not in a row, is two rows).
 type Key = (String, i64);
@@ -496,6 +504,32 @@ impl RecentList {
         let now = apollo_services_common::unix_now() as i64;
         let when: SharedString = recent::ago_text(now, row.played_unix).into();
 
+        // The Crate's filed check, drawn only where the target playlist's songs are known already
+        // (this list never asks for them): every row keeps room for it, so titles do not shift.
+        let filed_mark = target_model(cx)
+            .filter(|t| t.read(cx).marks_ready(cx))
+            .map(|t| {
+                let filed = t.read(cx).is_filed(&video, cx);
+                div()
+                    .debug_selector(move || format!("{name}-filed-{ix}"))
+                    .flex_none()
+                    .size(px(FILED_MARK))
+                    .when(filed, |d| {
+                        d.child(
+                            svg()
+                                .path(Icon::Checkmark.path())
+                                .size(px(FILED_MARK))
+                                .text_color(color::text_secondary()),
+                        )
+                    })
+            });
+        // The docked row is narrow: its check sits before the heart, not after the time.
+        let (mark_before, mark_after) = if docked {
+            (filed_mark, None)
+        } else {
+            (None, filed_mark)
+        };
+
         // A picked row speaks for every picked row.
         let subject = match &self.bulk_menu {
             Some(bulk) if picked => bulk.clone(),
@@ -669,8 +703,10 @@ impl RecentList {
                         cx,
                     )),
             )
+            .children(mark_before)
             .child(heart)
             .children(end)
+            .children(mark_after)
             .when(ring, |d| d.child(focus_ring(accent, radius::SMALL)));
 
         // A row drags (into the docked Crate) with the songs of its menu: every picked song when
