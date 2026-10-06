@@ -48,7 +48,7 @@ pub const MAX_RESULTS: usize = 6;
 /// Lookups of a paste that run at once.
 pub const CONCURRENCY: usize = 2;
 /// The wait between one pair of lookups and the next (and between a playlist's pages).
-pub const PAUSE: Duration = Duration::from_millis(400);
+pub const PAUSE: Duration = Duration::from_millis(1000);
 /// How long every lookup stays stopped once YouTube says it is busy.
 pub const COOLDOWN: Duration = Duration::from_secs(120);
 /// Songs one paste adds at most (a long playlist is cut there).

@@ -1,6 +1,9 @@
 //! Lyrics for the playing track: looked up off the UI thread when a track becomes current, and
 //! for the track after it, so they are there when it starts. Answers (including "no lyrics")
 //! are kept for the session on top of the SQLite cache the service has.
+//!
+//! Lookups for tracks not known yet are spaced by [`SETTLE`] (the first goes out at once), so
+//! skipping through songs looks up the song landed on and the one after it, not every song passed.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -12,6 +15,8 @@ use gpui::{Context, Entity};
 
 use crate::player::PlayerModel;
 
+/// How long the current and next track must stay the same before a new lookup starts.
+pub use crate::related::{Settle, SETTLE};
 /// Answers kept in memory; the oldest go first.
 const MAX_SLOTS: usize = 24;
 /// A lookup that could not reach the source is tried again this long after, a few times.
@@ -44,6 +49,9 @@ pub struct LyricsModel {
     order: VecDeque<String>,
     /// The current and next track as last looked at, so a position tick costs one comparison.
     seen: (Option<String>, Option<String>),
+    /// Bumped when the current and next track change; a waiting lookup for an older one is dropped.
+    settle: u64,
+    spacing: Settle,
 }
 
 impl LyricsModel {
@@ -55,6 +63,8 @@ impl LyricsModel {
             slots: HashMap::new(),
             order: VecDeque::new(),
             seen: (None, None),
+            settle: 0,
+            spacing: Settle::default(),
         }
     }
 
@@ -88,6 +98,10 @@ impl LyricsModel {
 
     /// Look up the current track and the one after it, once each.
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        // Nothing to look up with yet; `install` looks again.
+        if self.service.is_none() {
+            return;
+        }
         let (current, next) = {
             let player = self.player.read(cx);
             let Some(c) = player.coordinator() else {
@@ -107,9 +121,31 @@ impl LyricsModel {
             return;
         }
         self.seen = ids;
-        for track in current.iter().chain(next.iter()) {
-            self.ensure(track, cx);
+        let wanted: Vec<Track> = current.iter().chain(next.iter()).cloned().collect();
+        // Anything already looked up is nothing to wait for.
+        if wanted.iter().all(|t| self.slots.contains_key(t.video_id.as_str())) {
+            return;
         }
+        self.settle += 1;
+        let settle = self.settle;
+        let wait = self.spacing.delay();
+        if wait.is_zero() {
+            for track in &wanted {
+                self.ensure(track, cx);
+            }
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.settle == settle {
+                    for track in &wanted {
+                        this.ensure(track, cx);
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     fn ensure(&mut self, track: &Track, cx: &mut Context<Self>) {

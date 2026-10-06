@@ -10,7 +10,7 @@ use apollo_account::service::{AccountService, IdentityState};
 use apollo_provider::{
     new_nonce, InnerTubeSource, PingState, PlaybackTracking, WatchtimePing,
 };
-use apollo_services_common::unix_now;
+use apollo_services_common::{unix_now, Lane, Throttle};
 
 use super::real_search::{hand_back_rotation, request_session, SyncedSource};
 use crate::reporting::{PingFailed, Pinger, Schedule, ThreadReporter, WatchReport, WatchState};
@@ -60,6 +60,12 @@ impl Pinger for AccountPinger {
     }
 
     fn tracking(&mut self, video_id: &str) -> Result<Option<Tracked>, PingFailed> {
+        // Reporting is background work: while YouTube has asked the app to slow down, a play goes
+        // unreported (nothing to report to, not a failure) instead of adding a `player` request
+        // to the pile.
+        if Throttle::global().blocked(Lane::Background).is_some() {
+            return Ok(None);
+        }
         let session = request_session(&self.account, unix_now()).map_err(|_| PingFailed)?;
         let source = self.sources.source_for(&session).map_err(|_| PingFailed)?;
         let result = self.runtime.block_on(async {

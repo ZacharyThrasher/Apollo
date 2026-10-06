@@ -274,6 +274,13 @@ fn scroll_by_hand(vcx: &mut VisualTestContext, dy: f32) {
     settle(vcx);
 }
 
+/// One skip, then enough time for the lookups it started to be let out (they are spaced).
+fn skip(page: &Page, vcx: &mut VisualTestContext) {
+    page.player.update(vcx, |m, cx| m.next(cx));
+    vcx.executor().advance_clock(apollo_app::lyrics::SETTLE * 2);
+    vcx.run_until_parked();
+}
+
 #[gpui::test]
 fn lyrics_are_looked_up_for_the_playing_and_the_next_track_without_the_pane_open(
     cx: &mut TestAppContext,
@@ -283,12 +290,25 @@ fn lyrics_are_looked_up_for_the_playing_and_the_next_track_without_the_pane_open
     assert!(!page.shell.read_with(vcx, |s, cx| s.lyrics_showing(cx)));
     assert_eq!(asked(&page), IDS[..2].to_vec());
     // Next: the track after the new current one is looked up; the others are not asked twice.
-    page.player.update(vcx, |m, cx| m.next(cx));
-    vcx.run_until_parked();
+    skip(&page, vcx);
     assert_eq!(asked(&page), IDS[..3].to_vec());
+    skip(&page, vcx);
+    assert_eq!(asked(&page), IDS.to_vec());
+}
+
+#[gpui::test]
+fn skipping_quickly_looks_up_only_the_song_landed_on(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx, None);
+    assert_eq!(asked(&page), IDS[..2].to_vec());
+    // Two skips in a row, faster than the spacing: the song in between is never asked for.
+    page.player.update(vcx, |m, cx| m.next(cx));
     page.player.update(vcx, |m, cx| m.next(cx));
     vcx.run_until_parked();
-    assert_eq!(asked(&page), IDS.to_vec());
+    // (The first skip may go out at once, being the first in a while; the second is held back.)
+    assert!(!asked(&page).contains(&IDS[3].to_owned()), "held back, not asked per skip");
+    vcx.executor().advance_clock(apollo_app::lyrics::SETTLE * 2);
+    vcx.run_until_parked();
+    assert_eq!(asked(&page), IDS.to_vec(), "the landed-on song and the one after it");
 }
 
 #[gpui::test]
@@ -470,10 +490,9 @@ fn plain_lyrics_are_static_text_and_no_lyrics_is_one_line(cx: &mut TestAppContex
 fn a_failed_lookup_is_tried_again_and_shows_no_lyrics_meanwhile(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx, None);
     *page.script.offline.lock().unwrap() = true;
-    page.player.update(vcx, |m, cx| m.next(cx));
-    page.player.update(vcx, |m, cx| m.next(cx));
-    page.player.update(vcx, |m, cx| m.next(cx));
-    vcx.run_until_parked();
+    skip(&page, vcx);
+    skip(&page, vcx);
+    skip(&page, vcx);
     let before = page.script.asked().len();
     let lyrics = page.shell.read_with(vcx, |s, _| s.lyrics().clone());
     assert_eq!(

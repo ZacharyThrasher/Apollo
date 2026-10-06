@@ -3,6 +3,7 @@
 //! cache. Nothing is fetched until the tests let the executor run, so "what is on screen right
 //! after the open call" is exactly "what was drawn before the network answered".
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use apollo_app::art::{ArtSource, DecodedArt, SyntheticArt};
@@ -45,6 +46,8 @@ impl ThumbSource for TestThumbs {
 struct Switch {
     inner: SimLibrary,
     failure: Arc<Mutex<Option<LoadFailure>>>,
+    /// How many times a playlist's or album's rows were asked for.
+    track_reads: Arc<AtomicUsize>,
 }
 
 impl Switch {
@@ -52,6 +55,7 @@ impl Switch {
         Self {
             inner: SimLibrary::instant(),
             failure: Arc::new(Mutex::new(None)),
+            track_reads: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -73,6 +77,7 @@ impl LibrarySource for Switch {
         self.inner.collections()
     }
     fn tracks(&self, collection: &Collection) -> Result<Page<TrackRow>, LoadFailure> {
+        self.track_reads.fetch_add(1, Ordering::SeqCst);
         self.check()?;
         self.inner.tracks(collection)
     }
@@ -416,6 +421,43 @@ fn a_revisited_playlist_shows_its_rows_at_once_and_swaps_in_the_fresh_ones(
         .get::<Vec<TrackRow>>(&keys::collection(&road.id))
         .unwrap();
     assert_eq!(cached.value, fresh, "the fresh rows replaced the stale ones in the cache");
+}
+
+#[gpui::test]
+fn a_page_reopened_within_half_a_minute_is_not_fetched_again_but_reload_always_is(
+    cx: &mut TestAppContext,
+) {
+    let road = road_trip();
+    let fresh = fresh_rows(&road);
+    let (rig, vcx) = rig(cx, |cache| {
+        put(cache, &keys::collection(&road.id), fresh.clone())
+    });
+    rig.install(vcx);
+    vcx.run_until_parked();
+    let reads = rig.library.track_reads.clone();
+    let before = reads.load(Ordering::SeqCst);
+
+    rig.model.update(vcx, |m, cx| m.open(road.clone(), cx));
+    vcx.run_until_parked();
+    assert_eq!(reads.load(Ordering::SeqCst), before + 1, "the first visit refreshes behind the cache");
+
+    // Back and Forward through the same page, as often as the keys repeat: drawn from the cache.
+    for _ in 0..5 {
+        rig.model.update(vcx, |m, cx| {
+            m.close(cx);
+        });
+        rig.model.update(vcx, |m, cx| m.open(road.clone(), cx));
+        vcx.run_until_parked();
+        rig.model.read_with(vcx, |m, _| {
+            assert_eq!(m.detail().unwrap().listing.items().len(), fresh.len(), "still shown");
+        });
+    }
+    assert_eq!(reads.load(Ordering::SeqCst), before + 1, "no request for a revisit");
+
+    // Retry is a request for the page itself: it always goes out.
+    rig.model.update(vcx, |m, cx| m.reload_detail(cx));
+    vcx.run_until_parked();
+    assert_eq!(reads.load(Ordering::SeqCst), before + 2);
 }
 
 #[gpui::test]

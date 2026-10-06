@@ -669,6 +669,29 @@ fn a_stream_found_through_a_fallback_client_after_a_429_still_backs_off() {
 }
 
 #[test]
+fn every_request_to_youtube_leaves_one_log_line_with_its_kind_and_video() {
+    let mut r = rig(Opts::new("ok"));
+    let latency = r.log.with_file_name("latency.log");
+    r.rs().set_log_file(latency.clone());
+    let ahead = r.coordinator_requests[1].track.clone();
+    r.rs().prefetch(&ahead);
+    assert!(wait_until(WAIT, || r.rs().cached() == 1));
+    r.start(2);
+    r.result(WAIT).unwrap().1.expect("lease");
+    // Cached: no request, no line.
+    r.rs().prefetch(&ahead);
+    r.start(1);
+    r.result(WAIT).unwrap().1.expect("lease");
+    let text = fs::read_to_string(&latency).unwrap();
+    let lines: Vec<&str> = text.lines().filter(|l| l.contains("yt_request")).collect();
+    let click = r.coordinator_requests[2].track.video_id.as_str().to_owned();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].ends_with(&format!("yt_request kind=resolve_ahead video_id={}", ahead.video_id.as_str())), "{lines:?}");
+    assert!(lines[1].ends_with(&format!("yt_request kind=resolve video_id={click}")), "{lines:?}");
+    assert!(!r.diag().contains("yt_request"), "kept out of the diagnostics ring");
+}
+
+#[test]
 fn prefetch_stops_during_the_cooldown() {
     let mut r = rig(Opts::new("fail-429"));
     r.start(0);

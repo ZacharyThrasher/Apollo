@@ -132,6 +132,8 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     });
     // The saved output device and equalizer, and any change to them later.
     crate::audio::bind(&player, &settings, cx);
+    // Hover and cursor preloading, off until switched on in Settings > Playback.
+    crate::preload::bind(&player, &settings, cx);
     // Plays are reported to YouTube Music only while "Add plays to history" is on.
     let reporter = mode.play_reporter(&ports.service);
     let history_on = settings.read(cx).get(&ADD_PLAYS_TO_HISTORY);

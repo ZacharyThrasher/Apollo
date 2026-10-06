@@ -10,7 +10,7 @@ use apollo_app::art::{ArtSource, DecodedArt, SyntheticArt};
 use apollo_app::backend::{LibraryTrack, Ports, Prepared};
 use apollo_app::library::sim::{RelatedBehaviour, SimLibrary};
 use apollo_app::player::PlayerModel;
-use apollo_app::related::{Phase, RelatedModel};
+use apollo_app::related::{Phase, RelatedModel, SETTLE};
 use apollo_app::settings::RelatedOpenStore;
 use apollo_app::style::Fonts;
 use apollo_app::ui::pane_tabs::Pane;
@@ -123,8 +123,10 @@ fn setup_with(
     )
 }
 
-/// Several parks: the pane's rows appear a frame after its model answers.
+/// Several parks: the pane's rows appear a frame after its model answers. The clock moves past
+/// the pane's settle wait first, so a request that was held for it goes out.
 fn settle(vcx: &mut VisualTestContext) {
+    vcx.executor().advance_clock(SETTLE * 2);
     for _ in 0..4 {
         vcx.run_until_parked();
         vcx.update(|window, _| window.refresh());
@@ -289,13 +291,13 @@ fn an_answer_for_a_track_that_is_gone_is_dropped(cx: &mut TestAppContext) {
     let (page, vcx) = setup(cx, None);
     show(&page, vcx, Pane::Related);
     let requests = page.model.read_with(vcx, |m, _| m.requests());
-    // Two skips in a row: only the track playing at the end is shown.
+    // Two skips in a row: only the track playing at the end is asked for and shown.
     page.player.update(vcx, |m, cx| m.next(cx));
     page.player.update(vcx, |m, cx| m.next(cx));
     settle(vcx);
     let current = page.player.read_with(vcx, |m, _| m.current_video()).unwrap();
     page.model.read_with(vcx, |m, _| {
-        assert_eq!(m.requests(), requests + 2);
+        assert_eq!(m.requests(), requests + 1, "the song skipped past was never asked for");
         assert_eq!(m.shown_for(), Some(current.as_str()));
     });
 }

@@ -54,6 +54,12 @@ impl TextSetting {
 /// Playback > Add plays to history: Apollo tells YouTube Music what was played, as its web client
 /// does, so plays show in History and keep shaping Home and mixes. Off sends nothing at all.
 pub const ADD_PLAYS_TO_HISTORY: BoolSetting = BoolSetting::new("add_plays_to_history", true);
+/// Playback > Preload songs on hover: resolve a song ahead of the click when the pointer or the
+/// keyboard rests on it, and the first song of a page when it opens. Off (the default), only the
+/// queue's own lookahead and Skim's one-ahead resolve anything ahead of a click: every ahead-of-
+/// time resolve is about six requests to YouTube, and hover is the one trigger that has no limit
+/// of its own (see ADR 0005).
+pub const PRELOAD_ON_HOVER: BoolSetting = BoolSetting::new("preload_on_hover", false);
 /// Home > Personal shelves: "On repeat" and "Forgotten favourites" from Apollo's own play log sit
 /// among Home's shelves. Off hides them; the log itself is kept either way.
 pub const PERSONAL_SHELVES: BoolSetting = BoolSetting::new("personal_shelves", true);
@@ -190,6 +196,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     KEY_LYRICS_OPEN,
     KEY_RELATED_OPEN,
     ADD_PLAYS_TO_HISTORY.key,
+    PRELOAD_ON_HOVER.key,
     PERSONAL_SHELVES.key,
     PICKER_STAY_OPEN.key,
     PICKER_KEY.key,
