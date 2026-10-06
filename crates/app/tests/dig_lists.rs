@@ -252,9 +252,11 @@ fn d_on_a_crate_row_digs_from_it_and_k_keeps_back_into_the_crate(cx: &mut TestAp
     route(&page, vcx, Route::Crate);
     let crate_page = page.shell.read_with(vcx, |s, _| s.crate_page().clone());
     focus_panel(vcx, &crate_page);
+    // Opening the Crate page asks More like the Crate for its own radio; only the dig's counts.
+    let before = page.sim.radio_seeds().len();
     vcx.simulate_keystrokes("down d");
     vcx.run_until_parked();
-    assert_eq!(page.sim.radio_seeds(), [KEPT[0].to_owned()]);
+    assert_eq!(page.sim.radio_seeds()[before..], [KEPT[0].to_owned()]);
     assert!(digging(&page, vcx));
     // The radio leaves out what the Crate holds, and K sets the song being skimmed aside.
     vcx.simulate_keystrokes("k");
