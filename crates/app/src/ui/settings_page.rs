@@ -16,7 +16,7 @@ use crate::settings::{
     BoolSetting, SettingsModel, AUTO_ADVANCE, CLOSE_TO_TRAY, CONFIRM_ADDS, CRATE_FILE_AND_FORGET,
     CRATE_MARK_FILED, DIG_KEY, DIG_LEAVE_OUT, DISCORD_PRESENCE, GLOBAL_HOTKEYS, HUD_AUTO_HIDE,
     INSTANT_PLAYLISTS,
-    KEY_BADGES, PREFER_EXPLICIT, SHOW_SHORTCUT_HINTS,
+    KEY_BADGES, PREFER_EXPLICIT, CRATE_MORE_LIKE, SHOW_SHORTCUT_HINTS,
     MINI_COLLAPSE_ON_BLUR, MINI_DIM, MINI_FADE_CONTROLS, MINI_PLAYER_HUD, MINI_PLAYER_ON_TOP,
     MINI_SHOW_LYRICS, MINI_SHOW_VOLUME, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES,
     START_MINIMIZED_TO_TRAY, TARGET_KEY, TARGET_PILL,
@@ -109,7 +109,7 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = self.player.read(cx).view().accent;
-        let h = self.handles(30, cx);
+        let h = self.handles(31, cx);
 
         let home_section = SettingsSection::new("Home")
             .row(self.bool_row(
@@ -215,6 +215,14 @@ impl Render for SettingsPage {
                 "Leave out songs I already have",
                 &DIG_LEAVE_OUT,
                 &h[29],
+                accent,
+                cx,
+            ))
+            .row(self.bool_row(
+                "setting-crate-more-like",
+                "More like the Crate",
+                &CRATE_MORE_LIKE,
+                &h[30],
                 accent,
                 cx,
             ));

@@ -35,7 +35,7 @@ use crate::player::PlayerModel;
 use crate::related::RelatedModel;
 use crate::search::{SearchModel, SearchSource};
 use crate::settings::{
-    SettingsModel, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES, PREFER_EXPLICIT,
+    SettingsModel, MOOD_CHIPS, MORE_LIKE_THIS, PERSONAL_SHELVES, PREFER_EXPLICIT, CRATE_MORE_LIKE,
 };
 use crate::settings::{LibrarySortStore, LyricsOpenStore, RelatedOpenStore, SettingsBackend};
 use crate::style::{self, color};
@@ -389,6 +389,16 @@ impl Shell {
         crate_model.update(cx, |m, cx| {
             m.follow(player.clone(), &writes, settings.clone(), cx)
         });
+        // More like the Crate: one model for the page and the docked panel.
+        let crate_more = cx.new(|cx| {
+            crate::crate_more::CrateMoreModel::new(
+                player.clone(),
+                crate_model.clone(),
+                writes.clone(),
+                cx,
+            )
+        });
+        cx.set_global(crate::crate_more::CrateMoreHandle(crate_more.clone()));
         let target_model =
             cx.new(|cx| TargetModel::new(settings.clone(), writes.clone(), &edits, cx));
         cx.observe(&target_model, |_, _, cx| cx.notify()).detach();
@@ -693,6 +703,17 @@ impl Shell {
             cx.observe(&settings, move |_, settings, cx| {
                 let on = settings.read(cx).get(&MORE_LIKE_THIS);
                 library.update(cx, |l, cx| l.set_more_like_enabled(on, cx));
+            })
+            .detach();
+        }
+        // Playlists > More like the Crate follows its switch.
+        {
+            let on = settings.read(cx).get(&CRATE_MORE_LIKE);
+            crate_more.update(cx, |m, cx| m.set_enabled(on, cx));
+            let crate_more = crate_more.clone();
+            cx.observe(&settings, move |_, settings, cx| {
+                let on = settings.read(cx).get(&CRATE_MORE_LIKE);
+                crate_more.update(cx, |m, cx| m.set_enabled(on, cx));
             })
             .detach();
         }
