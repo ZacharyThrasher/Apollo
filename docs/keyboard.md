@@ -132,8 +132,9 @@ so they show up in its YouTube Music search history like any other.
 
 The Crate button in the player bar (or **Ctrl+Shift+C**) opens the Crate as a 320px panel on the
 right of the main window, in the queue panel's place: the two share that slot, one at a time, and
-the **Queue · Crate** tabs at the top of either swap them (opening the queue closes the Crate and
-the other way round). It stays open while you move between pages, and open or closed is
+the **Queue · Crate · Recent** tabs at the top of either swap them (opening the queue closes the
+Crate and the other way round; **Recent** is the Crate panel showing the recently played list, see
+"Recently played" below). It stays open while you move between pages, and open or closed is
 remembered for the next run. It steps aside for Now Playing, which fills the window, and for the
 Crate page itself (the same list); below 1100px of window width it overlays the page's right edge
 instead of squeezing it.
@@ -161,6 +162,30 @@ playlist, an album or the Songs tab and let go on the panel. A thin line shows w
 below the last row, or on the empty panel, is the bottom / the start. A song the Crate already
 holds moves to that place instead of being added twice. C still adds at the bottom. Rows of the
 panel drag to rearrange it, as on the page.
+
+## Recently played
+
+Songs you heard lately, so one you loved an hour ago and forgot to press C on is not lost. It is
+read from the local play log only (no YouTube calls) and appears in two places:
+
+* **The Crate page:** a collapsible **Recently played** section under the list. It starts
+  collapsed (one line with a chevron); click it, or Tab to it and press Enter, to open four rows
+  of it (it scrolls). Open or closed is remembered for the next run.
+* **The dock's Recent tab:** the Queue · Crate · Recent control. Ctrl+Shift+C lands in whichever
+  list the panel shows.
+
+The list is the last 7 days, newest first, up to 200 rows. A song played again right away shows
+once (at the newest play); one heard again after another song is its own row. Only plays that
+counted are in it (see Local stats: a song left in a few seconds is not), and Skim plays never
+are. Artists on the block list are left out. At the right of each row: how long ago ("now",
+"5m ago", "3h ago", "2d ago"); under the pointer or the cursor, a box button sets the song aside
+in the Crate (it is empty for a song the Crate already holds) and More opens the usual menu.
+
+The rows work like the other song lists: Up/Down, **Enter** (or a click) plays the song with the
+list as the queue, **C** sets it aside and the cursor steps on (Auto-advance), **L**, **P**, **A**,
+Shift+Up/Down, Ctrl+A, Ctrl+click and Shift+click pick songs (C, L, P and A then act on all of
+them), Esc clears the picks (and, in the dock, leaves it). A row, or the picked rows, drags onto
+the Crate: on the Crate page onto its list, where a thin line shows the place.
 
 ## C from anywhere
 

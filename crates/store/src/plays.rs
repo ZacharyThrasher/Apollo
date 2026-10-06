@@ -44,6 +44,20 @@ pub struct PlayTotal {
     pub last_played: i64,
 }
 
+/// One play as the log kept it, for the "Recently played" list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentPlay {
+    pub video_id: String,
+    pub title: String,
+    pub artists: String,
+    pub album_title: Option<String>,
+    pub album_id: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub art: Option<String>,
+    /// Unix seconds when the play counted.
+    pub played_unix: i64,
+}
+
 fn to_i64(v: u64, what: &'static str) -> Result<i64, StoreError> {
     i64::try_from(v).map_err(|_| StoreError::OutOfRange(what))
 }
@@ -87,6 +101,39 @@ impl Store {
             params![id, to_i64(listened_ms, "listened time")?],
         )?;
         Ok(())
+    }
+
+    /// The newest `limit` plays of `account_key` at or after `since_unix`, newest first (one row
+    /// per play: the same song twice is two rows).
+    pub fn recent_plays(
+        &self,
+        account_key: &str,
+        since_unix: i64,
+        limit: usize,
+    ) -> Result<Vec<RecentPlay>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT video_id, title, artists, album_title, album_id, duration_ms, art, played_unix
+             FROM plays
+             WHERE account_key = ?1 AND played_unix >= ?2
+             ORDER BY played_unix DESC, id DESC
+             LIMIT ?3",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt.query_map(params![account_key, since_unix, limit], |r| {
+            Ok(RecentPlay {
+                video_id: r.get(0)?,
+                title: r.get(1)?,
+                artists: r.get(2)?,
+                album_title: r.get(3)?,
+                album_id: r.get(4)?,
+                duration_ms: r
+                    .get::<_, Option<i64>>(5)?
+                    .and_then(|d| u64::try_from(d).ok()),
+                art: r.get(6)?,
+                played_unix: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Per track, the plays of `account_key` at or after `since_unix` (all of them for `None`).
@@ -177,6 +224,33 @@ mod tests {
         let id = store.record_play("a", &play("x", 100, 30_000)).unwrap();
         store.set_listened(id, 190_000).unwrap();
         assert_eq!(store.play_totals("a", None).unwrap()[0].listened_ms, 190_000);
+    }
+
+    #[test]
+    fn recent_plays_come_newest_first_within_the_window_and_the_limit() {
+        let store = Store::open_in_memory().unwrap();
+        store.record_play("a", &play("old", 50, 1)).unwrap();
+        store.record_play("a", &play("x", 100, 1)).unwrap();
+        store.record_play("a", &play("y", 200, 1)).unwrap();
+        store.record_play("a", &play("x", 300, 1)).unwrap();
+        store.record_play("b", &play("other", 400, 1)).unwrap();
+        let ids = |rows: Vec<RecentPlay>| -> Vec<String> {
+            rows.into_iter().map(|r| r.video_id).collect()
+        };
+        assert_eq!(ids(store.recent_plays("a", 100, 10).unwrap()), ["x", "y", "x"]);
+        assert_eq!(ids(store.recent_plays("a", 100, 2).unwrap()), ["x", "y"]);
+        assert!(store.recent_plays("c", 0, 10).unwrap().is_empty());
+        let newest = &store.recent_plays("a", 0, 1).unwrap()[0];
+        assert_eq!((newest.played_unix, newest.title.as_str()), (300, "Title x @300"));
+    }
+
+    #[test]
+    fn plays_in_the_same_second_keep_the_order_they_were_written() {
+        let store = Store::open_in_memory().unwrap();
+        store.record_play("a", &play("first", 100, 1)).unwrap();
+        store.record_play("a", &play("second", 100, 1)).unwrap();
+        let rows = store.recent_plays("a", 0, 10).unwrap();
+        assert_eq!(rows[0].video_id, "second");
     }
 
     #[test]

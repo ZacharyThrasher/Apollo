@@ -66,6 +66,7 @@ use crate::ui::anchor;
 use crate::ui::playlist_dialog::{self, Mode, CRATE_PLAYLIST_NAME};
 use crate::ui::playlist_picker::PlaylistPicker;
 use crate::player::{format_time, PlayerModel};
+use crate::recent::{self, RecentModel};
 use crate::queue_source;
 use crate::target_playlist::{TargetHandle, TargetModel};
 use crate::style::{self, color};
@@ -77,6 +78,7 @@ use crate::ui::library::DraggedRow as LibraryRow;
 use crate::ui::song_drag::SongDrag;
 use crate::ui::player_bar::text_line;
 use crate::ui::playing_row;
+use crate::ui::recent_list::{self, RecentList};
 use crate::ui::row_actions::{heart_action, more_slot, row_action, ACTION_SIZE};
 use crate::ui::selection::{self, Click, Selection};
 use crate::ui::text_button::TextButton;
@@ -294,11 +296,10 @@ fn drop_line(group: SharedString, dock: bool) -> impl IntoElement {
         .bg(color::text_secondary())
         .opacity(0.0)
         .group_drag_over::<DraggedRow>(group.clone(), |s| s.opacity(1.0))
-        // The docked list also takes songs from the other lists.
-        .when(dock, |d| {
-            d.group_drag_over::<SongDrag>(group.clone(), |s| s.opacity(1.0))
-                .group_drag_over::<LibraryRow>(group, |s| s.opacity(1.0))
-        })
+        // Songs dragged in from another list (the page's own Recently played section, or on the
+        // docked list any list) show the line too.
+        .group_drag_over::<SongDrag>(group.clone(), |s| s.opacity(1.0))
+        .when(dock, |d| d.group_drag_over::<LibraryRow>(group, |s| s.opacity(1.0)))
 }
 
 /// A header button wrapped so tests (and the layout) can find it by name.
@@ -403,6 +404,13 @@ pub struct CratePage {
     /// Esc in the docked list with nothing picked: focus goes back to where it was before the
     /// jump into the dock (the shell's).
     on_leave: Option<Rc<Handler>>,
+    /// The recently played list: the section under the page's list, or (docked) what the Recent
+    /// tab shows in the Crate's place.
+    recent: Entity<RecentList>,
+    /// The recently played list's list and header focus handles, to tell where the keyboard is.
+    recent_focus: [FocusHandle; 2],
+    /// What the docked panel shows: the Crate, or the recently played list.
+    view: Dock,
 }
 
 impl CratePage {
@@ -467,6 +475,18 @@ impl CratePage {
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         crate::confirm::watch(cx);
         let dock = layout == Layout::Dock;
+        let recent = {
+            let model = recent::handle(cx).unwrap_or_else(|| cx.new(|_| RecentModel::new()));
+            let (crate_, player, writes) = (crate_.clone(), player.clone(), writes.clone());
+            let how = if dock {
+                recent_list::Layout::Dock
+            } else {
+                recent_list::Layout::Section
+            };
+            cx.new(|cx| RecentList::new(how, model, crate_, player, writes, cx))
+        };
+        cx.observe(&recent, |_, _, cx| cx.notify()).detach();
+        let recent_focus = recent.read(cx).focus_handles();
         let add_model = cx.new(|_| CrateAddModel::new(crate_.clone(), player.clone()));
         // Esc and Down in the add box hand the keyboard to the list.
         let on_leave: Leave = {
@@ -526,6 +546,9 @@ impl CratePage {
             layout,
             dock_tabs: None,
             on_leave: None,
+            recent,
+            recent_focus,
+            view: Dock::Crate,
         }
     }
 
@@ -543,9 +566,41 @@ impl CratePage {
         self.layout == Layout::Dock
     }
 
+    /// Whether the docked panel shows the recently played list (the Recent tab).
+    fn showing_recent(&self) -> bool {
+        self.docked() && self.view == Dock::Recent
+    }
+
+    /// The Queue · Crate · Recent control chose between the Crate and the recently played list.
+    pub fn show_view(&mut self, view: Dock, cx: &mut Context<Self>) {
+        let view = if view == Dock::Recent { Dock::Recent } else { Dock::Crate };
+        if self.view != view {
+            self.view = view;
+            // Esc in the Recent tab goes back where the jump into the dock came from, as in the
+            // Crate's own list.
+            if let Some(leave) = self.on_leave.clone() {
+                self.recent.update(cx, |r, _| r.set_on_leave(leave));
+            }
+            cx.notify();
+        }
+    }
+
+    /// The recently played list this page (or the dock's Recent tab) draws.
+    pub fn recent(&self) -> &Entity<RecentList> {
+        &self.recent
+    }
+
+    /// Which list the docked panel shows now.
+    pub fn view(&self) -> Dock {
+        self.view
+    }
+
     /// Ctrl+Shift+C: the keyboard lands in the list, on the row it was last on, else the first.
     /// Whether there was a list to land on (an empty crate shows only its hint).
     pub fn enter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.showing_recent() {
+            return self.recent.update(cx, |r, cx| r.enter(window, cx));
+        }
         let ids = self.ids(cx);
         if ids.is_empty() {
             return false;
@@ -564,6 +619,9 @@ impl CratePage {
 
     /// Whether the keyboard is on the list or on one of the header's controls.
     pub fn has_focus(&self, window: &Window) -> bool {
+        if self.showing_recent() {
+            return self.recent_focus.iter().any(|h| h.is_focused(window));
+        }
         let f = &self.focus;
         [&f.list, &f.save, &f.add_to, &f.clear]
             .iter()
@@ -1324,13 +1382,13 @@ impl CratePage {
         let el = el.on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
             this.drop_row(dragged.from, slot, cx)
         }));
+        let el = el.on_drop(cx.listener(move |this, dragged: &SongDrag, _, cx| {
+            this.drop_songs(&dragged.songs, slot, cx)
+        }));
         if !self.docked() {
             return el;
         }
-        el.on_drop(cx.listener(move |this, dragged: &SongDrag, _, cx| {
-            this.drop_songs(&dragged.songs, slot, cx)
-        }))
-        .on_drop(cx.listener(move |this, dragged: &LibraryRow, _, cx| {
+        el.on_drop(cx.listener(move |this, dragged: &LibraryRow, _, cx| {
             if let Some(song) = &dragged.song {
                 this.drop_songs(&song.songs, slot, cx)
             }
@@ -2272,6 +2330,30 @@ impl CratePage {
             .into_any_element()
     }
 
+    /// The docked panel on its Recent tab: the Queue · Crate · Recent control over the recently
+    /// played list.
+    fn recent_dock(&self, accent: Accent) -> AnyElement {
+        let tabs = self
+            .dock_tabs
+            .clone()
+            .map(|(focus, on_pick)| DockTabs::new(Dock::Recent, &focus, accent, on_pick));
+        div()
+            .id("crate-dock")
+            .debug_selector(|| "crate-dock".into())
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(layout::QUEUE_PANEL_WIDTH))
+            .h_full()
+            .min_h_0()
+            .bg(color::bg_raised())
+            .border_l_1()
+            .border_color(color::border_subtle())
+            .children(tabs)
+            .child(self.recent.clone())
+            .into_any_element()
+    }
+
     /// The docked list with nothing in it: the hint, and a place to drop the first song.
     fn dock_empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let hover = |s: gpui::StyleRefinement| s.bg(color::state_hover());
@@ -2415,6 +2497,9 @@ impl CratePage {
 
 impl Focusable for CratePage {
     fn focus_handle(&self, _: &App) -> FocusHandle {
+        if self.showing_recent() {
+            return self.recent_focus[0].clone();
+        }
         self.focus.list.clone()
     }
 }
@@ -2422,6 +2507,9 @@ impl Focusable for CratePage {
 impl Render for CratePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.accent = self.player.read(cx).view().accent;
+        if self.showing_recent() {
+            return self.recent_dock(self.accent);
+        }
         let total = self.crate_.read(cx).len();
         self.watch_target(total, cx);
         let controls = self.controls(window, self.accent, total, cx);
@@ -2551,6 +2639,7 @@ impl Render for CratePage {
             .child(header)
             .child(div().flex_none().mt(px(spacing::S4)).child(add))
             .child(div().flex_1().min_h_0().mt(px(spacing::S4)).child(body))
+            .child(div().flex_none().mt(px(spacing::S4)).child(self.recent.clone()))
             .into_any_element()
     }
 }
