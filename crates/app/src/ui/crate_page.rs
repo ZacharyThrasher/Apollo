@@ -24,6 +24,18 @@
 //! for Ctrl+Z, and Alt+Home / Alt+End send the row under the cursor (or every picked row) to the
 //! top or bottom.
 //!
+//! **Skim the Crate** (the Skim button, or K on the list): each song plays for a few seconds, the
+//! way a playlist skims. Delete tosses the song playing (Ctrl+Z puts it back) and the skim goes on,
+//! K keeps it and goes on, Enter plays it, Esc leaves. Skim's own one-song prefetch is all there is.
+//!
+//! **Picks** (2 or more) narrow the header: "Save 8 picked…" and "Add 8 picked to…" act on the
+//! picked songs only, in the Crate's order; the rest stay.
+//!
+//! **Filed markers**: with a target playlist set, a row the target already holds shows a small
+//! check after its duration, and "Hide filed" leaves those rows out of the list. It narrows the
+//! list the way the filter does (the buttons follow the list shown, arranging by place is off).
+//! What the target holds is read once (see `target_playlist`).
+//!
 //! The list is virtual and keyboard-first like the queue panel's: one tab stop, an arrow-key
 //! cursor, Enter plays, L likes, Delete removes.
 //!
@@ -48,12 +60,15 @@ use gpui::{
 use crate::assets::Icon;
 use crate::crate_add::{CrateAddEvent, CrateAddModel};
 use crate::crate_arrange::{self, Arrange};
-use crate::crate_list::{CrateEvent, CrateModel};
+use crate::crate_list::{self, CrateEvent, CrateModel};
 use crate::library::LibraryWrites;
 use crate::ui::anchor;
 use crate::ui::playlist_dialog::{self, Mode, CRATE_PLAYLIST_NAME};
 use crate::ui::playlist_picker::PlaylistPicker;
 use crate::player::{format_time, PlayerModel};
+use crate::recent::{self, RecentModel};
+use crate::queue_source;
+use crate::target_playlist::{TargetHandle, TargetModel};
 use crate::style::{self, color};
 use crate::ui::art_tile::art_tile;
 use crate::ui::button::{focus_ring, keyboard_focused, Handler, IconButton};
@@ -63,6 +78,7 @@ use crate::ui::library::DraggedRow as LibraryRow;
 use crate::ui::song_drag::SongDrag;
 use crate::ui::player_bar::text_line;
 use crate::ui::playing_row;
+use crate::ui::recent_list::{self, RecentList};
 use crate::ui::row_actions::{heart_action, more_slot, row_action, ACTION_SIZE};
 use crate::ui::selection::{self, Click, Selection};
 use crate::ui::text_button::TextButton;
@@ -79,6 +95,7 @@ actions!(
         LikeCursor,
         PlaylistCursor,
         TargetCursor,
+        DigCursor,
         MoveCursorUp,
         MoveCursorDown,
         CrateMoveTop,
@@ -87,6 +104,7 @@ actions!(
         ExtendDown,
         SelectAll,
         ClearPicks,
+        SkimCursor,
         CrateFocusAdd,
         CratePaste
     ]
@@ -117,6 +135,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("a", TargetCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("d", DigCursor, Some(KEY_CONTEXT)),
+        // While a skim runs the shell's own K (keep and go on) takes it back (see `skim_cursor`).
+        KeyBinding::new("k", SkimCursor, Some(KEY_CONTEXT)),
         // On the page, not in the panel on the right: from there Left is just the previous control.
         KeyBinding::new("left", crate::ui::shell::FocusSidebar, Some("CrateList && !Docked")),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
@@ -170,6 +191,9 @@ const TAB_ADD_TO: isize = 10;
 const TAB_CLEAR: isize = 11;
 const TAB_MORE: isize = 12;
 const TAB_FILTER: isize = 13;
+/// Skim sits after Shuffle in the paint order, in Add all to queue's slot; Hide filed after Clear.
+const TAB_SKIM: isize = TAB_ADD_ALL;
+const TAB_HIDE_FILED: isize = TAB_CLEAR;
 const TAB_ARRANGE: isize = 14;
 const TAB_LIST: isize = 15;
 const TAB_SEARCH: isize = 16;
@@ -204,6 +228,8 @@ struct Focus {
     add_to: FocusHandle,
     more: FocusHandle,
     clear: FocusHandle,
+    skim: FocusHandle,
+    hide_filed: FocusHandle,
     list: FocusHandle,
     search: FocusHandle,
     /// The Arrange button, and the popover it opens (not a tab stop).
@@ -270,16 +296,23 @@ fn drop_line(group: SharedString, dock: bool) -> impl IntoElement {
         .bg(color::text_secondary())
         .opacity(0.0)
         .group_drag_over::<DraggedRow>(group.clone(), |s| s.opacity(1.0))
-        // The docked list also takes songs from the other lists.
-        .when(dock, |d| {
-            d.group_drag_over::<SongDrag>(group.clone(), |s| s.opacity(1.0))
-                .group_drag_over::<LibraryRow>(group, |s| s.opacity(1.0))
-        })
+        // Songs dragged in from another list (the page's own Recently played section, or on the
+        // docked list any list) show the line too.
+        .group_drag_over::<SongDrag>(group.clone(), |s| s.opacity(1.0))
+        .when(dock, |d| d.group_drag_over::<LibraryRow>(group, |s| s.opacity(1.0)))
 }
 
 /// A header button wrapped so tests (and the layout) can find it by name.
 fn named(name: &'static str, button: impl IntoElement) -> gpui::Div {
     div().debug_selector(move || name.into()).child(button)
+}
+
+/// The check on a row the target playlist already holds.
+const FILED_MARK: f32 = 12.0;
+
+/// The shell's target playlist model, where there is a shell.
+fn target_model(cx: &App) -> Option<Entity<TargetModel>> {
+    cx.try_global::<TargetHandle>().map(|h| h.0.clone())
 }
 
 /// "3 of 42 songs": what the filter keeps, of the whole Crate.
@@ -341,6 +374,8 @@ pub struct CratePage {
     picker: Entity<PlaylistPicker>,
     focus: Focus,
     scroll: UniformListScrollHandle,
+    /// The add (see `confirm::scroll_to`) this list last scrolled for.
+    scrolled: u64,
     /// The row the keyboard acts on (by video id), shown only while the list has focus.
     cursor: Option<String>,
     /// The filter field, made once the Crate has songs to filter.
@@ -355,8 +390,12 @@ pub struct CratePage {
     selection: Selection<String>,
     /// What a picked row's More button and right-click open: the menu of the whole selection.
     bulk_menu: Option<Subject>,
-    /// Copied at each render for the list's row callback.
+    /// The rows the list shows, copied at each render for its row callback.
     rows: Vec<CrateRow>,
+    /// The song a Crate skim last put the cursor on, so the cursor follows the skim by itself.
+    skim_seen: Option<String>,
+    /// The target model is being watched (it may not exist yet when the page is built).
+    watching_target: bool,
     accent: Accent,
     on_search: Rc<Handler>,
     layout: Layout,
@@ -365,6 +404,13 @@ pub struct CratePage {
     /// Esc in the docked list with nothing picked: focus goes back to where it was before the
     /// jump into the dock (the shell's).
     on_leave: Option<Rc<Handler>>,
+    /// The recently played list: the section under the page's list, or (docked) what the Recent
+    /// tab shows in the Crate's place.
+    recent: Entity<RecentList>,
+    /// The recently played list's list and header focus handles, to tell where the keyboard is.
+    recent_focus: [FocusHandle; 2],
+    /// What the docked panel shows: the Crate, or the recently played list.
+    view: Dock,
 }
 
 impl CratePage {
@@ -429,6 +475,18 @@ impl CratePage {
         cx.observe(&writes, |_, _, cx| cx.notify()).detach();
         crate::confirm::watch(cx);
         let dock = layout == Layout::Dock;
+        let recent = {
+            let model = recent::handle(cx).unwrap_or_else(|| cx.new(|_| RecentModel::new()));
+            let (crate_, player, writes) = (crate_.clone(), player.clone(), writes.clone());
+            let how = if dock {
+                recent_list::Layout::Dock
+            } else {
+                recent_list::Layout::Section
+            };
+            cx.new(|cx| RecentList::new(how, model, crate_, player, writes, cx))
+        };
+        cx.observe(&recent, |_, _, cx| cx.notify()).detach();
+        let recent_focus = recent.read(cx).focus_handles();
         let add_model = cx.new(|_| CrateAddModel::new(crate_.clone(), player.clone()));
         // Esc and Down in the add box hand the keyboard to the list.
         let on_leave: Leave = {
@@ -457,6 +515,8 @@ impl CratePage {
             add_to: stop(cx, at(TAB_ADD_TO, DOCK_TAB_ADD_TO)),
             more: stop(cx, at(TAB_MORE, DOCK_TAB_MORE)),
             clear: stop(cx, at(TAB_CLEAR, DOCK_TAB_ADD_TO)),
+            skim: stop(cx, at(TAB_SKIM, DOCK_TAB_ADD_TO)),
+            hide_filed: stop(cx, at(TAB_HIDE_FILED, DOCK_TAB_ADD_TO)),
             list: stop(cx, at(TAB_LIST, DOCK_TAB_LIST)),
             search: stop(cx, at(TAB_SEARCH, DOCK_TAB_LIST)),
             arrange: stop(cx, at(TAB_ARRANGE, DOCK_TAB_FILTER)),
@@ -469,6 +529,7 @@ impl CratePage {
             picker,
             focus,
             scroll: UniformListScrollHandle::new(),
+            scrolled: 0,
             cursor: None,
             filter: None,
             add,
@@ -478,11 +539,16 @@ impl CratePage {
             selection: Selection::new(),
             bulk_menu: None,
             rows: Vec::new(),
+            skim_seen: None,
+            watching_target: false,
             accent: Accent::fallback(),
             on_search: Rc::new(Box::new(on_search)),
             layout,
             dock_tabs: None,
             on_leave: None,
+            recent,
+            recent_focus,
+            view: Dock::Crate,
         }
     }
 
@@ -500,9 +566,41 @@ impl CratePage {
         self.layout == Layout::Dock
     }
 
+    /// Whether the docked panel shows the recently played list (the Recent tab).
+    fn showing_recent(&self) -> bool {
+        self.docked() && self.view == Dock::Recent
+    }
+
+    /// The Queue · Crate · Recent control chose between the Crate and the recently played list.
+    pub fn show_view(&mut self, view: Dock, cx: &mut Context<Self>) {
+        let view = if view == Dock::Recent { Dock::Recent } else { Dock::Crate };
+        if self.view != view {
+            self.view = view;
+            // Esc in the Recent tab goes back where the jump into the dock came from, as in the
+            // Crate's own list.
+            if let Some(leave) = self.on_leave.clone() {
+                self.recent.update(cx, |r, _| r.set_on_leave(leave));
+            }
+            cx.notify();
+        }
+    }
+
+    /// The recently played list this page (or the dock's Recent tab) draws.
+    pub fn recent(&self) -> &Entity<RecentList> {
+        &self.recent
+    }
+
+    /// Which list the docked panel shows now.
+    pub fn view(&self) -> Dock {
+        self.view
+    }
+
     /// Ctrl+Shift+C: the keyboard lands in the list, on the row it was last on, else the first.
     /// Whether there was a list to land on (an empty crate shows only its hint).
     pub fn enter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.showing_recent() {
+            return self.recent.update(cx, |r, cx| r.enter(window, cx));
+        }
         let ids = self.ids(cx);
         if ids.is_empty() {
             return false;
@@ -521,6 +619,9 @@ impl CratePage {
 
     /// Whether the keyboard is on the list or on one of the header's controls.
     pub fn has_focus(&self, window: &Window) -> bool {
+        if self.showing_recent() {
+            return self.recent_focus.iter().any(|h| h.is_focused(window));
+        }
         let f = &self.focus;
         [&f.list, &f.save, &f.add_to, &f.clear]
             .iter()
@@ -548,6 +649,10 @@ impl CratePage {
         let shown = self.shown(cx);
         let label = if self.filtering(cx) {
             filtered_count_text(shown.len(), rows.len())
+        } else if shown.len() < rows.len() {
+            // Songs Hide filed leaves out are said, not silently gone.
+            format!("{} \u{b7} {} filed hidden", count_text(shown.len()), rows.len() - shown.len())
+                .into()
         } else {
             count_text(rows.len())
         };
@@ -556,6 +661,11 @@ impl CratePage {
 
     pub fn cursor(&self) -> Option<&str> {
         self.cursor.as_deref()
+    }
+
+    /// The video ids of the rows the list shows, in order (tests and diagnostics).
+    pub fn shown_ids(&self, cx: &App) -> Vec<String> {
+        self.ids(cx)
     }
 
     /// How many songs are picked for bulk verbs (tests and diagnostics).
@@ -631,6 +741,22 @@ impl CratePage {
         !self.needle(cx).is_empty()
     }
 
+    /// The list shows fewer songs than the Crate may hold: the filter has text, or Hide filed is
+    /// on. A place on screen is then not a place in the Crate, so arranging by place is off and
+    /// Clear takes only the songs shown.
+    pub fn narrowed(&self, cx: &App) -> bool {
+        self.filtering(cx) || self.hiding(cx).is_some()
+    }
+
+    /// With "Hide filed" on and the target's songs known, the target model (else none).
+    fn hiding(&self, cx: &App) -> Option<Entity<TargetModel>> {
+        if !self.crate_.read(cx).hide_filed() {
+            return None;
+        }
+        let target = target_model(cx)?;
+        target.read(cx).marks_ready(cx).then_some(target)
+    }
+
     /// The filter field, made on first use. Typing starts the list over from its top; Enter
     /// hands the keyboard to the list.
     fn ensure_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextField> {
@@ -653,13 +779,19 @@ impl CratePage {
         field
     }
 
-    /// The songs the filter keeps, in the Crate's order.
+    /// The songs the list shows, in the Crate's order: what the filter keeps, and with "Hide
+    /// filed" on, what the target playlist does not hold yet.
     fn shown(&self, cx: &App) -> Vec<CrateRow> {
         let items = self.crate_.read(cx).items();
-        crate_arrange::visible(items, &self.needle(cx))
+        let mut rows: Vec<CrateRow> = crate_arrange::visible(items, &self.needle(cx))
             .into_iter()
             .map(|i| items[i].clone())
-            .collect()
+            .collect();
+        if let Some(target) = self.hiding(cx) {
+            let target = target.read(cx);
+            rows.retain(|r| !target.is_filed(r.track.video_id.as_str(), cx));
+        }
+        rows
     }
 
     /// The page's field and Arrange button as the header lays them out; `None` until there are
@@ -682,7 +814,7 @@ impl CratePage {
             .when(!docked, |d| d.w(px(FILTER_WIDTH)).flex_none())
             .child(field)
             .into_any_element();
-        let can = total >= 2 && !self.filtering(cx);
+        let can = total >= 2 && !self.narrowed(cx);
         Some((filter, self.arrange_control(accent, can, cx)))
     }
 
@@ -832,7 +964,7 @@ impl CratePage {
             self.close_arrange(window, cx);
             return;
         }
-        if self.crate_.read(cx).len() < 2 || self.filtering(cx) {
+        if self.crate_.read(cx).len() < 2 || self.narrowed(cx) {
             return;
         }
         self.arrange_cursor = 0;
@@ -862,7 +994,7 @@ impl CratePage {
             return;
         };
         self.close_arrange(window, cx);
-        if self.filtering(cx) {
+        if self.narrowed(cx) {
             return;
         }
         self.crate_.update(cx, |m, cx| {
@@ -910,12 +1042,40 @@ impl CratePage {
             .update(cx, |p, cx| p.add_tracks_to_queue(tracks, cx));
     }
 
-    /// The video ids of the whole crate, in the order shown.
+    /// The video ids Save as playlist… and Add all to… act on, in the order shown: the picked
+    /// songs when 2 or more are picked, else every song shown.
     fn video_ids(&self, cx: &App) -> Vec<String> {
-        self.ids(cx)
+        let ids = self.ids(cx);
+        if self.selection.is_bulk() {
+            self.selection.members(&ids).into_iter().cloned().collect()
+        } else {
+            ids
+        }
     }
 
-    /// "Save as playlist…": the dialog opens with the whole crate as the playlist's songs.
+    /// How many songs are picked, when that is 2 or more (the header buttons say so).
+    fn picked_count(&self) -> Option<usize> {
+        self.selection.is_bulk().then(|| self.selection.len())
+    }
+
+    /// "Save as playlist…", or "Save 8 picked…" with picks.
+    fn save_label(&self) -> SharedString {
+        match self.picked_count() {
+            Some(n) => format!("Save {n} picked\u{2026}").into(),
+            None => "Save as playlist\u{2026}".into(),
+        }
+    }
+
+    /// "Add all to…", or "Add 8 picked to…" with picks.
+    fn add_to_label(&self) -> SharedString {
+        match self.picked_count() {
+            Some(n) => format!("Add {n} picked to\u{2026}").into(),
+            None => "Add all to\u{2026}".into(),
+        }
+    }
+
+    /// "Save as playlist…": the dialog opens with the songs shown (or the picked ones) as the
+    /// playlist's songs.
     pub fn save_as_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let video_ids = self.video_ids(cx);
         if video_ids.is_empty() {
@@ -956,7 +1116,7 @@ impl CratePage {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.cursor = None;
         self.selection.clear();
-        if self.filtering(cx) {
+        if self.narrowed(cx) {
             let shown = self.ids(cx);
             self.crate_.update(cx, |m, cx| {
                 m.remove_many(&shown, cx);
@@ -1044,10 +1204,73 @@ impl CratePage {
     }
 
     fn play_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.player.read(cx).skimming() {
+            // Enter while skimming plays normally, ending the skim: the song being skimmed when
+            // the cursor is on it (or nowhere), else the row the cursor is on.
+            let playing = self.player.read(cx).current_video();
+            let on_skimmed = self.cursor.is_none() || self.cursor == playing;
+            if on_skimmed && self.player.read(cx).skimming_from(crate_list::SKIM_SOURCE) {
+                self.player.update(cx, |p, cx| p.skim_keep(cx));
+                return;
+            }
+            if self.cursor.is_none() {
+                // Not this list's skim, and no row chosen: the shell's Enter is the one.
+                cx.propagate();
+                return;
+            }
+            self.player.update(cx, |p, _| p.skim_leave());
+        }
         let Some(ix) = self.cursor_index(cx) else {
             return;
         };
         self.activate(ix, cx);
+    }
+
+    /// The Skim button, and K with no skim running: audition the songs shown from row `start`.
+    pub fn skim(&mut self, start: usize, cx: &mut Context<Self>) {
+        let tracks: Vec<_> = self.shown(cx).into_iter().map(|r| r.track).collect();
+        if tracks.is_empty() || !self.player.read(cx).skim_enabled() {
+            return;
+        }
+        self.hint_covers(cx);
+        let source = queue_source::named(crate_list::SKIM_SOURCE);
+        self.player
+            .update(cx, |p, cx| p.start_skim_at(tracks, start, Some(source), cx));
+    }
+
+    /// K on the list. While a skim runs it is the shell's (keep the song and go on), so the key
+    /// goes on to it; otherwise it skims from the cursor row, else the one playing, else the top.
+    fn skim_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.player.read(cx).skimming() {
+            cx.propagate();
+            return;
+        }
+        let ids = self.ids(cx);
+        let at = self
+            .cursor_or_playing(&ids, cx)
+            .and_then(|c| ids.iter().position(|id| *id == c))
+            .unwrap_or(0);
+        self.skim(at, cx);
+    }
+
+    /// While the Crate is skimmed the cursor follows the song playing, so Delete, K and Enter
+    /// (and the eye) are on it.
+    fn follow_skim(&mut self, cx: &mut Context<Self>) {
+        if !self.player.read(cx).skimming_from(crate_list::SKIM_SOURCE) {
+            self.skim_seen = None;
+            return;
+        }
+        let Some(video) = self.player.read(cx).current_video() else {
+            return;
+        };
+        if self.skim_seen.as_deref() == Some(video.as_str()) {
+            return;
+        }
+        self.skim_seen = Some(video.clone());
+        if let Some(ix) = self.rows.iter().position(|r| r.track.video_id.as_str() == video) {
+            self.cursor = Some(video);
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
     }
 
     /// A row was chosen: play it with the crate as the queue, or pause it if it is the one playing.
@@ -1070,7 +1293,7 @@ impl CratePage {
     /// Alt+Up / Alt+Down: the row under the cursor moves one place; the cursor goes with it.
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
         // A place in the list on screen is not a place in the Crate while a filter hides songs.
-        if self.filtering(cx) {
+        if self.narrowed(cx) {
             return;
         }
         let Some(video) = self.cursor.clone() else {
@@ -1111,7 +1334,7 @@ impl CratePage {
     /// A dragged row was let go before slot `slot` (`len` is the end): the crate reorders. The
     /// row keeps the keyboard cursor with it.
     pub fn drop_row(&mut self, from: usize, slot: usize, cx: &mut Context<Self>) {
-        if self.filtering(cx) {
+        if self.narrowed(cx) {
             return;
         }
         let video = self
@@ -1133,7 +1356,7 @@ impl CratePage {
     /// the order dragged, and one the crate already holds moves there instead.
     fn drop_songs(&mut self, songs: &[TrackSubject], slot: usize, cx: &mut Context<Self>) {
         // With a filter the drop point is not a place in the Crate: the songs go to the bottom.
-        let slot = if self.filtering(cx) { usize::MAX } else { slot };
+        let slot = if self.narrowed(cx) { usize::MAX } else { slot };
         let songs: Vec<(apollo_domain::model::Track, Option<String>)> = songs
             .iter()
             .map(|s| {
@@ -1159,13 +1382,13 @@ impl CratePage {
         let el = el.on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
             this.drop_row(dragged.from, slot, cx)
         }));
+        let el = el.on_drop(cx.listener(move |this, dragged: &SongDrag, _, cx| {
+            this.drop_songs(&dragged.songs, slot, cx)
+        }));
         if !self.docked() {
             return el;
         }
-        el.on_drop(cx.listener(move |this, dragged: &SongDrag, _, cx| {
-            this.drop_songs(&dragged.songs, slot, cx)
-        }))
-        .on_drop(cx.listener(move |this, dragged: &LibraryRow, _, cx| {
+        el.on_drop(cx.listener(move |this, dragged: &LibraryRow, _, cx| {
             if let Some(song) = &dragged.song {
                 this.drop_songs(&song.songs, slot, cx)
             }
@@ -1173,6 +1396,10 @@ impl CratePage {
     }
 
     fn remove_cursor(&mut self, cx: &mut Context<Self>) {
+        // Skimming the Crate, Delete tosses the song playing, wherever the cursor is.
+        if crate_list::skim_toss(&self.player, cx) {
+            return;
+        }
         if self.selection.is_bulk() {
             self.remove_picked(cx);
             return;
@@ -1262,6 +1489,11 @@ impl CratePage {
 
     /// Esc: picked songs go first; with none picked Esc does what it did before.
     fn clear_picks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // While skimming, Esc is the skim's: it puts back what was playing.
+        if self.player.read(cx).skimming() {
+            cx.propagate();
+            return;
+        }
         if self.selection.is_empty() {
             // In the docked list Esc goes back to where the jump into it came from.
             match self.on_leave.clone().filter(|_| self.docked()) {
@@ -1337,6 +1569,21 @@ impl CratePage {
             )]
         };
         crate::ui::playlist_picker::open_songs(songs, None, window, cx);
+    }
+
+    /// The D key: dig from the song under the cursor (K then keeps what fits right back here).
+    fn dig_cursor(&mut self, cx: &mut Context<Self>) {
+        if !crate::dig::key_enabled(cx) {
+            return;
+        }
+        let Some(ix) = self.cursor_index(cx) else {
+            return;
+        };
+        let Some(row) = self.shown(cx).get(ix).cloned() else {
+            return;
+        };
+        self.player
+            .update(cx, |p, cx| p.dig_from(row.track, row.thumbnail, cx));
     }
 
     /// The A key: every picked song, or the one under the cursor, to the target playlist.
@@ -1460,6 +1707,30 @@ impl CratePage {
             .map(|d| format_time(d.as_millis() as u64))
             .unwrap_or_default()
             .into();
+        // With a target playlist whose songs are known, every row has room for the check, so
+        // titles do not shift between rows that carry it and rows that do not.
+        let marks = target_model(cx).filter(|t| t.read(cx).marks_ready(cx));
+        let filed_mark = marks.map(|t| {
+            let filed = t.read(cx).is_filed(&video, cx);
+            div()
+                .debug_selector(move || format!("{name}-filed-{ix}"))
+                .flex_none()
+                .size(px(FILED_MARK))
+                .when(filed, |d| {
+                    d.child(
+                        gpui::svg()
+                            .path(Icon::Checkmark.path())
+                            .size(px(FILED_MARK))
+                            .text_color(color::text_secondary()),
+                    )
+                })
+        });
+        // The docked row is narrow: its check sits before the heart, not after the duration.
+        let (mark_before, mark_after) = if docked {
+            (filed_mark, None)
+        } else {
+            (None, filed_mark)
+        };
 
         // Room for every action is always reserved; they show on hover or under the cursor,
         // and the heart stays once the song is liked.
@@ -1666,12 +1937,14 @@ impl CratePage {
                             ))),
                     ),
             )
+            .children(mark_before)
             .child(heart)
             .children(duration_cell)
+            .children(mark_after)
             .when(ring, |d| d.child(focus_ring(accent, radius::SMALL)))
             // With a filter hiding songs a row's place on screen is not its place in the Crate:
             // rows cannot be dragged.
-            .when(!self.filtering(cx), |d| {
+            .when(!self.narrowed(cx), |d| {
                 d.on_drag(
                     DraggedRow {
                         from: ix,
@@ -1735,6 +2008,7 @@ impl CratePage {
                         move |_, cx| page.update(cx, |p, cx| p.play_from(0, Some(true), cx))
                     }),
             ))
+            .children(self.skim_button("crate-skim", has_rows, accent, cx))
             .child(named(
                 "crate-add-all",
                 TextButton::new(
@@ -1751,12 +2025,7 @@ impl CratePage {
             ))
             .child(named(
                 "crate-save-playlist",
-                TextButton::new(
-                    "crate-save-playlist",
-                    &self.focus.save,
-                    "Save as playlist\u{2026}",
-                    accent,
-                )
+                TextButton::new("crate-save-playlist", &self.focus.save, self.save_label(), accent)
                 .enabled(has_rows)
                 .on_click({
                     let page = page.clone();
@@ -1770,7 +2039,7 @@ impl CratePage {
                     TextButton::new(
                         "crate-add-to-playlist",
                         &self.focus.add_to,
-                        "Add all to\u{2026}",
+                        self.add_to_label(),
                         accent,
                     )
                     .enabled(has_rows)
@@ -1791,6 +2060,7 @@ impl CratePage {
                         move |_, cx| page.update(cx, |p, cx| p.clear(cx))
                     }),
             ))
+            .children(self.hide_filed_button("crate-hide-filed", accent, cx))
             // Swap to explicit / clean versions live in this menu.
             .child(
                 div().debug_selector(|| "crate-more".into()).child(anchor::anchored(
@@ -1853,7 +2123,7 @@ impl CratePage {
                                     .debug_selector(|| "crate-count".into())
                                     // A non-breaking space keeps the line's height while the crate is empty.
                                     .text_color(color::text_secondary())
-                                    .child(if has_rows {
+                                    .child(if self.crate_.read(cx).len() > 0 {
                                         self.summary(cx)
                                     } else {
                                         "\u{a0}".into()
@@ -1864,6 +2134,83 @@ impl CratePage {
             )
             .child(buttons)
             .into_any_element()
+    }
+
+    /// The Skim button (a switch in Settings hides it).
+    fn skim_button(
+        &self,
+        name: &'static str,
+        enabled: bool,
+        accent: Accent,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        if !self.player.read(cx).skim_enabled() {
+            return None;
+        }
+        let page = cx.entity();
+        Some(named(
+            name,
+            TextButton::new(name, &self.focus.skim, "Skim", accent)
+                .enabled(enabled)
+                .on_click(move |_, cx| page.update(cx, |p, cx| p.skim(0, cx))),
+        ))
+    }
+
+    /// "Hide filed" / "Show filed": only with a target playlist and the marks on.
+    fn hide_filed_button(
+        &self,
+        name: &'static str,
+        accent: Accent,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        let target = target_model(cx)?;
+        let marks = {
+            let t = target.read(cx);
+            t.marks_on(cx) && t.target(cx).is_some()
+        };
+        if !marks {
+            return None;
+        }
+        let hiding = self.crate_.read(cx).hide_filed();
+        let ready = target.read(cx).marks_ready(cx);
+        let (crate_, label) = (
+            self.crate_.clone(),
+            if hiding { "Show filed" } else { "Hide filed" },
+        );
+        Some(named(
+            name,
+            TextButton::new(name, &self.focus.hide_filed, label, accent)
+                .min_width(76.0)
+                .enabled(ready || hiding)
+                .on_click(move |_, cx| {
+                    crate_.update(cx, |m, cx| {
+                        let hide = !m.hide_filed();
+                        m.set_hide_filed(hide, cx)
+                    })
+                }),
+        ))
+    }
+
+    /// The docked header's second row; none when it would be empty.
+    fn dock_extras(&self, count: usize, accent: Accent, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let skim = self.skim_button("dock-skim", count > 0, accent, cx);
+        let hide = self.hide_filed_button("dock-hide-filed", accent, cx);
+        if skim.is_none() && hide.is_none() {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_none()
+                .gap(px(spacing::S1))
+                .h(px(layout::MIN_HIT_TARGET))
+                .px(px(spacing::S3))
+                .children(skim)
+                .children(hide)
+                .into_any_element(),
+        )
     }
 
     /// The docked panel's top: the Queue · Crate control, then Save as playlist… and Add all
@@ -1892,12 +2239,7 @@ impl CratePage {
             .px(px(spacing::S3))
             .child(named(
                 "dock-save-playlist",
-                TextButton::new(
-                    "dock-save-playlist",
-                    &self.focus.save,
-                    "Save as playlist\u{2026}",
-                    accent,
-                )
+                TextButton::new("dock-save-playlist", &self.focus.save, self.save_label(), accent)
                 .enabled(has_rows)
                 .on_click({
                     let page = page.clone();
@@ -1911,7 +2253,7 @@ impl CratePage {
                     TextButton::new(
                         "dock-add-to-playlist",
                         &self.focus.add_to,
-                        "Add all to\u{2026}",
+                        self.add_to_label(),
                         accent,
                     )
                     .enabled(has_rows)
@@ -1940,12 +2282,10 @@ impl CratePage {
                     }),
                 )),
             )
-            .child(
-                div()
-                    .ml_auto()
-                    .debug_selector(|| "dock-selected-count".into())
-                    .child(selection::count_slot(self.selection.len(), cx)),
-            );
+            ;
+        // The buttons and the summary line already say how many are picked, so the dock has no
+        // "N selected" count. A second row: Skim, and Hide filed when there is a target playlist.
+        let extras = self.dock_extras(count, accent, cx);
         div()
             .relative()
             .flex()
@@ -1958,6 +2298,7 @@ impl CratePage {
             )
             .children(tabs)
             .child(actions)
+            .children(extras)
             .child(
                 style::text_style(div(), typography::BODY, cx)
                     .id("dock-count")
@@ -1967,7 +2308,7 @@ impl CratePage {
                     .truncate()
                     .text_color(color::text_secondary())
                     // A non-breaking space keeps the line's height while the crate is empty.
-                    .child(if has_rows {
+                    .child(if self.crate_.read(cx).len() > 0 {
                         self.summary(cx)
                     } else {
                         "\u{a0}".into()
@@ -1986,6 +2327,30 @@ impl CratePage {
                     .child(filter)
                     .child(arrange)
             }))
+            .into_any_element()
+    }
+
+    /// The docked panel on its Recent tab: the Queue · Crate · Recent control over the recently
+    /// played list.
+    fn recent_dock(&self, accent: Accent) -> AnyElement {
+        let tabs = self
+            .dock_tabs
+            .clone()
+            .map(|(focus, on_pick)| DockTabs::new(Dock::Recent, &focus, accent, on_pick));
+        div()
+            .id("crate-dock")
+            .debug_selector(|| "crate-dock".into())
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(layout::QUEUE_PANEL_WIDTH))
+            .h_full()
+            .min_h_0()
+            .bg(color::bg_raised())
+            .border_l_1()
+            .border_color(color::border_subtle())
+            .children(tabs)
+            .child(self.recent.clone())
             .into_any_element()
     }
 
@@ -2050,6 +2415,61 @@ impl CratePage {
             .into_any_element()
     }
 
+    /// Hide filed leaves nothing: every song is already in the target playlist.
+    fn all_filed(&self, cx: &mut Context<Self>) -> AnyElement {
+        let name = target_model(cx)
+            .and_then(|t| t.read(cx).target(cx))
+            .map(|t| t.name)
+            .unwrap_or_default();
+        div()
+            .id("crate-all-filed")
+            .debug_selector(|| "crate-all-filed".into())
+            .w_full()
+            .when(self.docked(), |d| d.px(px(spacing::S4)).pt(px(spacing::S3)))
+            .child(
+                style::text_style(div(), typography::BODY, cx)
+                    .text_color(color::text_secondary())
+                    .child(format!("Everything here is already in {name}")),
+            )
+            .into_any_element()
+    }
+
+    /// Watch the target playlist's model (it may appear after the page is built), and ask it to
+    /// read what the target holds. The read happens once per target (see `target_playlist`);
+    /// asking again costs nothing.
+    fn watch_target(&mut self, total: usize, cx: &mut Context<Self>) {
+        let Some(target) = target_model(cx) else {
+            return;
+        };
+        if !self.watching_target {
+            self.watching_target = true;
+            cx.observe(&target, |_, _, cx| cx.notify()).detach();
+        }
+        if total > 0 {
+            target.update(cx, |m, cx| m.ensure_holds(cx));
+        }
+    }
+
+    /// A row that left the list shown (it was filed while Hide filed is on) hands the cursor to
+    /// the row after it, else the one before, as removing it would.
+    fn settle_cursor(&mut self, previous: &[CrateRow]) {
+        let Some(cursor) = self.cursor.clone() else {
+            return;
+        };
+        if self.rows.iter().any(|r| r.track.video_id.as_str() == cursor) {
+            return;
+        }
+        let Some(at) = previous.iter().position(|r| r.track.video_id.as_str() == cursor) else {
+            return;
+        };
+        let alive = |r: &&CrateRow| self.rows.iter().any(|n| n.track.video_id == r.track.video_id);
+        self.cursor = previous[at..]
+            .iter()
+            .find(alive)
+            .or_else(|| previous[..at].iter().rev().find(alive))
+            .map(|r| r.track.video_id.as_str().to_owned());
+    }
+
     fn empty(&self, accent: Accent, cx: &mut Context<Self>) -> AnyElement {
         let on_search = self.on_search.clone();
         div()
@@ -2077,6 +2497,9 @@ impl CratePage {
 
 impl Focusable for CratePage {
     fn focus_handle(&self, _: &App) -> FocusHandle {
+        if self.showing_recent() {
+            return self.recent_focus[0].clone();
+        }
         self.focus.list.clone()
     }
 }
@@ -2084,10 +2507,30 @@ impl Focusable for CratePage {
 impl Render for CratePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.accent = self.player.read(cx).view().accent;
+        if self.showing_recent() {
+            return self.recent_dock(self.accent);
+        }
         let total = self.crate_.read(cx).len();
+        self.watch_target(total, cx);
         let controls = self.controls(window, self.accent, total, cx);
+        let previous = std::mem::take(&mut self.rows);
         self.rows = self.shown(cx);
+        self.settle_cursor(&previous);
         self.refresh_selection();
+        // A song just set aside at the bottom is brought into view (a drop is where it was let go).
+        if let Some((seq, videos)) = crate::confirm::scroll_to(crate::confirm::Place::Crate, cx) {
+            if seq != self.scrolled {
+                self.scrolled = seq;
+                if let Some(ix) = self
+                    .rows
+                    .iter()
+                    .rposition(|r| videos.iter().any(|v| v == r.track.video_id.as_str()))
+                {
+                    self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+                }
+            }
+        }
+        self.follow_skim(cx);
         let accent = self.accent;
         let count = self.rows.len();
 
@@ -2103,8 +2546,10 @@ impl Render for CratePage {
             self.dock_empty(cx)
         } else if total == 0 {
             self.empty(accent, cx)
-        } else if count == 0 {
+        } else if count == 0 && self.filtering(cx) {
             self.no_matches(accent, cx)
+        } else if count == 0 {
+            self.all_filed(cx)
         } else {
             div()
                 .id(if docked { "crate-dock-list" } else { "crate-list" })
@@ -2125,6 +2570,7 @@ impl Render for CratePage {
                 .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.extend(1, cx)))
                 .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
                 .on_action(cx.listener(|this, _: &ClearPicks, window, cx| this.clear_picks(window, cx)))
+                .on_action(cx.listener(|this, _: &SkimCursor, _, cx| this.skim_cursor(cx)))
                 .on_action(cx.listener(|this, _: &PlayCursor, _, cx| this.play_cursor(cx)))
                 .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
                 .on_action(cx.listener(|this, _: &LikeCursor, window, cx| this.like_cursor(window, cx)))
@@ -2134,6 +2580,7 @@ impl Render for CratePage {
                 .on_action(cx.listener(|this, _: &TargetCursor, window, cx| {
                     this.target_cursor(window, cx)
                 }))
+                .on_action(cx.listener(|this, _: &DigCursor, _, cx| this.dig_cursor(cx)))
                 .on_action(cx.listener(|this, _: &MoveCursorUp, _, cx| this.move_cursor(-1, cx)))
                 .on_action(cx.listener(|this, _: &MoveCursorDown, _, cx| this.move_cursor(1, cx)))
                 .on_action(cx.listener(|this, _: &CrateMoveTop, _, cx| this.move_to_edge(true, cx)))
@@ -2192,6 +2639,7 @@ impl Render for CratePage {
             .child(header)
             .child(div().flex_none().mt(px(spacing::S4)).child(add))
             .child(div().flex_1().min_h_0().mt(px(spacing::S4)).child(body))
+            .child(div().flex_none().mt(px(spacing::S4)).child(self.recent.clone()))
             .into_any_element()
     }
 }

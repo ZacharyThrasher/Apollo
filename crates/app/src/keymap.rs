@@ -29,6 +29,7 @@ actions!(
         ToggleLyrics,
         LikeCurrent,
         CrateCurrent,
+        DigCurrent,
         ToggleCrateDock,
         AddCurrentToPlaylist,
         AddCurrentToTarget,
@@ -39,6 +40,7 @@ actions!(
         GoBack,
         GoForward,
         SkimCrate,
+        SkimDrop,
         SkimKeep,
         SkimCancel,
         NavigateUp,
@@ -84,6 +86,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-l", ToggleLyrics, plain),
         KeyBinding::new("l", LikeCurrent, plain),
         KeyBinding::new("c", CrateCurrent, plain),
+        KeyBinding::new("d", DigCurrent, plain),
         KeyBinding::new("ctrl-shift-c", ToggleCrateDock, plain),
         KeyBinding::new("p", AddCurrentToPlaylist, plain),
         KeyBinding::new("a", AddCurrentToTarget, plain),
@@ -106,6 +109,8 @@ pub fn bind_keys(cx: &mut App) {
     let skim = Some(SKIM_PLAIN);
     cx.bind_keys([
         KeyBinding::new("k", SkimCrate, skim),
+        // Only means something while the Crate is the list being skimmed.
+        KeyBinding::new("delete", SkimDrop, skim),
         KeyBinding::new("enter", SkimKeep, skim),
         KeyBinding::new("escape", SkimCancel, skim),
     ]);

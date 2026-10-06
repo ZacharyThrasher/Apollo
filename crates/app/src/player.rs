@@ -31,6 +31,11 @@ use crate::stats::tally::{PlayTally, TallyEvent};
 use crate::stats::{PlayLog, PlayRecord};
 use crate::thumbs::Thumbs;
 
+mod dig;
+pub use dig::{
+    pick as dig_pick, pill_text as dig_pill_text, BUSY as DIG_BUSY, CAP as DIG_CAP,
+    FAILED as DIG_FAILED, NOTHING_NEW as DIG_NOTHING_NEW,
+};
 mod skim;
 pub use skim::{start_ms as skim_start_ms, SkimView, DEFAULT_SECONDS as SKIM_DEFAULT_SECONDS, SECONDS_CHOICES as SKIM_SECONDS_CHOICES};
 
@@ -163,6 +168,9 @@ pub struct PlayerView {
     pub accent_moving: bool,
     /// Where Skim stands while it runs.
     pub skim: Option<SkimView>,
+    /// The song a dig was started from, while one runs (Skim over its radio): the pill reads
+    /// "Digging · <title>".
+    pub dig: Option<SharedString>,
 }
 
 impl PlayerView {
@@ -261,6 +269,8 @@ pub struct PlayerModel {
     skim_enabled: bool,
     skim_seconds: u32,
     skim_ticking: bool,
+    /// A dig's radio is on its way: another D waits for it.
+    dig_inflight: bool,
 }
 
 impl PlayerModel {
@@ -317,6 +327,7 @@ impl PlayerModel {
             skim_enabled: true,
             skim_seconds: skim::DEFAULT_SECONDS,
             skim_ticking: false,
+            dig_inflight: false,
         }
     }
 
@@ -1821,6 +1832,7 @@ impl PlayerModel {
             accent,
             accent_moving,
             skim: None,
+            dig: None,
         };
         let Some(d) = self.driver.as_ref() else {
             return base;
@@ -1859,6 +1871,7 @@ impl PlayerModel {
             repeat: c.queue().repeat(),
             error: c.error(),
             skim: self.skim_view(),
+            dig: self.dig_seed(),
             ..base
         }
     }

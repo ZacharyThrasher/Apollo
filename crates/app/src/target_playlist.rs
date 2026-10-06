@@ -10,13 +10,28 @@
 //! Adding goes through [`LibraryWrites`] like the picker's own adds: shown as held at once and
 //! taken back with the usual "Couldn't add to playlist" notice if the service refuses. A song the
 //! playlist already holds is skipped, not added twice (the service skips it too).
+//!
+//! The Crate marks its songs the target already holds ([`TargetModel::is_filed`]). For that the
+//! target's songs are read **once** per target (from the page cache when the playlist's page is
+//! there, else one read of the whole list), kept here, and topped up from what is added in this
+//! session. A write that drops the cached page does not read it again; a failed read is not
+//! retried until the target or the account changes.
 
-use apollo_domain::library::{bare_playlist_id, PlaylistTarget};
+use std::collections::HashSet;
+
+use apollo_domain::library::{
+    bare_playlist_id, Collection, CollectionKind, PlaylistTarget,
+};
+use apollo_domain::model::BrowseId;
 use gpui::{App, Context, Entity, EventEmitter, Global, SharedString, Window};
 
-use crate::library::edits::{EditEvent, LibraryEdits};
+use crate::library::edits::{self, EditEvent, LibraryEdits};
+use crate::library::source::TrackRow;
 use crate::library::writes::LibraryWrites;
-use crate::settings::{SettingsModel, TARGET_KEY, TARGET_PILL, TARGET_PLAYLIST};
+use crate::page_cache::{browse_id, keys, PageCache};
+use crate::settings::{
+    SettingsModel, CRATE_MARK_FILED, TARGET_KEY, TARGET_PILL, TARGET_PLAYLIST,
+};
 use crate::ui::playlist_picker::{self, PickerSong};
 
 /// The playlist A adds to.
@@ -64,11 +79,25 @@ pub fn decode(text: &str, account: &str) -> Option<Target> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetChanged;
 
+/// What is known about the songs the target playlist holds.
+enum Holds {
+    /// The one read is out.
+    Loading,
+    /// Every video id the playlist held when it was read.
+    Ready(HashSet<String>),
+    /// The read failed; it is not tried again until the target or the account changes.
+    Failed,
+}
+
 pub struct TargetModel {
     settings: Entity<SettingsModel>,
     writes: Entity<LibraryWrites>,
     /// The chosen account's opaque key; empty before one is chosen.
     account: String,
+    /// The target's songs, for the Crate's filed marks: the playlist (bare id) they were read for.
+    holds: Option<(String, Holds)>,
+    /// Bumped when what is known is dropped, so a read that finishes late is ignored.
+    holds_epoch: u64,
 }
 
 impl EventEmitter<TargetChanged> for TargetModel {}
@@ -94,7 +123,121 @@ impl TargetModel {
             settings,
             writes,
             account: String::new(),
+            holds: None,
+            holds_epoch: 0,
         }
+    }
+
+    // ---- what the target holds ---------------------------------------------------------------
+
+    /// Settings > Playlists > Mark songs already in the target playlist.
+    pub fn marks_on(&self, cx: &App) -> bool {
+        self.settings.read(cx).get(&CRATE_MARK_FILED)
+    }
+
+    fn forget_holds(&mut self) {
+        self.holds = None;
+        self.holds_epoch += 1;
+    }
+
+    /// Whether the target playlist holds `video_id`: it was in the playlist when the playlist was
+    /// read, or it was added here since. False without a target, with the marks off, and while the
+    /// read is out or has failed.
+    pub fn is_filed(&self, video_id: &str, cx: &App) -> bool {
+        if !self.marks_on(cx) {
+            return false;
+        }
+        let Some(target) = self.target(cx) else {
+            return false;
+        };
+        if self.writes.read(cx).added_here(&target.as_playlist(), video_id) {
+            return true;
+        }
+        matches!(
+            &self.holds,
+            Some((id, Holds::Ready(held))) if *id == target.id && held.contains(video_id)
+        )
+    }
+
+    /// Whether the marks can be drawn now: there is a target and its songs are known.
+    pub fn marks_ready(&self, cx: &App) -> bool {
+        let Some(target) = self.target(cx) else {
+            return false;
+        };
+        self.marks_on(cx)
+            && matches!(&self.holds, Some((id, Holds::Ready(_))) if *id == target.id)
+    }
+
+    /// Read what the target holds, once. Called by whatever shows the marks (the Crate); it does
+    /// nothing when the marks are off, there is no target, or the target's songs are known, being
+    /// read, or failed to read. The page cache answers first; otherwise one read of the whole
+    /// playlist goes out, and its answer is put in the cache for the playlist's own page.
+    pub fn ensure_holds(&mut self, cx: &mut Context<Self>) {
+        if !self.marks_on(cx) {
+            return;
+        }
+        let Some(target) = self.target(cx) else {
+            return;
+        };
+        if self.holds.as_ref().is_some_and(|(id, _)| *id == target.id) {
+            return;
+        }
+        let collection = Collection {
+            kind: CollectionKind::Playlist,
+            id: BrowseId::new(browse_id(&target.id)),
+            title: target.name.clone(),
+            subtitle: None,
+            thumbnail: None,
+        };
+        let cache = PageCache::try_global(cx);
+        let cached = cache
+            .as_ref()
+            .and_then(|c| c.get::<Vec<TrackRow>>(&keys::collection(&collection.id)));
+        if let Some(cached) = cached {
+            let held = cached
+                .value
+                .iter()
+                .map(|r| r.track.video_id.as_str().to_owned())
+                .collect();
+            self.holds = Some((target.id, Holds::Ready(held)));
+            cx.notify();
+            return;
+        }
+        // Nothing to read with yet (no backend): asked again at the next look.
+        let Some(source) = self.writes.read(cx).source(cx) else {
+            return;
+        };
+        self.holds = Some((target.id.clone(), Holds::Loading));
+        let epoch = self.holds_epoch;
+        let ticket = cache.as_ref().map(|c| c.ticket());
+        let key = keys::collection(&collection.id);
+        let id = target.id;
+        cx.spawn(async move |this, cx| {
+            let rows = cx
+                .background_executor()
+                .spawn(async move { edits::all_rows(&*source, &collection) })
+                .await;
+            if let (Ok(rows), Some(cache), Some(ticket)) = (&rows, &cache, &ticket) {
+                cache.put(ticket, key, rows.clone());
+            }
+            let _ = this.update(cx, |m, cx| {
+                // The target, the account or the setting moved on while the read was out.
+                if m.holds_epoch != epoch || m.holds.as_ref().is_none_or(|(held_for, _)| *held_for != id) {
+                    return;
+                }
+                let state = match rows {
+                    Ok(rows) => Holds::Ready(
+                        rows.iter()
+                            .map(|r| r.track.video_id.as_str().to_owned())
+                            .collect(),
+                    ),
+                    Err(_) => Holds::Failed,
+                };
+                m.holds = Some((id, state));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The account the target belongs to is now this one.
@@ -102,6 +245,7 @@ impl TargetModel {
         let key = key.unwrap_or_default();
         if self.account != key {
             self.account = key;
+            self.forget_holds();
             cx.emit(TargetChanged);
             cx.notify();
         }
@@ -134,11 +278,16 @@ impl TargetModel {
         if target.id.is_empty() || target.name.is_empty() {
             return;
         }
+        // A rename keeps the playlist, so what is known about its songs stays.
+        if self.target(cx).is_none_or(|t| t.id != target.id) {
+            self.forget_holds();
+        }
         self.store(&encode(&self.account, &target), cx);
     }
 
     /// No target any more.
     pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.forget_holds();
         self.store("", cx);
     }
 
@@ -237,6 +386,11 @@ pub fn key_enabled(cx: &App) -> bool {
 pub fn has_target(cx: &App) -> bool {
     cx.try_global::<TargetHandle>()
         .is_some_and(|h| h.0.read(cx).target(cx).is_some())
+}
+
+/// The bare id of the target playlist, when there is one.
+pub fn current_id(cx: &App) -> Option<String> {
+    cx.try_global::<TargetHandle>()?.0.read(cx).target(cx).map(|t| t.id)
 }
 
 /// `playlist_id` (bare or not) is the target, and its pill is on show.

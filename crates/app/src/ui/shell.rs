@@ -14,12 +14,13 @@ use gpui::{
 use crate::account::AccountModel;
 use crate::blocked_artists::{BlockHandle, BlockModel};
 use crate::crate_list::{CrateEvent, CrateHandle, CrateModel};
+use crate::recent::{RecentHandle, RecentModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
 use crate::keymap::{
-    AddCurrentToPlaylist, AddCurrentToTarget, CrateCurrent, GoBack, GoForward, LikeCurrent,
+    AddCurrentToPlaylist, AddCurrentToTarget, CrateCurrent, DigCurrent, GoBack, GoForward, LikeCurrent,
     NavigateDown, NavigateLeft, NavigateRight, NavigateUp, RedoQueue, SeekBack, SeekForward,
-    ToggleCrateDock, ShowShortcuts, SkimCancel, SkimCrate, SkimKeep, ToggleFullscreen, ToggleLyrics,
+    ToggleCrateDock, ShowShortcuts, SkimCancel, SkimCrate, SkimDrop, SkimKeep, ToggleFullscreen, ToggleLyrics,
     ToggleMute,
     UndoQueue, VolumeDown,
     VolumeUp, SEEK_STEP_MS, VOLUME_STEP,
@@ -122,6 +123,7 @@ pub fn bind_keys(cx: &mut App) {
     home_page::bind_keys(cx);
     explore_page::bind_keys(cx);
     crate_page::bind_keys(cx);
+    crate::ui::recent_list::bind_keys(cx);
     playlist_picker::bind_keys(cx);
     track_menu::bind_keys(cx);
     playlist_dialog::bind_keys(cx);
@@ -227,6 +229,8 @@ pub struct Shell {
     block_model: Entity<BlockModel>,
     target_model: Entity<TargetModel>,
     crate_page: Entity<CratePage>,
+    /// What was played lately, for the Crate page's section and the dock's Recent tab.
+    recent_model: Entity<RecentModel>,
     /// "Queue restored", after Ctrl+Z / Ctrl+Shift+Z.
     pill: Option<PillShown>,
     pill_seq: u64,
@@ -380,6 +384,8 @@ impl Shell {
         })
         .detach();
         cx.set_global(CrateHandle(crate_model.clone()));
+        let recent_model = cx.new(|_| RecentModel::new());
+        cx.set_global(RecentHandle(recent_model.clone()));
         crate_model.update(cx, |m, cx| {
             m.follow(player.clone(), &writes, settings.clone(), cx)
         });
@@ -797,6 +803,7 @@ impl Shell {
             block_model,
             target_model,
             crate_page,
+            recent_model,
             pill: None,
             pill_seq: 0,
             routed_to_sign_in: false,
@@ -1541,6 +1548,22 @@ impl Shell {
         }
     }
 
+    /// The D key with no list under it: dig from the playing song (while skimming, the one being
+    /// skimmed: "more like this one"). A list's own cursor row is the list's.
+    fn dig_current(&mut self, cx: &mut Context<Self>) {
+        if !crate::dig::key_enabled(cx) {
+            return;
+        }
+        let track = self
+            .player
+            .read(cx)
+            .coordinator()
+            .and_then(|c| c.queue().current().map(|e| e.track.clone()));
+        if let Some(track) = track {
+            self.player.update(cx, |m, cx| m.dig_from(track, None, cx));
+        }
+    }
+
     /// The P key: the playlist picker for the playing song (next to its Now Playing button when
     /// that is on screen). The keys on a list's own cursor row are the list's.
     fn add_current_to_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1904,10 +1927,14 @@ impl Shell {
         cx.notify();
     }
 
-    /// The Queue · Crate control: the other panel takes the slot.
+    /// The Queue · Crate · Recent control: the other panel (or list) takes the slot.
     pub fn show_dock(&mut self, dock: Dock, cx: &mut Context<Self>) {
         match dock {
-            Dock::Crate => self.set_crate_dock(true, cx),
+            Dock::Crate | Dock::Recent => {
+                // The Crate panel shows the Crate or the recently played list.
+                self.crate_dock_panel.update(cx, |p, cx| p.show_view(dock, cx));
+                self.set_crate_dock(true, cx);
+            }
             Dock::Queue => {
                 self.set_crate_dock(false, cx);
                 if !self.queue.is_open() {
@@ -1940,6 +1967,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.crate_dock_store = store.clone();
+        self.recent_model
+            .update(cx, |m, cx| m.install(store.clone(), cx));
         let Some(store) = store else { return };
         cx.spawn(async move |this, cx| {
             let saved = cx
@@ -2651,6 +2680,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_lyrics(cx)))
             .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| this.like_current(cx)))
             .on_action(cx.listener(|this, _: &CrateCurrent, _, cx| this.crate_current(cx)))
+            .on_action(cx.listener(|this, _: &DigCurrent, _, cx| this.dig_current(cx)))
             .on_action(cx.listener(|this, _: &ToggleCrateDock, window, cx| this.jump_crate_dock(window, cx)))
             .on_action(cx.listener(|this, _: &AddCurrentToPlaylist, window, cx| {
                 this.add_current_to_playlist(window, cx)
@@ -2661,12 +2691,24 @@ impl Render for Shell {
             // Skim: K sets the song aside and the skim goes on, Enter keeps the song, Esc goes
             // back to what was playing. The keys only exist while the shell is "Skimming".
             .on_action(cx.listener(|this, _: &SkimCrate, _, cx| {
+                // Skimming the Crate itself, K keeps the song (it is in the Crate already) and the
+                // skim goes on to the next; anywhere else it sets the song aside.
+                if this.player.read(cx).skimming_from(crate::crate_list::SKIM_SOURCE) {
+                    this.player.update(cx, |m, cx| m.skim_pass(cx));
+                    return;
+                }
                 this.crate_playing(cx);
                 // With auto-advance on, K also moves on to the next song.
                 if crate::auto_advance::enabled(cx) {
                     this.player.update(cx, |m, cx| {
                         m.skim_advance(cx);
                     });
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SkimDrop, _, cx| {
+                // Delete tosses the song while the Crate is skimmed; otherwise it is not ours.
+                if !crate::crate_list::skim_toss(&this.player, cx) {
+                    cx.propagate();
                 }
             }))
             .on_action(cx.listener(|this, _: &SkimKeep, _, cx| {

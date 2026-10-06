@@ -22,6 +22,7 @@ Search results use Up/Down and L on their own cursor row. The kind chips under t
 | Ctrl+L | Show / hide lyrics (opens Now Playing) |
 | L | Like / unlike the playing song |
 | C | Set a song aside in the Crate. On a Home, Explore or Related shelf: the song card the keyboard ring is on, else the one under the pointer (see "C from anywhere"). In the queue, Library and Search lists: the song under the cursor, and the cursor then steps to the next row (see "Auto-advance"). Anywhere else: the playing song |
+| D | Dig from here: the radio of the playing song, skimmed (in the queue, Library and Search lists: the song under the cursor or the pointer). Settings > Playlists > "Dig key" switches it off. See "Dig from here" |
 | P | Add to playlist: open the picker for the playing song (in the queue, Library, Search and Crate lists: the song under the cursor). Settings > Playback > "P opens the playlist picker" switches it off |
 | A | Add to the target playlist: the playing song (in the queue, Library, Search and Crate lists: the song under the cursor; with 2 or more picked, all of them). With no target set the picker opens to choose one. Settings > Playlists > "A adds to the target playlist" switches it off. See "The target playlist" |
 | Ctrl+Shift+C | Jump into the docked Crate: open it (if closed) and put the cursor on its list, on the row it was last on (else the first). Esc goes back to where you were; with the dock already focused the same key closes it and goes back too. The Crate button in the player bar only shows / hides it. See "The docked Crate" |
@@ -131,8 +132,9 @@ so they show up in its YouTube Music search history like any other.
 
 The Crate button in the player bar (or **Ctrl+Shift+C**) opens the Crate as a 320px panel on the
 right of the main window, in the queue panel's place: the two share that slot, one at a time, and
-the **Queue · Crate** tabs at the top of either swap them (opening the queue closes the Crate and
-the other way round). It stays open while you move between pages, and open or closed is
+the **Queue · Crate · Recent** tabs at the top of either swap them (opening the queue closes the
+Crate and the other way round; **Recent** is the Crate panel showing the recently played list, see
+"Recently played" below). It stays open while you move between pages, and open or closed is
 remembered for the next run. It steps aside for Now Playing, which fills the window, and for the
 Crate page itself (the same list); below 1100px of window width it overlays the page's right edge
 instead of squeezing it.
@@ -160,6 +162,30 @@ playlist, an album or the Songs tab and let go on the panel. A thin line shows w
 below the last row, or on the empty panel, is the bottom / the start. A song the Crate already
 holds moves to that place instead of being added twice. C still adds at the bottom. Rows of the
 panel drag to rearrange it, as on the page.
+
+## Recently played
+
+Songs you heard lately, so one you loved an hour ago and forgot to press C on is not lost. It is
+read from the local play log only (no YouTube calls) and appears in two places:
+
+* **The Crate page:** a collapsible **Recently played** section under the list. It starts
+  collapsed (one line with a chevron); click it, or Tab to it and press Enter, to open four rows
+  of it (it scrolls). Open or closed is remembered for the next run.
+* **The dock's Recent tab:** the Queue · Crate · Recent control. Ctrl+Shift+C lands in whichever
+  list the panel shows.
+
+The list is the last 7 days, newest first, up to 200 rows. A song played again right away shows
+once (at the newest play); one heard again after another song is its own row. Only plays that
+counted are in it (see Local stats: a song left in a few seconds is not), and Skim plays never
+are. Artists on the block list are left out. At the right of each row: how long ago ("now",
+"5m ago", "3h ago", "2d ago"); under the pointer or the cursor, a box button sets the song aside
+in the Crate (it is empty for a song the Crate already holds) and More opens the usual menu.
+
+The rows work like the other song lists: Up/Down, **Enter** (or a click) plays the song with the
+list as the queue, **C** sets it aside and the cursor steps on (Auto-advance), **L**, **P**, **A**,
+Shift+Up/Down, Ctrl+A, Ctrl+click and Shift+click pick songs (C, L, P and A then act on all of
+them), Esc clears the picks (and, in the dock, leaves it). A row, or the picked rows, drags onto
+the Crate: on the Crate page onto its list, where a thin line shows the place.
 
 ## C from anywhere
 
@@ -189,6 +215,32 @@ Crate", "Added 18 · 6 already in Crate" when some were held, or "Already in Cra
 what is held is skipped). A playlist or album **card** (Library lists, Search, Home) has neither
 item: its rows are not loaded, and nothing here asks YouTube for them. These items use only rows
 already on the page, so they make no YouTube calls and start no playback.
+
+### Skim the Crate, picks and filed markers
+
+- **Skim the Crate:** the **Skim** button beside Shuffle on the Crate page (and a second row in the
+  docked Crate's header), or **K** on the Crate list: from the cursor row, else the song playing,
+  else the top. The cursor follows the song being skimmed. While it runs: **Delete** takes the song
+  playing out of the Crate (wherever the cursor is; one step for Ctrl+Z) and goes on, **K** keeps
+  it and goes on, **Enter** plays it normally (ending the skim), **Esc** puts back what was playing
+  (Esc leaves the skim before it clears picks). Last song tossed or kept: the skim ends. Nothing
+  extra is fetched; it is Skim's own one-song-ahead prefetch.
+- **Picks narrow the buttons:** with 2 or more songs picked, **Save as playlist…** and **Add all
+  to…** read **Save 8 picked…** and **Add 8 picked to…** and act on the picked songs only, in the
+  Crate's order; the rest stay. The dialog's check then reads "Take these songs out of the Crate
+  after saving" and takes out only those. The docked Crate drops its "N selected" count, because
+  the buttons say it.
+- **Filed markers:** with a target playlist set and Settings > Playlists > **Mark songs already in
+  the target playlist** on (default), Crate rows the target holds show a small check
+  (text.secondary, no accent) after the duration (before the heart in the docked panel). **Hide
+  filed** / **Show filed** (a text button in the Crate header, and in the docked panel's second row)
+  leaves those rows out of the list; the header count says "· 4 filed hidden", and Play, Shuffle,
+  Skim, Add all to queue, Save and Add all follow the list shown. Arranging still works with rows
+  hidden (a move goes past the neighbour that is shown). Hide filed is a view only: it is not saved
+  and nothing leaves the Crate. A song filed while it is on (A, the picker) leaves the list at once.
+  The target's songs are read **once** per target and account (the page cache first, else one read
+  of the whole playlist, then kept); an add made here is known without reading again, and a failed
+  read is not retried until the target changes.
 
 ## Auto-advance
 
@@ -250,6 +302,7 @@ or search starts with none.
 | Enter | Play the row |
 | L | Like / unlike the row |
 | C | Set the row aside in the Crate (queue, Library, Search) |
+| D | Dig from the row's song (queue, Library, Search): see "Dig from here" |
 | Delete / Backspace | Remove the row (queue, Crate) |
 | Alt+Up / Alt+Down | Move the row one place up / down (up-next in the queue; the Crate; a playlist of your own). The row keeps the cursor. With songs picked on a playlist, all of them move one place together. |
 
@@ -278,7 +331,7 @@ back as YouTube Music holds it and leaves the usual notice.
 |---|---|
 | K (in a playlist, album or Songs list, while not skimming) | Skim the list from the song under the pointer, or from the keyboard's row when the pointer is on none |
 
-Settings > Playback > Skim off turns it off. Once a skim runs, clicking any
+K also skims the Crate (below). Settings > Playback > Skim off turns it off. Once a skim runs, clicking any
 song of that same list moves the skim to that song and goes on skimming from there; Enter on a
 row (or on the song being skimmed, below) leaves skim and plays normally.
 
@@ -290,7 +343,8 @@ only then, and a text field or popup still keeps its own keys:
 
 | Key | Does |
 |---|---|
-| K | Set the song aside in the Crate and move on to the next song (Settings > Playlists > "Move to the next song after C, A or K"; off: the skim just carries on) |
+| K | Set the song aside in the Crate and move on to the next song (Settings > Playlists > "Move to the next song after C, A or K"; off: the skim just carries on). Skimming the Crate itself, K keeps the song and always goes on to the next |
+| Delete | Only while the Crate is the list being skimmed: take the song playing out of the Crate (Ctrl+Z puts it back) and go on to the next |
 | Enter | Stop skimming and play this song from its start; the rest of the list plays after it (Ctrl+Z goes back to what was queued before) |
 | Esc | Stop skimming and put back what was playing before (nothing, if nothing was) |
 | Shift+Right / Shift+Left | Next / previous song's window |
@@ -299,6 +353,29 @@ Ctrl+Z does not touch a skim. The list is played in order with shuffle and repea
 as it lasts, and it is not saved: a restart brings back what was queued before. Skimmed songs are
 never added to YouTube Music history or the local stats. Settings > Playback > Skim (on) and
 Seconds per song (10, 20 or 30; default 20).
+
+### Dig from here
+
+One seed song, keep what fits: **D** (or the song menu's **Dig from here**) asks YouTube Music for the
+song's radio and **Skims** it at once. The player bar's pill reads "Digging · <song>".
+
+| Key | Does |
+|---|---|
+| D (queue, Library and Search lists: the song under the cursor, or under the pointer in a Library list; anywhere else: the playing song) | Start the dig. While skimming or digging it digs from the song being skimmed instead |
+| K | Keep the song in the Crate and move on (as in any skim; Settings > Playlists > "Move to the next song after C, A or K") |
+| Enter | Play this song for real; the rest of the radio plays on after it |
+| Esc | End the dig: back to the queue and the place you were at. Music that was paused stays paused |
+
+The radio is one request, sent only when D is pressed (never on hover, never at launch), and at most
+50 songs are skimmed. It leaves out songs already in the Crate, in the target playlist, in the
+library's Songs list, marked liked, or in the local play log (Settings > Playlists > "Leave out songs
+I already have"; the target playlist and Songs list count only once their page has been opened on
+this PC, because Dig asks YouTube for nothing else), and blocked artists' songs. When nothing is
+left the pill says "Nothing new in this radio". While YouTube is asking Apollo to slow down (its
+"too many requests" cooldown) D sends nothing and the pill says "YouTube is busy, try again
+shortly". Dig runs on Skim, so Settings > Playback > Skim off turns Dig off too; Settings >
+Playlists > "Dig key" off frees the D key and keeps the menu item. Skimmed songs never reach
+YouTube Music history or the stats, as in any skim.
 
 Undo covers what changes the queue: playing a new list (replacing it), Clear, Remove, reorder,
 Play next / Add to queue, Start radio (with the radio that follows it, as one step), and the
@@ -353,8 +430,8 @@ once: the songs leave when the picker closes), the Crate's "Add all to…" and a
 A failed or lost add takes nothing out. "Save as playlist…" keeps its own "Clear Crate" check.
 
 An add that Ctrl+Z can take back says so in its confirmation: "Added to Road trip · Ctrl+Z to
-undo" (queue adds and playlist adds, including a playlist made from the queue or the Crate), for
-2.5 seconds, while **Show shortcut hints** is on. Crate adds, likes and library saves have no undo
+undo" (queue adds, Crate adds and playlist adds, including a playlist made from the queue or the
+Crate), for 2.5 seconds, while **Show shortcut hints** is on. Likes and library saves have no undo
 and no hint. Settings > Playlists > **Confirm when adding** switches the confirmation off.
 
 Media keys are the OS's (SMTC) and are untouched.
@@ -458,6 +535,7 @@ registered hotkey while the keys are held, so each press is one step.
 ## Where it lives
 
 - `crates/app/src/player/skim.rs`: Skim itself (the window, the ticker, Enter and Esc).
+- `crates/app/src/player/dig.rs`: Dig from here (the radio fetch, what it leaves out, the pill's words).
 - `crates/app/src/keymap.rs`: the in-app bindings (one key context predicate decides where they
   apply) and what each global hotkey does.
 - `crates/app/src/hotkeys_win.rs`: registers the global hotkeys with Windows (`global-hotkey` on

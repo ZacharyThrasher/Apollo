@@ -63,6 +63,7 @@ actions!(
         QueueSelected,
         LikeSelected,
         CrateSelected,
+        DigSelected,
         PlaylistSelected,
         TargetSelected,
         BackToField,
@@ -88,6 +89,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-enter", QueueSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("l", LikeSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("c", CrateSelected, Some(RESULTS_CONTEXT)),
+        KeyBinding::new("d", DigSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("p", PlaylistSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("a", TargetSelected, Some(RESULTS_CONTEXT)),
         KeyBinding::new("escape", BackToField, Some(RESULTS_CONTEXT)),
@@ -703,6 +705,11 @@ impl SearchPage {
 
     /// Esc: picked songs go first; with none picked it leaves the list.
     fn back_to_field(&mut self, _: &BackToField, window: &mut Window, cx: &mut Context<Self>) {
+        // While skimming (a dig from a result), Esc is the skim's: it puts back what was playing.
+        if self.player.read(cx).skimming() {
+            cx.propagate();
+            return;
+        }
         if !self.selection.is_empty() {
             self.selection.clear();
             cx.notify();
@@ -756,6 +763,17 @@ impl SearchPage {
         if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
             crate::crate_list::add_track(&self.player, song.track, song.thumbnail, cx);
             self.advance(cx);
+        }
+    }
+
+    /// D: dig from the cursor row's song.
+    fn dig_selected(&mut self, _: &DigSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if !crate::dig::key_enabled(cx) {
+            return;
+        }
+        if let Some(song) = self.selected.and_then(|i| self.songs(cx).get(i).cloned()) {
+            self.player
+                .update(cx, |p, cx| p.dig_from(song.track, song.thumbnail, cx));
         }
     }
 
@@ -1151,6 +1169,7 @@ impl Render for SearchPage {
                     .on_action(cx.listener(Self::queue_selected))
                     .on_action(cx.listener(Self::like_selected))
                     .on_action(cx.listener(Self::crate_selected))
+                    .on_action(cx.listener(Self::dig_selected))
                     .on_action(cx.listener(Self::playlist_selected))
                     .on_action(cx.listener(Self::target_selected))
                     .on_action(cx.listener(Self::back_to_field))

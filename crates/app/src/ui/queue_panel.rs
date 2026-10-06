@@ -54,6 +54,7 @@ actions!(
         RemoveCursor,
         LikeCursor,
         CrateCursor,
+        DigCursor,
         PlaylistCursor,
         TargetCursor,
         MoveCursorUp,
@@ -99,6 +100,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", RemoveCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("l", LikeCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("c", CrateCursor, Some(KEY_CONTEXT)),
+        KeyBinding::new("d", DigCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("p", PlaylistCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("a", TargetCursor, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-up", MoveCursorUp, Some(KEY_CONTEXT)),
@@ -246,6 +248,8 @@ pub struct QueuePanel {
     focus_list: FocusHandle,
     focus_search: FocusHandle,
     scroll: UniformListScrollHandle,
+    /// The add (see `confirm::scroll_to`) this list last scrolled for.
+    scrolled: u64,
     /// The row the keyboard acts on; shown only while the list has focus.
     cursor: Option<QueueEntryId>,
     /// Rows picked for bulk verbs, by queue entry.
@@ -297,6 +301,7 @@ impl QueuePanel {
             player,
             writes,
             scroll: UniformListScrollHandle::new(),
+            scrolled: 0,
             cursor: None,
             selection: Selection::new(),
             bulk_menu: None,
@@ -337,6 +342,11 @@ impl QueuePanel {
     /// How many rows are picked for bulk verbs (tests and diagnostics).
     pub fn picked(&self) -> usize {
         self.selection.len()
+    }
+
+    /// How far the list is scrolled (tests).
+    pub fn scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
+        self.scroll.0.borrow().base_handle.offset()
     }
 
     /// Scroll so what is playing sits at the top, with the history above it.
@@ -536,6 +546,19 @@ impl QueuePanel {
         self.advance(cx);
     }
 
+    /// D: dig from the song under the cursor.
+    fn dig_cursor(&mut self, cx: &mut Context<Self>) {
+        if !crate::dig::key_enabled(cx) {
+            return;
+        }
+        let view = self.fresh_view(cx);
+        let Some(row) = self.cursor.and_then(|id| view.row_by_id(id)) else {
+            return;
+        };
+        let track = row.track.clone();
+        self.player.update(cx, |p, cx| p.dig_from(track, None, cx));
+    }
+
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
         let view = self.fresh_view(cx);
         let Some(id) = self.cursor else {
@@ -628,7 +651,8 @@ impl QueuePanel {
 
     /// Esc: picked rows go first; with none picked Esc does what it did before.
     fn clear_picks(&mut self, cx: &mut Context<Self>) {
-        if self.selection.is_empty() {
+        // While skimming (a dig from a queue row), Esc is the skim's.
+        if self.selection.is_empty() || self.player.read(cx).skimming() {
             cx.propagate();
             return;
         }
@@ -1188,6 +1212,22 @@ impl Render for QueuePanel {
         self.items = flatten(&view);
         self.view = view;
         self.refresh_selection();
+        // Songs just added are brought into view: the last of them, among what is up next.
+        if let Some((seq, videos)) = crate::confirm::scroll_to(crate::confirm::Place::Queue, cx) {
+            if seq != self.scrolled {
+                self.scrolled = seq;
+                let at = self.items.iter().rposition(|item| {
+                    matches!(item, Item::Upcoming(_))
+                        && self
+                            .view
+                            .row(*item)
+                            .is_some_and(|r| videos.iter().any(|v| *v == r.video_id))
+                });
+                if let Some(ix) = at {
+                    self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+                }
+            }
+        }
         let ready = player_view.status == Status::Ready;
         let has_upcoming = !self.view.upcoming.is_empty();
         let has_current = self.view.current.is_some();
@@ -1349,6 +1389,7 @@ impl Render for QueuePanel {
             .on_action(cx.listener(|this, _: &RemoveCursor, _, cx| this.remove_cursor(cx)))
             .on_action(cx.listener(|this, _: &LikeCursor, window, cx| this.like_cursor(window, cx)))
             .on_action(cx.listener(|this, _: &CrateCursor, window, cx| this.crate_cursor(window, cx)))
+            .on_action(cx.listener(|this, _: &DigCursor, _, cx| this.dig_cursor(cx)))
             .on_action(
                 cx.listener(|this, _: &PlaylistCursor, window, cx| this.playlist_cursor(window, cx)),
             )
