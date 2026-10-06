@@ -28,6 +28,7 @@ pub mod playing_row;
 pub mod playlist_dialog;
 pub mod playlist_picker;
 pub mod queue_panel;
+pub mod recent_list;
 pub mod related_pane;
 pub mod row_actions;
 pub mod search_chips;
