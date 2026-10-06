@@ -6,15 +6,15 @@
 //! * What is on screen stays until the new answer arrives. A failed answer replaces it with the
 //!   failure, because the old shelves belong to another track.
 //! * Answers for a track that is no longer playing are discarded (`rev`).
-//! * The request waits [`SETTLE`] after the track changed, and for YouTube's cooldown when one is
-//!   running, so skipping through songs (a held Shift+Right, Skim) asks once for the song that
-//!   was landed on, not once per song passed.
+//! * A request follows another by at least [`SETTLE`] (the first goes out at once), and waits for
+//!   YouTube's cooldown when one is running, so skipping through songs (a held Shift+Right, Skim)
+//!   asks for the song that was landed on, not once per song passed.
 
 use std::sync::Arc;
 
 use apollo_domain::listing::LoadFailure;
 use apollo_provider::HomeShelf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use apollo_services_common::{Lane, Throttle};
 use gpui::{Context, Entity};
@@ -24,6 +24,26 @@ use crate::player::PlayerModel;
 
 /// How long the playing track must stay the same before its Related tab is asked for.
 pub const SETTLE: Duration = Duration::from_millis(600);
+
+/// Spaces out lookups that follow the playing track: the first goes out at once, one that comes
+/// within [`SETTLE`] of the last waits that long, and a waiting one is replaced by a newer.
+#[derive(Default)]
+pub struct Settle {
+    last: Option<Instant>,
+}
+
+impl Settle {
+    /// How long a lookup starting now waits (zero for the first), and starts the clock.
+    pub fn delay(&mut self) -> Duration {
+        let now = Instant::now();
+        let wait = match self.last {
+            Some(at) => SETTLE.saturating_sub(now.duration_since(at)),
+            None => Duration::ZERO,
+        };
+        self.last = Some(now + wait);
+        wait
+    }
+}
 
 /// What the pane shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +72,7 @@ pub struct RelatedModel {
     rev: u64,
     /// The source has been asked this many times (tests and diagnostics).
     requests: u32,
+    settle: Settle,
 }
 
 impl RelatedModel {
@@ -68,6 +89,7 @@ impl RelatedModel {
             failure: None,
             rev: 0,
             requests: 0,
+            settle: Settle::default(),
         }
     }
 
@@ -155,11 +177,14 @@ impl RelatedModel {
         self.asked = Some(video.clone());
         self.loading = true;
         self.failure = None;
+        let spaced = self.settle.delay();
+        let wait = Throttle::global()
+            .blocked(Lane::Background)
+            .map_or(spaced, |cooldown| cooldown.max(spaced));
         cx.spawn(async move |this, cx| {
-            let wait = Throttle::global()
-                .blocked(Lane::Background)
-                .map_or(SETTLE, |cooldown| cooldown.max(SETTLE));
-            cx.background_executor().timer(wait).await;
+            if !wait.is_zero() {
+                cx.background_executor().timer(wait).await;
+            }
             // Another track (or the pane going away) in the meantime: that one asks, not this.
             let current = this
                 .update(cx, |m, _| {

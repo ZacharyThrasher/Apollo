@@ -623,7 +623,9 @@ fn resting_the_pointer_on_a_song_starts_resolving_it_before_the_click(cx: &mut T
     let library = SimLibrary::instant();
     let mut ready = prepared(library.clone());
     ready.ports.resolver = Box::new(Recorder(seen.clone()));
-    let (_page, vcx) = start_with(cx, library, ready);
+    let (page, vcx) = start_with(cx, library, ready);
+    // Hover preloading is a setting (Playback > Preload songs on hover), off until switched on.
+    page.player.update(vcx, |m, _| m.set_preload_hover(true));
     vcx.run_until_parked();
     let before = seen.lock().unwrap().len();
     let over = vcx.debug_bounds("home-0-3").expect("a song row").center();
