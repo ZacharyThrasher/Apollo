@@ -1,0 +1,16 @@
+[package]
+name = "apollo-updater"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Self-update from GitHub Releases: find a newer build, stage it, swap it in when Apollo is not running"
+
+[dependencies]
+serde_json = "1"
+sha2 = "0.10"
+ureq = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"
