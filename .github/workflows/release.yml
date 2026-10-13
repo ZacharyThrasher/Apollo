@@ -12,7 +12,7 @@ name: release
 
 on:
   push:
-    branches: [main, claude/auto-release-7t210c] # TEMP: dry run of this branch; removed before merge
+    branches: [main]
     paths-ignore:
       - 'docs/**'
       - '**/*.md'
