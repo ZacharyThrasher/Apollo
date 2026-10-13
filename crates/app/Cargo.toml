@@ -42,6 +42,7 @@ apollo-runtime = { path = "../runtime" }
 apollo-services-common = { path = "../services-common" }
 apollo-store = { path = "../store" }
 apollo-theme = { path = "../theme" }
+apollo-updater = { path = "../updater" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f37989fbdf840b308892af66516c2b9c3ef3853a" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f37989fbdf840b308892af66516c2b9c3ef3853a" }
 regex = "1"

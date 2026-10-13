@@ -213,6 +213,10 @@ pub fn run(cx: &mut App, mode: Mode) -> WindowHandle<Shell> {
     crate::hotkeys_win::install(cx, settings.clone(), player.clone());
     // Discord Rich Presence (Settings > Discord); inert until the Discord application id is set.
     crate::discord::install(cx, player.clone(), settings.clone());
+    // Newer builds from GitHub Releases (Settings > Window); the simulation never updates.
+    if !matches!(mode, Mode::Sim | Mode::SimSignedOut) {
+        crate::update::install(cx, settings.clone());
+    }
     // A second launch asks this window to come forward, whether it is hidden in the tray,
     // minimized or behind others.
     #[cfg(windows)]

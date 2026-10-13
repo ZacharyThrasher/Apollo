@@ -124,6 +124,10 @@ pub const CRATE_MORE_LIKE: BoolSetting = BoolSetting::new("crate_more_like", tru
 pub const CLOSE_TO_TRAY: BoolSetting = BoolSetting::new("close_to_tray", true);
 /// Window > Start minimized to tray: the window stays hidden on launch.
 pub const START_MINIMIZED_TO_TRAY: BoolSetting = BoolSetting::new("start_minimized_to_tray", false);
+/// Window > Install updates automatically: Apollo looks for a newer build on GitHub now and then,
+/// downloads it quietly, and swaps it in when Apollo is next started or quit (never while
+/// playing). Off checks and installs nothing.
+pub const INSTALL_UPDATES: BoolSetting = BoolSetting::new("install_updates", true);
 /// Playback > Pause when other audio plays: another app that keeps playing sound for a couple of
 /// seconds (a movie, a call) pauses the music. Off until the owner asks for it.
 pub const PAUSE_ON_OTHER_AUDIO: BoolSetting = BoolSetting::new("pause_on_other_audio", false);
@@ -214,6 +218,7 @@ pub const REPORTED_KEYS: &[&str] = &[
     CRATE_MORE_LIKE.key,
     CLOSE_TO_TRAY.key,
     START_MINIMIZED_TO_TRAY.key,
+    INSTALL_UPDATES.key,
     PAUSE_ON_OTHER_AUDIO.key,
     SKIM.key,
     SKIM_SECONDS.key,
@@ -264,6 +269,15 @@ fn parse_bool(value: &str) -> Option<bool> {
         "false" | "0" => Some(false),
         _ => None,
     }
+}
+
+/// A switch as saved in the app's database, read without a [`SettingsModel`] (before the UI is
+/// up). The default where nothing is saved or the store cannot be read.
+pub fn stored_bool(setting: &BoolSetting) -> bool {
+    SqliteSettings::default_location()
+        .and_then(|db| SettingsBackend::get(&db, setting.key))
+        .and_then(|v| parse_bool(&v))
+        .unwrap_or(setting.default)
 }
 
 /// The app's settings as the UI sees them. Reads come from a cache filled on first use; a change

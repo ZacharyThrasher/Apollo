@@ -62,7 +62,7 @@ pub fn gather(snapshot: Snapshot) -> ReportInput {
     known.extend(ambient_secrets(|name| std::env::var(name).ok()));
     ReportInput {
         created_unix: unix_now(),
-        app_version: env!("CARGO_PKG_VERSION").to_owned(),
+        app_version: crate::update::VERSION.to_owned(),
         backend: backend.map_or("not started", |b| b.label).to_owned(),
         os: os_description(),
         arch: std::env::consts::ARCH.to_owned(),
