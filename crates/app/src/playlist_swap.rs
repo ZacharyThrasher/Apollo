@@ -45,6 +45,8 @@ pub enum PlaylistSwapEvent {
     Failed,
     /// Asked to start while another swap was running.
     Busy,
+    /// The playlist is longer than its page has read: reading the rest before looking.
+    Reading,
 }
 
 impl EventEmitter<PlaylistSwapEvent> for PlaylistSwapModel {}
@@ -57,6 +59,8 @@ pub enum Start {
     /// No row needs it, or the page cannot be swapped now (still loading, not editable).
     Nothing,
     Busy,
+    /// The whole playlist is being read first.
+    Reading,
     /// There is no search to ask yet (the backend is not ready).
     NoSearch,
     /// YouTube said it was busy a moment ago: searches wait.
@@ -131,6 +135,8 @@ pub struct PlaylistSwapModel {
     cooldown: Duration,
     cooling_until: Option<Instant>,
     throttle: Throttle,
+    /// The whole playlist is being read before the lookups begin.
+    reading: bool,
 }
 
 /// The playlist swap, reachable from the track menu.
@@ -155,6 +161,7 @@ impl PlaylistSwapModel {
             cooldown: crate_swap::COOLDOWN,
             cooling_until: None,
             throttle: Throttle::global(),
+            reading: false,
         }
     }
 
@@ -177,7 +184,7 @@ impl PlaylistSwapModel {
 
     /// A swap is running (looking up, or waiting for the service).
     pub fn running(&self) -> bool {
-        self.run.is_some()
+        self.run.is_some() || self.reading
     }
 
     /// Listen for the service's answer to the swap's write.
@@ -196,9 +203,10 @@ impl PlaylistSwapModel {
     }
 
     /// Look for the `want` version of the songs of the playlist `playlist_key`, whose page is on
-    /// top in the library, and swap in what is found.
+    /// top in the library, and swap in what is found. A long playlist whose page has not read
+    /// every row yet is read whole first ("Reading the playlist…").
     pub fn start(&mut self, want: Want, playlist_key: &str, cx: &mut Context<Self>) -> Start {
-        if self.run.is_some() {
+        if self.run.is_some() || self.reading {
             cx.emit(PlaylistSwapEvent::Busy);
             return Start::Busy;
         }
@@ -207,12 +215,49 @@ impl PlaylistSwapModel {
         }
         let page = cx
             .try_global::<LibraryHandle>()
-            .and_then(|h| h.0.read(cx).swappable_rows(playlist_key));
+            .and_then(|h| h.0.read(cx).swap_page(playlist_key));
         let Some(page) = page else {
             cx.emit(finished(want, 0, 0, 0, false, false));
             return Start::Nothing;
         };
-        let targets = target_rows(&page.rows, want);
+        if let Some(rows) = page.rows {
+            return self.begin(want, page.collection, page.account, rows, cx);
+        }
+        self.reading = true;
+        cx.emit(PlaylistSwapEvent::Reading);
+        let (collection, account, source) = (page.collection, page.account, page.source);
+        cx.spawn(async move |this, cx| {
+            let read = {
+                let collection = collection.clone();
+                cx.background_executor()
+                    .spawn(async move { crate::library::edits::all_rows(&*source, &collection) })
+                    .await
+            };
+            let _ = this.update(cx, |m, cx| {
+                m.reading = false;
+                match read {
+                    // A row with no token cannot be named to the service.
+                    Ok(rows) if rows.iter().all(|r| r.occurrence.is_some()) => {
+                        m.begin(want, collection, account, rows, cx);
+                    }
+                    Ok(_) | Err(_) => cx.emit(PlaylistSwapEvent::Failed),
+                }
+            });
+        })
+        .detach();
+        Start::Reading
+    }
+
+    /// The playlist is read: look up the songs that are not the wanted version yet.
+    fn begin(
+        &mut self,
+        want: Want,
+        collection: Collection,
+        account: Option<String>,
+        rows: Vec<TrackRow>,
+        cx: &mut Context<Self>,
+    ) -> Start {
+        let targets = target_rows(&rows, want);
         if targets.is_empty() {
             cx.emit(finished(want, 0, 0, 0, false, false));
             return Start::Nothing;
@@ -224,20 +269,20 @@ impl PlaylistSwapModel {
         let mut waiting = VecDeque::new();
         let mut seen = HashSet::new();
         for &at in &targets {
-            let id = page.rows[at].track.video_id.as_str();
+            let id = rows[at].track.video_id.as_str();
             if seen.insert(id.to_owned()) {
                 waiting.push_back(id.to_owned());
             }
         }
-        let held = page.rows.iter().map(|r| r.track.video_id.as_str().to_owned()).collect();
+        let held = rows.iter().map(|r| r.track.video_id.as_str().to_owned()).collect();
         self.serial += 1;
         let total_videos = waiting.len();
         self.run = Some(Run {
             id: self.serial,
             want,
-            collection: page.collection,
-            account: page.account,
-            rows: page.rows,
+            collection,
+            account,
+            rows,
             targets,
             held,
             waiting,
