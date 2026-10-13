@@ -156,6 +156,8 @@ struct SimState {
     writes: WriteBehaviour,
     /// The service refuses several moves in one request (they then go one by one).
     refuse_batched_moves: bool,
+    /// The next this many requests for a further page of a list fail.
+    failing_more_pages: usize,
     /// Songs the service knows in full (artists, length, explicit flag), by video id: a swap
     /// puts these in a playlist in place of a plain row.
     catalog: HashMap<String, TrackRow>,
@@ -232,6 +234,7 @@ impl SimState {
             next_row: 0,
             writes: WriteBehaviour::default(),
             refuse_batched_moves: false,
+            failing_more_pages: 0,
             catalog: HashMap::new(),
             playlists: None,
             log: Vec::new(),
@@ -310,6 +313,11 @@ impl SimLibrary {
     /// How the next writes are answered (tests).
     pub fn set_write_behaviour(&self, behaviour: WriteBehaviour) {
         self.state().writes = behaviour;
+    }
+
+    /// Make the next `n` requests for a further page of a list fail (tests).
+    pub fn fail_next_more_pages(&self, n: usize) {
+        self.state().failing_more_pages = n;
     }
 
     /// Whether several moves in one request are refused (tests).
@@ -1257,6 +1265,13 @@ impl LibrarySource for SimLibrary {
 
     fn more_tracks(&self, token: &str) -> Result<Page<TrackRow>, LoadFailure> {
         self.wait(PAGE_LATENCY);
+        {
+            let mut state = self.state();
+            if state.failing_more_pages > 0 {
+                state.failing_more_pages -= 1;
+                return Err(LoadFailure::Network);
+            }
+        }
         // Token: "<collection id>@<offset>".
         let (id, offset) = token.rsplit_once('@').ok_or(LoadFailure::Parse)?;
         let offset: usize = offset.parse().map_err(|_| LoadFailure::Parse)?;

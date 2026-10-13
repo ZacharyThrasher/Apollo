@@ -4,13 +4,16 @@
 //! once, and the write goes out through the playlist's edit queue (see `queue_edit`), so it keeps
 //! its order among the page's other edits. The whole swap is one step for Ctrl+Z.
 
+use std::sync::Arc;
+
 use gpui::Context;
 
-use apollo_domain::library::Collection;
+use apollo_domain::library::{is_user_playlist_id, Collection};
+use apollo_domain::listing::LoadState;
 
 use super::{Entry, LibraryModel, PageEdit};
 use crate::library::edits::Swap;
-use crate::library::source::TrackRow;
+use crate::library::source::{LibrarySource, TrackRow};
 use crate::library::undo::{Action, PlaylistRef, SwappedRow};
 
 /// A song of a playlist and the version that takes its place.
@@ -23,32 +26,47 @@ pub struct SwapFound {
 }
 
 /// A playlist page a swap can start from.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SwapPage {
     pub collection: Collection,
-    pub rows: Vec<TrackRow>,
+    /// Every row of the playlist, when the page has them all (and each can be named to the
+    /// service). `None` while the page has only read part of a long playlist: the swap then reads
+    /// the whole playlist itself, with `source`.
+    pub rows: Option<Vec<TrackRow>>,
     /// The account the person acted in: a swap finished in another one is dropped.
     pub account: Option<String>,
+    pub source: Arc<dyn LibrarySource>,
 }
 
 impl LibraryModel {
-    /// The rows of the playlist page on top when it is `playlist_key`, one the account owns, fully
-    /// loaded and every row nameable: what a swap can look at.
-    pub fn swappable_rows(&self, playlist_key: &str) -> Option<SwapPage> {
+    /// Whether the page on top is the playlist `playlist_key`, whatever it has loaded so far (or
+    /// failed to): where a swap can be offered. That the account owns it is the menu's to know;
+    /// a swap that has to read the playlist itself does so with the source, not the page.
+    pub fn is_own_page(&self, playlist_key: &str) -> bool {
+        matches!(
+            self.stack.last(),
+            Some(Entry::Collection(d))
+                if d.collection.library_key() == playlist_key
+                    && is_user_playlist_id(d.collection.library_key())
+        )
+    }
+
+    /// What a swap starts from, when the page on top is `playlist_key` and one the account owns.
+    pub fn swap_page(&self, playlist_key: &str) -> Option<SwapPage> {
+        if !self.is_own_page(playlist_key) {
+            return None;
+        }
         let Some(Entry::Collection(d)) = self.stack.last() else {
             return None;
         };
-        if d.collection.library_key() != playlist_key || !d.can_edit() {
-            return None;
-        }
+        let source = self.source.clone()?;
         let rows = d.listing.items();
-        if rows.iter().any(|r| r.occurrence.is_none()) {
-            return None;
-        }
+        let complete = d.can_edit() && rows.iter().all(|r| r.occurrence.is_some());
         Some(SwapPage {
             collection: d.collection.clone(),
-            rows: rows.to_vec(),
-            account: self.source.as_ref().and_then(|s| s.account_token()),
+            rows: complete.then(|| rows.to_vec()),
+            account: source.account_token(),
+            source,
         })
     }
 
@@ -76,13 +94,17 @@ impl LibraryModel {
             .filter(|(_, e)| matches!(e, Entry::Collection(d) if d.collection.library_key() == key))
             .map(|(at, _)| at)
             .collect();
-        // A page that is open decides which rows are still there.
+        // A page that has read the whole playlist decides which rows are still there; one that
+        // has read only part of it knows nothing of the rest.
         let found: Vec<SwapFound> = found
             .into_iter()
             .filter(|f| {
                 let token = f.old.occurrence.as_deref();
                 open.iter().all(|&at| match &self.stack[at] {
-                    Entry::Collection(d) => d.listing.items().iter().any(|r| r.occurrence.as_deref() == token),
+                    Entry::Collection(d) => {
+                        d.listing.state() != LoadState::Complete
+                            || d.listing.items().iter().any(|r| r.occurrence.as_deref() == token)
+                    }
                     Entry::Artist(_) => true,
                 })
             })

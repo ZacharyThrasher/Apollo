@@ -208,18 +208,19 @@ fn shown(page: &Page, vcx: &mut VisualTestContext) -> Vec<String> {
 
 /// The video ids of the playlist as the service holds it.
 fn held(page: &Page) -> Vec<String> {
-    use apollo_app::library::LibrarySource;
+    held_in(page, OWN_ID)
+}
+
+fn held_in(page: &Page, bare_id: &str) -> Vec<String> {
     let collection = Collection {
         kind: apollo_domain::library::CollectionKind::Playlist,
-        id: apollo_domain::model::BrowseId::new(format!("VL{OWN_ID}")),
+        id: apollo_domain::model::BrowseId::new(format!("VL{bare_id}")),
         title: String::new(),
         subtitle: None,
         thumbnail: None,
     };
-    page.sim
-        .tracks(&collection)
+    apollo_app::library::edits::all_rows(&page.sim, &collection)
         .expect("the playlist reads")
-        .items
         .into_iter()
         .map(|r| r.track.video_id.as_str().to_owned())
         .collect()
@@ -355,4 +356,49 @@ fn only_the_open_page_of_a_playlist_of_your_own_offers_the_swap(cx: &mut TestApp
         let commands = menu_commands(&page, vcx, Subject::Collection(liked));
         assert!(!commands.contains(&Command::SwapToExplicit), "{commands:?}");
     }
+}
+
+/// 250 clean songs with `a`, `b` and `d` far apart (the sim pages this playlist by 100).
+fn long_playlist(page: &Page) {
+    let mut rows: Vec<TrackRow> =
+        (0..250).map(|n| row(&format!("f{n}"), &format!("Filler {n}"), 200, false)).collect();
+    rows[3] = row("a", "Song a", 200, false);
+    rows[150] = row("b", "Song b", 200, false);
+    rows[249] = row("d", "Song d", 200, false);
+    page.sim.preset_playlist_rows("PLsimlong", &rows);
+}
+
+fn assert_long_swapped(page: &Page, vcx: &mut VisualTestContext) {
+    assert_eq!(pill(page, vcx).as_deref(), Some("Swapped 3 of 250 to explicit"));
+    let now = held_in(page, "PLsimlong");
+    assert_eq!(now.len(), 250);
+    assert_eq!((now[3].as_str(), now[150].as_str(), now[249].as_str()), ("a2", "b2", "d2"));
+}
+
+#[gpui::test]
+fn a_playlist_of_several_pages_swaps_every_page(cx: &mut TestAppContext) {
+    let (page, vcx) = setup(cx);
+    long_playlist(&page);
+    let list = open_playlist(&page, vcx, "Long Haul");
+    choose(&page, vcx, Subject::Collection(list), Command::SwapToExplicit);
+    assert_long_swapped(&page, vcx);
+}
+
+#[gpui::test]
+fn a_page_that_could_not_read_the_whole_playlist_still_offers_the_swap_and_reads_it_itself(
+    cx: &mut TestAppContext,
+) {
+    let (page, vcx) = setup(cx);
+    long_playlist(&page);
+    // The page's own read of the second page fails, so it is stuck at the first hundred.
+    page.sim.fail_next_more_pages(1);
+    let list = open_playlist(&page, vcx, "Long Haul");
+    assert_eq!(shown(&page, vcx).len(), 100, "the page is stuck at the first page");
+
+    let commands = menu_commands(&page, vcx, Subject::Collection(list.clone()));
+    assert!(commands.contains(&Command::SwapToExplicit), "{commands:?}");
+    assert!(!commands.contains(&Command::RemoveDuplicates), "that one still needs every row");
+
+    choose(&page, vcx, Subject::Collection(list), Command::SwapToExplicit);
+    assert_long_swapped(&page, vcx);
 }

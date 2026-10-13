@@ -332,6 +332,8 @@ pub struct Facts {
     /// The playlist's own page is open and its songs can be arranged: Remove duplicates reads
     /// that page, so a card elsewhere does not offer it.
     pub page_open: bool,
+    /// The playlist's own page is open, however much of it is loaded: a swap can start from it.
+    pub swap_open: bool,
     /// Whether the library holds the album or playlist; `None` where saving does not apply.
     pub saved: Option<bool>,
     /// Whether the song is in the Crate (its item then takes it out).
@@ -407,7 +409,10 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                         Icon::Dismiss,
                         "Remove duplicates\u{2026}",
                     ));
-                    // Songs for their explicit (or clean) versions, each in its place.
+                }
+                // Songs for their explicit (or clean) versions, each in its place; the playlist's
+                // page only has to be open, a long one is read whole by the swap itself.
+                if facts.swap_open {
                     own.push(item(
                         Command::SwapToExplicit,
                         Icon::ArrowSwap,
@@ -1020,6 +1025,9 @@ impl TrackMenu {
                         page_open: cx
                             .try_global::<duplicates_dialog::DuplicatesDialogHandle>()
                             .is_some_and(|h| h.0.read(cx).can_open(c, cx)),
+                        swap_open: cx
+                            .try_global::<LibraryHandle>()
+                            .is_some_and(|h| h.0.read(cx).is_own_page(c.library_key())),
                         saved: edits.saved_state(c),
                         loaded: loaded_songs(&open.subject, &self.player, cx)
                             .map_or(0, |l| l.songs.len()),
@@ -1986,7 +1994,7 @@ mod tests {
             vec![EditPlaylist, DeletePlaylist],
             "a card that is not the open page has no Remove duplicates"
         );
-        let on_its_page = Facts { page_open: true, ..own };
+        let on_its_page = Facts { page_open: true, swap_open: true, ..own };
         assert_eq!(
             commands_with(&card(), on_its_page),
             vec![

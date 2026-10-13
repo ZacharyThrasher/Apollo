@@ -403,6 +403,7 @@ impl Shell {
             }
             PlaylistSwapEvent::Failed => this.show_tip("Couldn't swap songs".into(), cx),
             PlaylistSwapEvent::Busy => this.show_tip("Still finding versions".into(), cx),
+            PlaylistSwapEvent::Reading => this.show_tip("Reading the playlist\u{2026}".into(), cx),
         })
         .detach();
         cx.set_global(PlaylistSwapHandle(playlist_swap.clone()));
