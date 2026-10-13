@@ -80,5 +80,6 @@ pub mod tray;
 #[cfg(windows)]
 pub mod tray_win;
 pub mod ui;
+pub mod update;
 pub mod url_thumbs;
 pub mod window_state;

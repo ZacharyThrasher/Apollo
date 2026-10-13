@@ -20,10 +20,19 @@ Expand-Archive (Join-Path $d 'deno-x86_64-pc-windows-msvc.zip') (Join-Path $t 'd
 New-Item -ItemType Directory -Force (Join-Path $t 'yt-dlp') | Out-Null
 Copy-Item (Join-Path $d 'yt-dlp.exe') (Join-Path $t 'yt-dlp\yt-dlp.exe') -Force
 $mpv = Join-Path $t 'mpv-dev'; New-Item -ItemType Directory -Force $mpv | Out-Null
-tar -xf (Join-Path $d 'mpv-dev-x86_64-20261002-git-3186d369f9.7z') -C $mpv
+& "$env:SystemRoot\System32\tar.exe" -xf (Join-Path $d 'mpv-dev-x86_64-20261002-git-3186d369f9.7z') -C $mpv
 
 # MSVC import library for libmpv-2.dll (the package ships only a MinGW .dll.a).
+# Found with vswhere (any VS edition, including a CI runner's); the Build Tools path is the fallback.
 $vc = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+if (Test-Path $vswhere) {
+  $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+  if ($vsPath) {
+    $found = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+    if (Test-Path $found) { $vc = $found }
+  }
+}
 cmd /c "`"$vc`" >nul 2>&1 && cd /d $mpv && dumpbin /exports libmpv-2.dll > exports.txt"
 $names = Get-Content (Join-Path $mpv 'exports.txt') | ForEach-Object { if ($_ -match '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(mpv_\w+)') { $Matches[1] } }
 @('LIBRARY libmpv-2.dll', 'EXPORTS') + $names | Set-Content (Join-Path $mpv 'mpv.def') -Encoding ascii

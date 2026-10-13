@@ -1,7 +1,7 @@
 # Builds Apollo (release, real services) and assembles a self-contained, double-clickable
 # folder (default C:\Apollo) plus Start Menu and Desktop shortcuts.
 #
-#   powershell -ExecutionPolicy Bypass -File scripts\package.ps1 [-Dest C:\Apollo] [-SkipBuild] [-NoShortcuts]
+#   powershell -ExecutionPolicy Bypass -File scripts\package.ps1 [-Dest C:\Apollo] [-SkipBuild] [-NoShortcuts] [-Version 0.1.7]
 #
 # Layout of the output folder (the app finds everything relative to its own exe):
 #   Apollo.exe              GPUI app, windows subsystem (no console), real services by default
@@ -14,8 +14,13 @@
 # The pinned tools come from <repo>\tools (see scripts\setup-m0-tools.ps1), or from the main
 # checkout's tools\ when this runs from a git worktree. Nothing is read from or written to the
 # user's account data: sessions live in %LOCALAPPDATA%\Apollo and are untouched by packaging.
+#
+# -Version stamps the build (shown in the diagnostics report, and what the in-app updater compares
+# against GitHub Releases). The release workflow passes it; a local build without it is 0.0.0,
+# which any release is newer than. See .github/workflows/release.yml.
 param(
     [string]$Dest = 'C:\Apollo',
+    [string]$Version = '',
     [switch]$SkipBuild,
     [switch]$NoShortcuts
 )
@@ -40,6 +45,7 @@ Write-Host "tools: $tools"
 
 if (-not $SkipBuild) {
     $env:APOLLO_LIBMPV_DIR = Join-Path $tools 'mpv-dev'
+    if ($Version) { $env:APOLLO_VERSION = $Version } else { Remove-Item Env:APOLLO_VERSION -ErrorAction SilentlyContinue }
     Push-Location $root
     try {
         # Two invocations: `--bin apollo` would otherwise also filter the helper out.
