@@ -636,6 +636,136 @@ fn a_refused_restore_adds_nothing_and_a_wrong_account_sends_nothing() {
     assert_eq!(sim.write_log().len(), log_before, "nothing was sent");
 }
 
+fn swap(out_video: &str, out_token: &str, in_video: &str) -> Swap {
+    Swap { out_video: out_video.into(), out_token: out_token.into(), in_video: in_video.into() }
+}
+
+fn writes_named(sim: &SimLibrary, prefix: &str) -> usize {
+    sim.write_log().iter().filter(|(what, _)| what.starts_with(prefix)).count()
+}
+
+#[test]
+fn swapped_songs_keep_their_places_and_cost_two_requests() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b", "c", "d"]);
+    let list = playlist("PLsimempty", "x");
+    let tokens = sim.occurrences("PLsimempty");
+    let done = swap_rows(
+        &sim,
+        &none(),
+        &list,
+        &[swap("b", &tokens[1], "B"), swap("d", &tokens[3], "D")],
+    )
+    .unwrap();
+    assert_eq!(videos_of(&sim, &list), ["a", "B", "c", "D"]);
+    assert_eq!(done.at_end, 0);
+    let now = sim.occurrences("PLsimempty");
+    assert_eq!(done.tokens, [Some(now[1].clone()), Some(now[3].clone())]);
+    assert_eq!(writes_named(&sim, "swap-rows"), 1, "one request swaps them");
+    assert_eq!(writes_named(&sim, "move-many"), 1, "one request puts them in place");
+    assert_eq!(writes_named(&sim, "move:"), 0, "no single moves");
+}
+
+#[test]
+fn songs_that_end_up_in_place_need_no_moves() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b", "c"]);
+    let list = playlist("PLsimempty", "x");
+    let tokens = sim.occurrences("PLsimempty");
+    swap_rows(&sim, &none(), &list, &[swap("c", &tokens[2], "C")]).unwrap();
+    assert_eq!(videos_of(&sim, &list), ["a", "b", "C"]);
+    assert_eq!(writes_named(&sim, "swap-rows"), 1);
+    assert_eq!(writes_named(&sim, "move"), 0);
+}
+
+#[test]
+fn a_song_listed_twice_swaps_each_row_in_place() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b", "a"]);
+    let list = playlist("PLsimempty", "x");
+    let tokens = sim.occurrences("PLsimempty");
+    swap_rows(&sim, &none(), &list, &[swap("a", &tokens[0], "A"), swap("a", &tokens[2], "A")])
+        .unwrap();
+    assert_eq!(videos_of(&sim, &list), ["A", "b", "A"]);
+}
+
+#[test]
+fn a_row_that_left_the_playlist_is_skipped_and_nothing_is_sent_when_all_did() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b"]);
+    let list = playlist("PLsimempty", "x");
+    let tokens = sim.occurrences("PLsimempty");
+    let done = swap_rows(
+        &sim,
+        &none(),
+        &list,
+        &[swap("a", "gone", "A"), swap("b", &tokens[1], "B")],
+    )
+    .unwrap();
+    assert_eq!(done.tokens[0], None);
+    assert!(done.tokens[1].is_some());
+    assert_eq!(videos_of(&sim, &list), ["a", "B"]);
+    let sent = sim.write_log().len();
+    let none_left = swap_rows(&sim, &none(), &list, &[swap("a", "gone", "A")]).unwrap();
+    assert_eq!(none_left.tokens, [None]);
+    assert_eq!(sim.write_log().len(), sent, "nothing was sent");
+}
+
+#[test]
+fn a_swap_with_a_lost_reply_is_settled_by_reading_the_playlist_and_sent_once() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b", "c"]);
+    let list = playlist("PLsimempty", "x");
+    let tokens = sim.occurrences("PLsimempty");
+    sim.set_write_behaviour(WriteBehaviour::LandsReplyLost);
+    let done = swap_rows(&sim, &none(), &list, &[swap("a", &tokens[0], "A")]).unwrap();
+    assert_eq!(videos_of(&sim, &list), ["A", "b", "c"]);
+    assert_eq!(done.tokens, [Some(sim.occurrences("PLsimempty")[0].clone())]);
+    assert_eq!(writes_named(&sim, "swap-rows"), 1, "the swap went out once");
+}
+
+#[test]
+fn a_refused_swap_changes_nothing_and_a_wrong_account_sends_nothing() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b"]);
+    let list = playlist("PLsimempty", "x");
+    let tokens = sim.occurrences("PLsimempty");
+    sim.set_write_behaviour(WriteBehaviour::Fail(WriteFailure::Rejected));
+    assert_eq!(
+        swap_rows(&sim, &none(), &list, &[swap("a", &tokens[0], "A")]),
+        Err(WriteFailure::Rejected)
+    );
+    sim.set_write_behaviour(WriteBehaviour::Succeed);
+    assert_eq!(videos_of(&sim, &list), ["a", "b"]);
+
+    sim.set_account(Some("one"));
+    let sent = sim.write_log().len();
+    assert_eq!(
+        swap_rows(&sim, &Some("other".into()), &list, &[swap("a", &tokens[0], "A")]),
+        Err(WriteFailure::Rejected)
+    );
+    assert_eq!(sim.write_log().len(), sent, "nothing was sent");
+}
+
+#[test]
+fn moves_the_service_will_not_take_together_go_one_by_one() {
+    let sim = SimLibrary::instant();
+    sim.preset_playlist("PLsimempty", &["a", "b", "c", "d"]);
+    let list = playlist("PLsimempty", "x");
+    let tokens = sim.occurrences("PLsimempty");
+    sim.refuse_batched_moves(true);
+    let done = swap_rows(
+        &sim,
+        &none(),
+        &list,
+        &[swap("a", &tokens[0], "A"), swap("c", &tokens[2], "C")],
+    )
+    .unwrap();
+    assert_eq!(videos_of(&sim, &list), ["A", "b", "C", "d"]);
+    assert_eq!(done.at_end, 0);
+    assert!(writes_named(&sim, "move:") >= 1, "single moves took over");
+}
+
 #[test]
 fn a_made_playlist_is_deleted_when_it_holds_only_what_it_was_made_with() {
     let sim = SimLibrary::instant();

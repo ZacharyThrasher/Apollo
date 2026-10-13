@@ -284,9 +284,10 @@ pub enum Command {
     AddAllToCrate,
     /// ... and then the Crate page opens (a playlist's songs, to rework there).
     OpenInCrate,
-    /// Crate: replace songs with their explicit versions, where the service has them.
+    /// Crate or a playlist of your own: replace songs with their explicit versions, where the
+    /// service has them.
     SwapToExplicit,
-    /// Crate: replace songs with their clean versions.
+    /// ... with their clean versions.
     SwapToClean,
 }
 
@@ -405,6 +406,17 @@ pub fn groups_with(subject: &Subject, liked: bool, facts: Facts) -> Vec<Vec<Item
                         Command::RemoveDuplicates,
                         Icon::Dismiss,
                         "Remove duplicates\u{2026}",
+                    ));
+                    // Songs for their explicit (or clean) versions, each in its place.
+                    own.push(item(
+                        Command::SwapToExplicit,
+                        Icon::ArrowSwap,
+                        "Swap to explicit versions",
+                    ));
+                    own.push(item(
+                        Command::SwapToClean,
+                        Icon::ArrowSwap,
+                        "Swap to clean versions",
                     ));
                 }
                 own.push(item(Command::DeletePlaylist, Icon::Delete, "Delete playlist\u{2026}"));
@@ -1390,6 +1402,14 @@ impl TrackMenu {
             (Command::AddToCrate, Subject::Track(t)) => {
                 crate::crate_list::add_track(&self.player, t.track, t.thumbnail, cx);
             }
+            (Command::SwapToExplicit | Command::SwapToClean, Subject::Collection(c)) => {
+                let want = if command == Command::SwapToExplicit {
+                    crate::crate_swap::Want::Explicit
+                } else {
+                    crate::crate_swap::Want::Clean
+                };
+                crate::playlist_swap::swap(want, c.library_key(), cx);
+            }
             (Command::SwapToExplicit | Command::SwapToClean, subject) => {
                 let want = if command == Command::SwapToExplicit {
                     crate::crate_swap::Want::Explicit
@@ -1974,7 +1994,7 @@ mod tests {
                 vec![AddToQueue, StartRadio],
                 vec![CopyLink],
                 vec![SetTarget],
-                vec![EditPlaylist, RemoveDuplicates, DeletePlaylist],
+                vec![EditPlaylist, RemoveDuplicates, SwapToExplicit, SwapToClean, DeletePlaylist],
             ]
         );
     }

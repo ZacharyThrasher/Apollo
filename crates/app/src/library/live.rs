@@ -543,6 +543,31 @@ impl LibrarySource for InnerTubeLibrary {
         })
     }
 
+    fn swap_playlist_rows(
+        &self,
+        playlist_id: &str,
+        adds: &[String],
+        removes: &[(String, String)],
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.swap_rows(playlist_id, adds, removes).await
+        })
+    }
+
+    fn move_many_in_playlist(
+        &self,
+        playlist_id: &str,
+        moves: &[(String, Option<String>)],
+    ) -> Result<(), WriteFailure> {
+        let source = self.source().map_err(write_failure)?;
+        self.rt.block_on(async {
+            source.ensure_visitor_data().await;
+            source.move_rows(playlist_id, moves).await
+        })
+    }
+
     fn set_saved(&self, save_id: &str, saved: bool) -> Result<(), WriteFailure> {
         let source = self.source().map_err(write_failure)?;
         self.rt.block_on(async {

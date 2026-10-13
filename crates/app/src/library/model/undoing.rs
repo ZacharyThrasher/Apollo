@@ -123,6 +123,55 @@ impl LibraryModel {
                 cx.notify();
                 Some(words)
             }
+            Action::Swapped { rows, .. } => {
+                // The rows that took the places go, and the songs that were there come back in
+                // their places. Open pages show the old songs at once, without tokens until the
+                // playlist is read again.
+                let pairs: Vec<crate::library::edits::Swap> = rows
+                    .iter()
+                    .filter_map(|r| {
+                        Some(crate::library::edits::Swap {
+                            out_video: r.new_video.clone(),
+                            out_token: r.new_token.clone()?,
+                            in_video: r.old.track.video_id.as_str().to_owned(),
+                        })
+                    })
+                    .collect();
+                if pairs.is_empty() {
+                    let text = failure_text(Edit::Undo, WriteFailure::Rejected);
+                    self.writes.update(cx, |w, cx| w.raise(text, cx));
+                    return None;
+                }
+                for entry in &mut self.stack {
+                    if let Entry::Collection(d) = entry {
+                        if d.collection.kind == CollectionKind::Playlist
+                            && d.collection.library_key() == key
+                        {
+                            for swapped in &rows {
+                                let Some(token) = swapped.new_token.as_deref() else {
+                                    continue;
+                                };
+                                let Some(place) = d
+                                    .listing
+                                    .items()
+                                    .iter()
+                                    .position(|r| r.occurrence.as_deref() == Some(token))
+                                else {
+                                    continue;
+                                };
+                                d.listing.retain(|r| r.occurrence.as_deref() != Some(token));
+                                let mut shown = swapped.old.clone();
+                                shown.occurrence = None;
+                                d.listing.insert(place, shown);
+                            }
+                        }
+                    }
+                }
+                self.queue_edit(collection, PageEdit::Swap { pairs, step: None }, cx);
+                self.refresh_when_written(&key);
+                cx.notify();
+                Some(words)
+            }
             Action::Created { videos } => {
                 self.edits
                     .update(cx, |e, cx| e.undo_create(step.playlist, videos, cx));
@@ -147,7 +196,7 @@ impl LibraryModel {
     }
 
     /// Once the playlist's queued edits are all written, its open pages are read again.
-    fn refresh_when_written(&mut self, key: &str) {
+    pub(super) fn refresh_when_written(&mut self, key: &str) {
         if let Some(queue) = self.edit_queues.get_mut(key) {
             queue.refresh = true;
         }

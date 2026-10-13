@@ -40,6 +40,17 @@ pub struct RemovedRow {
     pub anchor: Option<String>,
 }
 
+/// A song of a playlist swapped for another version of itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SwappedRow {
+    /// The row that was there (as the page showed it; its token went with it).
+    pub old: TrackRow,
+    /// The song that took its place.
+    pub new_video: String,
+    /// The token of the row that took the place, once the service has made it.
+    pub new_token: Option<String>,
+}
+
 /// What an add made, as far as the service has said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Made {
@@ -63,6 +74,9 @@ pub enum Action {
     Removed { rows: Vec<RemovedRow> },
     /// Rows moved: the tokens of all of its rows in the order they had before.
     Reordered { order: Vec<String> },
+    /// Songs swapped for their explicit (`explicit`) or clean versions, each in its place. The
+    /// rows' tokens are not known until the write is answered (`settled`).
+    Swapped { rows: Vec<SwappedRow>, explicit: bool, settled: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,12 +105,20 @@ impl Step {
             Action::Created { .. } => format!("created {name}"),
             Action::Removed { rows } => format!("removed {} from {name}", songs(rows.len())),
             Action::Reordered { .. } => format!("reordered {name}"),
+            Action::Swapped { rows, explicit, .. } => format!(
+                "swapped {} for {} versions in {name}",
+                songs(rows.len()),
+                if *explicit { "explicit" } else { "clean" }
+            ),
         }
     }
 
-    /// An add whose answer has not come yet.
+    /// An add or swap whose answer has not come yet.
     pub fn is_pending(&self) -> bool {
-        matches!(self.action, Action::Added { made: Made::Pending, .. })
+        matches!(
+            self.action,
+            Action::Added { made: Made::Pending, .. } | Action::Swapped { settled: false, .. }
+        )
     }
 }
 
@@ -160,6 +182,27 @@ impl PlaylistLog {
                 Some(rows) if !rows.is_empty() => Made::Rows(rows),
                 _ => Made::Unknown,
             };
+        }
+    }
+
+    /// The service answered a swap: `tokens` are the rows that took the places, for each song of
+    /// the step in order (`None`: the row was gone and nothing was done for it). A step left
+    /// with no song is forgotten.
+    pub fn settle_swapped(&mut self, id: u64, tokens: &[Option<String>]) {
+        let Some(Step { action: Action::Swapped { rows, settled, .. }, .. }) = self.step_mut(id)
+        else {
+            return;
+        };
+        let mut kept = Vec::new();
+        for (row, token) in rows.drain(..).zip(tokens) {
+            if let Some(token) = token {
+                kept.push(SwappedRow { new_token: Some(token.clone()), ..row });
+            }
+        }
+        *rows = kept;
+        *settled = true;
+        if rows.is_empty() {
+            self.drop_step(id);
         }
     }
 
@@ -294,6 +337,41 @@ mod tests {
         assert_eq!(log.last().unwrap().describe(), "removed a song from Gym Mix");
         log.keep_removed_except(id, &["T1".into()]);
         assert!(log.is_empty(), "nothing left to put back");
+    }
+
+    #[test]
+    fn a_swap_is_pending_until_answered_and_keeps_only_the_rows_that_were_swapped() {
+        let mut log = PlaylistLog::default();
+        let id = log.record(
+            list(),
+            Action::Swapped { rows: rows_of(&["a", "b", "c"]), explicit: true, settled: false },
+            0,
+        );
+        assert!(log.last().unwrap().is_pending());
+        log.settle_swapped(id, &[Some("T1".into()), None, Some("T3".into())]);
+        let step = log.last().unwrap();
+        assert!(!step.is_pending());
+        let Action::Swapped { rows, .. } = &step.action else {
+            panic!("a swap");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].old.track.video_id.as_str(), "c");
+        assert_eq!(rows[1].new_token.as_deref(), Some("T3"));
+        assert_eq!(step.describe(), "swapped 2 songs for explicit versions in Gym Mix");
+        // Nothing swapped: nothing to undo.
+        let id = log.record(
+            list(),
+            Action::Swapped { rows: rows_of(&["x"]), explicit: false, settled: false },
+            0,
+        );
+        log.settle_swapped(id, &[None]);
+        assert_eq!(log.len(), 1);
+    }
+
+    fn rows_of(n: &[&str]) -> Vec<SwappedRow> {
+        n.iter()
+            .map(|v| SwappedRow { old: row(v, v), new_video: format!("{v}2"), new_token: None })
+            .collect()
     }
 
     #[test]

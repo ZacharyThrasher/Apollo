@@ -982,6 +982,28 @@ impl InnerTube {
         self.edit_once(client, &body).await
     }
 
+    /// Several row edits of a playlist the account owns in one request: the actions go in the order
+    /// given and the service applies them in that order. Sent once, never retried (an add without
+    /// the dedupe option would land twice); the caller reads the playlist back when the outcome is
+    /// unknown. The rows the answer says its adds made come back.
+    pub async fn edit_rows(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        edits: &[RowEdit],
+    ) -> Result<Vec<browse::AddedVideo>, Error> {
+        if edits.is_empty() {
+            return Ok(Vec::new());
+        }
+        let body = rows_body(self.context_for(client), playlist_id, edits);
+        let value = self.post_once("browse/edit_playlist", client, &body, true).await?;
+        if browse::edit_succeeded(&value) {
+            Ok(browse::added_videos(&value))
+        } else {
+            Err(Error::Refused("playlist edit was not accepted".into()))
+        }
+    }
+
     /// Save a playlist or album to the library, or take it out again (`like/like`,
     /// `like/removelike` with a playlist target). `playlist_id` is the bare playlist id; for an
     /// album it is the album's audio playlist (`OLAK5uy_…`), not its `MPRE…` browse id.
@@ -1241,6 +1263,48 @@ fn move_action(set_video_id: &str, before: Option<&str>) -> serde_json::Value {
         action["movedSetVideoIdSuccessor"] = before.into();
     }
     action
+}
+
+/// One action of a multi-action row edit (see [`InnerTube::edit_rows`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowEdit {
+    /// Add a video even if the playlist holds it (no dedupe option).
+    Add(String),
+    /// Take out one row, by its own token.
+    Remove { video_id: String, set_video_id: String },
+    /// Move a row in front of another (`None`: to the end); both are row tokens.
+    MoveBefore { set_video_id: String, before: Option<String> },
+}
+
+fn row_action(edit: &RowEdit) -> serde_json::Value {
+    match edit {
+        RowEdit::Add(video_id) => {
+            serde_json::json!({ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id })
+        }
+        RowEdit::Remove { video_id, set_video_id } => serde_json::json!({
+            "action": "ACTION_REMOVE_VIDEO",
+            "setVideoId": set_video_id,
+            "removedVideoId": video_id,
+        }),
+        RowEdit::MoveBefore { set_video_id, before } => move_action(set_video_id, before.as_deref()),
+    }
+}
+
+/// A `browse/edit_playlist` request carrying several actions, in order.
+fn rows_body(context: Context, playlist_id: &str, edits: &[RowEdit]) -> serde_json::Value {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Body {
+        context: Context,
+        playlist_id: String,
+        actions: Vec<serde_json::Value>,
+    }
+    serde_json::to_value(Body {
+        context,
+        playlist_id: playlist_id.to_owned(),
+        actions: edits.iter().map(row_action).collect(),
+    })
+    .expect("a plain struct serialises")
 }
 
 fn save_playlist_path(saved: bool) -> &'static str {
@@ -1549,6 +1613,34 @@ mod tests {
         let to_end = move_action("SV1", None);
         assert_eq!(to_end["action"], "ACTION_MOVE_VIDEO_BEFORE");
         assert!(to_end.get("movedSetVideoIdSuccessor").is_none());
+    }
+
+    #[test]
+    fn several_row_edits_go_in_one_request_in_the_order_given() {
+        let (tube, client) = tube();
+        let edits = [
+            RowEdit::Add("new1".into()),
+            RowEdit::Remove { video_id: "old1".into(), set_video_id: "SV1".into() },
+            RowEdit::MoveBefore { set_video_id: "SV9".into(), before: Some("SV2".into()) },
+            RowEdit::MoveBefore { set_video_id: "SV8".into(), before: None },
+        ];
+        let body = rows_body(tube.context_for(&client), "PLabc", &edits);
+        assert_eq!(body["playlistId"], "PLabc");
+        assert_eq!(
+            body["actions"],
+            json!([
+                { "action": "ACTION_ADD_VIDEO", "addedVideoId": "new1" },
+                { "action": "ACTION_REMOVE_VIDEO", "setVideoId": "SV1", "removedVideoId": "old1" },
+                {
+                    "action": "ACTION_MOVE_VIDEO_BEFORE",
+                    "setVideoId": "SV9",
+                    "movedSetVideoIdSuccessor": "SV2"
+                },
+                { "action": "ACTION_MOVE_VIDEO_BEFORE", "setVideoId": "SV8" },
+            ])
+        );
+        // An add here never asks to skip a duplicate: a repeat is the caller's call.
+        assert!(body["actions"][0].get("dedupeOption").is_none());
     }
 
     #[test]
