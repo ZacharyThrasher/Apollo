@@ -25,7 +25,10 @@ Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $tmp | Out-Null
 $zip = Join-Path $tmp $name
 Invoke-WebRequest $zipUrl -OutFile $zip -UseBasicParsing
-$want = ((Invoke-WebRequest $sumUrl -UseBasicParsing).Content -split '\s+')[0].ToLower()
+# GitHub serves the .sha256 asset as octet-stream, so .Content is bytes, not text: decode it.
+$sumFile = Join-Path $tmp "$name.sha256"
+Invoke-WebRequest $sumUrl -OutFile $sumFile -UseBasicParsing
+$want = ((Get-Content $sumFile -Raw).Trim() -split '\s+')[0].TrimStart([char]0xFEFF).ToLower()
 if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne $want) { throw 'download does not match its checksum' }
 
 # Stop a running copy so its files can be replaced; never touches anything else.
