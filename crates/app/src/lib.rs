@@ -25,6 +25,7 @@ pub mod crate_more;
 pub mod crate_paste;
 pub mod dig;
 pub mod crate_swap;
+pub mod playlist_swap;
 pub mod explicit_marks;
 pub mod instant_playlist;
 pub mod assets;

@@ -88,6 +88,8 @@ pub enum Edit {
     Unsave,
     /// Taking back a playlist edit (Ctrl+Z).
     Undo,
+    /// Swapping a playlist's songs for another version of them.
+    Swap,
 }
 
 /// What a failed edit says: what happened in six words or fewer.
@@ -106,6 +108,7 @@ pub fn failure_text(edit: Edit, failure: WriteFailure) -> &'static str {
             Edit::Save => "Couldn't save to library",
             Edit::Unsave => "Couldn't remove from library",
             Edit::Undo => "Couldn't undo that",
+            Edit::Swap => "Couldn't swap songs",
         },
     }
 }
@@ -478,6 +481,134 @@ pub fn reorder(
         move_row(source, expect, collection, &step.token, step.before.as_deref(), &step.after)?;
     }
     Ok(())
+}
+
+/// One row of a playlist to take out and the song that takes its place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Swap {
+    pub out_video: String,
+    /// The row's own token.
+    pub out_token: String,
+    pub in_video: String,
+}
+
+/// What [`swap_rows`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Swapped {
+    /// For each pair asked, in order: the token of the row that took its place, or `None` when
+    /// the row was gone from the playlist and nothing was done for it.
+    pub tokens: Vec<Option<String>>,
+    /// Rows that landed at the end of the playlist instead of in their place (the moves that put
+    /// them back were refused).
+    pub at_end: usize,
+}
+
+/// Replace rows of a playlist the account owns with other songs, each in the place of the row it
+/// replaces, in as few requests as the service allows: one adds the new songs and takes the old
+/// rows out, one more moves the new rows into place (all the moves together; one by one when the
+/// service will not take them together).
+///
+/// The first request goes out once (the adds do not skip a song the playlist holds, so a repeat
+/// would add twice); a lost reply is settled by reading the playlist back, and what that cannot
+/// prove is a failure. Pairs whose row is no longer in the playlist are left out. The swap having
+/// landed, a move that fails is not a failure: the row stays at the end and `at_end` says so.
+pub fn swap_rows(
+    source: &dyn LibrarySource,
+    expect: &Option<String>,
+    collection: &Collection,
+    pairs: &[Swap],
+) -> Result<Swapped, WriteFailure> {
+    let playlist_id = collection.library_key();
+    editable(playlist_id)?;
+    guard(source, expect)?;
+    let mut out = Swapped { tokens: vec![None; pairs.len()], at_end: 0 };
+    if pairs.is_empty() {
+        return Ok(out);
+    }
+    let before = all_rows(source, collection).map_err(unread)?;
+    let current: Vec<String> = before.iter().filter_map(|r| r.occurrence.clone()).collect();
+    // A row with no token cannot be named to the service, so the playlist cannot be rearranged.
+    if current.len() != before.len() {
+        return Err(WriteFailure::Rejected);
+    }
+    let known: HashSet<String> = current.iter().cloned().collect();
+    let live: Vec<usize> = (0..pairs.len())
+        .filter(|&at| known.contains(&pairs[at].out_token))
+        .collect();
+    if live.is_empty() {
+        return Ok(out);
+    }
+    let adds: Vec<String> = live.iter().map(|&at| pairs[at].in_video.clone()).collect();
+    let removes: Vec<(String, String)> = live
+        .iter()
+        .map(|&at| (pairs[at].out_video.clone(), pairs[at].out_token.clone()))
+        .collect();
+    let made = match source.swap_playlist_rows(playlist_id, &adds, &removes) {
+        Ok(rows) => rows,
+        Err(failure) if failure.outcome_unknown() => Vec::new(),
+        Err(failure) => return Err(failure),
+    };
+    let new_tokens = match tokens_named(&made, &adds) {
+        Some(tokens) => tokens,
+        // The reply did not name every row (or was lost): the playlist says what is new.
+        None => {
+            let after = all_rows(source, collection).map_err(|_| WriteFailure::Unknown)?;
+            tokens_appeared(&after, &known, &adds).ok_or(WriteFailure::Unknown)?
+        }
+    };
+    for (&at, token) in live.iter().zip(&new_tokens) {
+        out.tokens[at] = Some(token.clone());
+    }
+
+    // The new rows are at the end; each belongs where the row it replaced was.
+    let gone: HashSet<&str> = removes.iter().map(|(_, token)| token.as_str()).collect();
+    let mut now: Vec<String> = current.iter().filter(|t| !gone.contains(t.as_str())).cloned().collect();
+    now.extend(new_tokens.iter().cloned());
+    let desired: Vec<String> = current
+        .iter()
+        .map(|token| {
+            live.iter()
+                .zip(&new_tokens)
+                .find(|(&at, _)| pairs[at].out_token == *token)
+                .map_or_else(|| token.clone(), |(_, new)| new.clone())
+        })
+        .collect();
+    let steps = apollo_domain::arrange::steps(&now, &desired);
+    if steps.is_empty() {
+        return Ok(out);
+    }
+    let moves: Vec<(String, Option<String>)> =
+        steps.iter().map(|s| (s.token.clone(), s.before.clone())).collect();
+    let together = match source.move_many_in_playlist(playlist_id, &moves) {
+        Ok(()) => true,
+        Err(failure) if failure.outcome_unknown() => all_rows(source, collection)
+            .map(|rows| {
+                let held: Vec<&str> = rows.iter().filter_map(|r| r.occurrence.as_deref()).collect();
+                held == desired.iter().map(String::as_str).collect::<Vec<_>>()
+            })
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    if together {
+        return Ok(out);
+    }
+    // One by one, from where the playlist stands now.
+    let Ok(rows) = all_rows(source, collection) else {
+        out.at_end = steps.len();
+        return Ok(out);
+    };
+    let held: Vec<String> = rows.iter().filter_map(|r| r.occurrence.clone()).collect();
+    let steps = apollo_domain::arrange::steps(&held, &desired);
+    let total = steps.len();
+    for (done, step) in steps.into_iter().enumerate() {
+        if move_row(source, expect, collection, &step.token, step.before.as_deref(), &step.after)
+            .is_err()
+        {
+            out.at_end = total - done;
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// Take back the making of a playlist that was made holding `videos`: the playlist is deleted

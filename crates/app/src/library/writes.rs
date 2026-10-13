@@ -56,6 +56,15 @@ pub enum WritesEvent {
         playlist_id: String,
         video_ids: Vec<String>,
     },
+    /// A swap of a playlist's songs for other versions was answered. `step` is its Ctrl+Z step
+    /// (none for a swap being taken back); `swapped` is how many rows took their places; `ok` is
+    /// false when the service did not take it.
+    PlaylistSwapSettled {
+        playlist_id: String,
+        step: Option<u64>,
+        swapped: usize,
+        ok: bool,
+    },
 }
 
 /// A short error, shown for [`NOTICE_FOR`].
@@ -861,6 +870,29 @@ impl LibraryWrites {
     /// Some rows of a removal did not go (a refused write ended it): they are not the step's.
     pub fn keep_removed_except(&mut self, id: u64, not_removed: &[String]) {
         self.log.keep_removed_except(id, not_removed);
+    }
+
+    /// A swap was answered: `tokens` are the rows that took the places (`None` altogether: the
+    /// service did not take it, and there is nothing to undo).
+    pub fn settle_swap(
+        &mut self,
+        playlist_id: &str,
+        step: Option<u64>,
+        tokens: Option<&[Option<String>]>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(step) = step {
+            match tokens {
+                Some(tokens) => self.log.settle_swapped(step, tokens),
+                None => self.log.drop_step(step),
+            }
+        }
+        cx.emit(WritesEvent::PlaylistSwapSettled {
+            playlist_id: playlist_id.to_owned(),
+            step,
+            swapped: tokens.map_or(0, |t| t.iter().flatten().count()),
+            ok: tokens.is_some(),
+        });
     }
 
     /// Songs taken back out of a playlist are no longer ones this session added to it.

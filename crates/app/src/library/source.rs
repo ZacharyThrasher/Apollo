@@ -345,6 +345,28 @@ pub trait LibrarySource: Send + Sync {
         Err(WriteFailure::Unsupported)
     }
 
+    /// Swap rows of a playlist in one request: add `adds` (videos, in order, even ones the
+    /// playlist holds) and take out `removes` (video id and row token). Sent once; the rows the add
+    /// made come back when the answer names them.
+    fn swap_playlist_rows(
+        &self,
+        _playlist_id: &str,
+        _adds: &[String],
+        _removes: &[(String, String)],
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
+    /// Several moves in one request, in order: each `(row, before)` as [`Self::move_in_playlist`].
+    /// A source that cannot batch them says `Unsupported` and the moves go one by one.
+    fn move_many_in_playlist(
+        &self,
+        _playlist_id: &str,
+        _moves: &[(String, Option<String>)],
+    ) -> Result<(), WriteFailure> {
+        Err(WriteFailure::Unsupported)
+    }
+
     /// Save a playlist or album to the library (`saved`) or take it out, by its save target.
     fn set_saved(&self, _save_id: &str, _saved: bool) -> Result<(), WriteFailure> {
         Err(WriteFailure::Unsupported)

@@ -35,9 +35,11 @@ use super::writes::{LibraryWrites, WritesEvent};
 mod arrange;
 mod artist;
 mod stats;
+mod swapping;
 mod undoing;
 pub use arrange::{Arrange, Repeat};
 pub use artist::MixKind;
+pub use swapping::{SwapFound, SwapPage};
 use crate::art::{sized_thumbnail, DecodedArt};
 use crate::page_cache::{keys, PageCache, Ticket};
 use crate::player::{PlayerModel, Status};
@@ -83,6 +85,7 @@ const SONGS_BROWSE_ID: &str = "apollo:library-songs";
 
 /// What Ctrl+Z says when songs it put back could not go where they were.
 const PUT_BACK_AT_END: &str = "Put back at the end instead";
+const SWAP_AT_END: &str = "Some songs landed at the end";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
@@ -273,6 +276,13 @@ enum PageEdit {
     /// Taking back moves: the rows go back to the order they had (their tokens, in that order).
     Reorder {
         order: Vec<String>,
+    },
+    /// Songs swapped for another version of themselves, each in its place (or, with no `step`,
+    /// the swap taken back).
+    Swap {
+        pairs: Vec<edits::Swap>,
+        /// The Ctrl+Z step this swap is, when a person asked for it.
+        step: Option<u64>,
     },
     Move {
         occurrence: String,
@@ -473,7 +483,7 @@ impl LibraryModel {
                 video_id,
                 added,
             } => m.playlist_add_settled(playlist_id, video_id, *added, cx),
-            WritesEvent::PlaylistAddedMany { .. } => {}
+            WritesEvent::PlaylistAddedMany { .. } | WritesEvent::PlaylistSwapSettled { .. } => {}
         })
         .detach();
         let mut model = Self {
@@ -1878,6 +1888,8 @@ impl LibraryModel {
             PageEdit::Unadd { .. } | PageEdit::Restore { .. } | PageEdit::Reorder { .. } => {
                 Edit::Undo
             }
+            PageEdit::Swap { step: Some(_), .. } => Edit::Swap,
+            PageEdit::Swap { step: None, .. } => Edit::Undo,
         };
         let sent = edit.clone();
         cx.spawn(async move |this, cx| {
@@ -1885,7 +1897,7 @@ impl LibraryModel {
                 .background_executor()
                 .spawn(async move {
                     let done = |r: Result<(), apollo_domain::library::WriteFailure>| {
-                        r.map(|()| edits::Restored::default())
+                        r.map(|()| (edits::Restored::default(), None))
                     };
                     match edit {
                         PageEdit::Remove {
@@ -1904,7 +1916,11 @@ impl LibraryModel {
                             &occurrence,
                         )),
                         PageEdit::Restore { items } => {
-                            edits::restore(&*source, &token, &collection, &items)
+                            edits::restore(&*source, &token, &collection, &items).map(|p| (p, None))
+                        }
+                        PageEdit::Swap { pairs, .. } => {
+                            edits::swap_rows(&*source, &token, &collection, &pairs)
+                                .map(|s| (edits::Restored::default(), Some(s)))
                         }
                         PageEdit::Reorder { order } => {
                             done(edits::reorder(&*source, &token, &collection, &order))
@@ -1939,12 +1955,22 @@ impl LibraryModel {
         key: &str,
         kind: Edit,
         sent: PageEdit,
-        result: Result<edits::Restored, apollo_domain::library::WriteFailure>,
+        result: Result<(edits::Restored, Option<edits::Swapped>), apollo_domain::library::WriteFailure>,
         cx: &mut Context<Self>,
     ) {
         // Whatever a read cached while the write was out is not the playlist as it is now.
         edits::Stale::Collection(key.to_owned()).invalidate(cx);
-        match result {
+        // A swap is settled for whoever is waiting on it, whichever way it went.
+        if let PageEdit::Swap { step, .. } = &sent {
+            let tokens = result.as_ref().ok().and_then(|(_, swapped)| swapped.as_ref());
+            self.writes.update(cx, |w, cx| {
+                w.settle_swap(key, *step, tokens.map(|s| s.tokens.as_slice()), cx)
+            });
+            if tokens.is_some_and(|s| s.at_end > 0) {
+                self.writes.update(cx, |w, cx| w.raise(SWAP_AT_END, cx));
+            }
+        }
+        match result.map(|(placed, _)| placed) {
             Ok(placed) => {
                 if let Some(queue) = self.edit_queues.get_mut(key) {
                     queue.busy = false;

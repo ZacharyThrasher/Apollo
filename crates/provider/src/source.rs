@@ -8,6 +8,7 @@ use apollo_domain::library::{
 use apollo_domain::links::ExternalLink;
 use apollo_domain::listing::{LoadFailure, Page};
 use apollo_domain::model::BrowseId;
+use innertube::endpoints::RowEdit;
 use innertube::{
     AddedVideo, Clients, InnerTube, PlaybackTracking, Rating, Session, WatchtimePing, YouTubeClient,
     METADATA_CLIENT,
@@ -788,6 +789,50 @@ impl InnerTubeSource {
                 before_set_video_id,
             )
             .await
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// Swap rows of a playlist the account owns in one request: add `adds` (videos, in order) and
+    /// take out `removes` (video id and row token). Sent once; the rows the add made come back.
+    pub async fn swap_rows(
+        &self,
+        playlist_id: &str,
+        adds: &[String],
+        removes: &[(String, String)],
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
+        let edits: Vec<RowEdit> = adds
+            .iter()
+            .map(|v| RowEdit::Add(v.clone()))
+            .chain(removes.iter().map(|(video_id, set_video_id)| RowEdit::Remove {
+                video_id: video_id.clone(),
+                set_video_id: set_video_id.clone(),
+            }))
+            .collect();
+        self.tube
+            .edit_rows(&self.client, bare_playlist_id(playlist_id), &edits)
+            .await
+            .map(added_rows)
+            .map_err(|e| classify_write(&e))
+    }
+
+    /// Move several rows in one request, in order (each `(row, before)` as
+    /// [`Self::move_in_playlist`]).
+    pub async fn move_rows(
+        &self,
+        playlist_id: &str,
+        moves: &[(String, Option<String>)],
+    ) -> Result<(), WriteFailure> {
+        let edits: Vec<RowEdit> = moves
+            .iter()
+            .map(|(set_video_id, before)| RowEdit::MoveBefore {
+                set_video_id: set_video_id.clone(),
+                before: before.clone(),
+            })
+            .collect();
+        self.tube
+            .edit_rows(&self.client, bare_playlist_id(playlist_id), &edits)
+            .await
+            .map(|_| ())
             .map_err(|e| classify_write(&e))
     }
 

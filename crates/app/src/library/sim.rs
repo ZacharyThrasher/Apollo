@@ -154,6 +154,11 @@ struct SimState {
     /// Counter for the tokens of rows put back by `add_again_to_playlist`.
     next_row: usize,
     writes: WriteBehaviour,
+    /// The service refuses several moves in one request (they then go one by one).
+    refuse_batched_moves: bool,
+    /// Songs the service knows in full (artists, length, explicit flag), by video id: a swap
+    /// puts these in a playlist in place of a plain row.
+    catalog: HashMap<String, TrackRow>,
     /// Makes `playlists_for` fail (the picker's error state).
     playlists: Option<LoadFailure>,
     /// Writes the simulation received, `(what, video id)`, for tests.
@@ -226,6 +231,8 @@ impl SimState {
             added: Vec::new(),
             next_row: 0,
             writes: WriteBehaviour::default(),
+            refuse_batched_moves: false,
+            catalog: HashMap::new(),
             playlists: None,
             log: Vec::new(),
             home: HomeBehaviour::default(),
@@ -303,6 +310,11 @@ impl SimLibrary {
     /// How the next writes are answered (tests).
     pub fn set_write_behaviour(&self, behaviour: WriteBehaviour) {
         self.state().writes = behaviour;
+    }
+
+    /// Whether several moves in one request are refused (tests).
+    pub fn refuse_batched_moves(&self, refuse: bool) {
+        self.state().refuse_batched_moves = refuse;
     }
 
     /// How the home feed is answered from now on (tests).
@@ -465,6 +477,30 @@ impl SimLibrary {
             })
             .collect();
         self.state().edited_rows.insert(bare_id.to_owned(), rows);
+    }
+
+    /// Make a playlist of the account hold exactly these rows, in this order, each with a token of
+    /// its own, and teach the service these songs (see [`Self::teach`]).
+    pub fn preset_playlist_rows(&self, bare_id: &str, rows: &[TrackRow]) {
+        self.teach(rows);
+        let rows = rows
+            .iter()
+            .enumerate()
+            .map(|(n, row)| {
+                let mut row = row.clone();
+                row.occurrence = Some(format!("occ-preset-{bare_id}-{n}"));
+                row
+            })
+            .collect();
+        self.state().edited_rows.insert(bare_id.to_owned(), rows);
+    }
+
+    /// Songs the service knows in full: a swap that adds one of these shows it as given.
+    pub fn teach(&self, rows: &[TrackRow]) {
+        let mut state = self.state();
+        for row in rows {
+            state.catalog.insert(row.track.video_id.as_str().to_owned(), row.clone());
+        }
     }
 
     /// Fill Library > Songs with [`LONG_SONGS`] generated songs (paged).
@@ -1771,6 +1807,71 @@ impl LibrarySource for SimLibrary {
                 rows.insert(at, row);
                 self.state().edited_rows.insert(playlist_id.to_owned(), rows);
             }
+        }
+        reply
+    }
+
+    fn swap_playlist_rows(
+        &self,
+        playlist_id: &str,
+        adds: &[String],
+        removes: &[(String, String)],
+    ) -> Result<Vec<AddedRow>, WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        let lands = self.write_answer(format!("swap-rows:{playlist_id}"), &adds.join(","));
+        let applies = lands.is_ok() || self.state().writes == WriteBehaviour::LandsReplyLost;
+        let mut made = Vec::new();
+        if applies {
+            let mut rows = self.rows(&format!("VL{playlist_id}")).unwrap_or_default();
+            let mut state = self.state();
+            for video_id in adds {
+                state.next_row += 1;
+                let token = format!("occ-swap-{playlist_id}-{}", state.next_row);
+                let mut row = state
+                    .catalog
+                    .get(video_id)
+                    .cloned()
+                    .unwrap_or_else(|| song_row(video_id, rows.len()));
+                row.occurrence = Some(token.clone());
+                rows.push(row);
+                made.push(AddedRow { video_id: video_id.clone(), set_video_id: token });
+            }
+            rows.retain(|r| {
+                !removes.iter().any(|(_, token)| r.occurrence.as_deref() == Some(token.as_str()))
+            });
+            state.edited_rows.insert(playlist_id.to_owned(), rows);
+        }
+        lands.map(|_| made)
+    }
+
+    fn move_many_in_playlist(
+        &self,
+        playlist_id: &str,
+        moves: &[(String, Option<String>)],
+    ) -> Result<(), WriteFailure> {
+        self.wait(PAGE_LATENCY);
+        if self.state().refuse_batched_moves {
+            self.state().log.push((format!("move-many:{playlist_id}"), "refused".into()));
+            return Err(WriteFailure::Rejected);
+        }
+        let subject = moves.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(",");
+        let (applies, reply) = self.begin_write(format!("move-many:{playlist_id}"), &subject);
+        if applies {
+            let mut rows = self.rows(&format!("VL{playlist_id}")).unwrap_or_default();
+            for (occurrence, before) in moves {
+                if let Some(from) = rows
+                    .iter()
+                    .position(|r| r.occurrence.as_deref() == Some(occurrence.as_str()))
+                {
+                    let row = rows.remove(from);
+                    let at = before
+                        .as_deref()
+                        .and_then(|b| rows.iter().position(|r| r.occurrence.as_deref() == Some(b)))
+                        .unwrap_or(rows.len());
+                    rows.insert(at, row);
+                }
+            }
+            self.state().edited_rows.insert(playlist_id.to_owned(), rows);
         }
         reply
     }

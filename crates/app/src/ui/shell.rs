@@ -14,6 +14,7 @@ use gpui::{
 use crate::account::AccountModel;
 use crate::blocked_artists::{BlockHandle, BlockModel};
 use crate::crate_list::{CrateEvent, CrateHandle, CrateModel};
+use crate::playlist_swap::{PlaylistSwapEvent, PlaylistSwapHandle, PlaylistSwapModel};
 use crate::recent::{RecentHandle, RecentModel};
 use crate::explore::ExploreModel;
 use crate::home::{Access, HomeModel};
@@ -384,6 +385,27 @@ impl Shell {
         })
         .detach();
         cx.set_global(CrateHandle(crate_model.clone()));
+        // Swapping a playlist's songs for explicit or clean versions: the same tip pill.
+        let playlist_swap = cx.new(|_| PlaylistSwapModel::new());
+        playlist_swap.update(cx, |m, cx| m.follow(&writes, cx));
+        cx.subscribe(&playlist_swap, |this, _, event: &PlaylistSwapEvent, cx| match event {
+            PlaylistSwapEvent::Progress { want, done, total } => {
+                this.show_tip(crate::crate_swap::progress_text(*want, *done, *total).into(), cx)
+            }
+            PlaylistSwapEvent::Finished { want, swapped, total, already, unreachable, paused } => {
+                this.show_tip(
+                    crate::playlist_swap::finished_text(
+                        *want, *swapped, *total, *already, *unreachable, *paused,
+                    )
+                    .into(),
+                    cx,
+                )
+            }
+            PlaylistSwapEvent::Failed => this.show_tip("Couldn't swap songs".into(), cx),
+            PlaylistSwapEvent::Busy => this.show_tip("Still finding versions".into(), cx),
+        })
+        .detach();
+        cx.set_global(PlaylistSwapHandle(playlist_swap.clone()));
         let recent_model = cx.new(|_| RecentModel::new());
         cx.set_global(RecentHandle(recent_model.clone()));
         crate_model.update(cx, |m, cx| {
@@ -2015,6 +2037,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.crate_model.update(cx, |m, _| m.install_search(search.clone()));
+        if let Some(swap) = crate::playlist_swap::handle(cx) {
+            swap.update(cx, |m, _| m.install_search(search.clone()));
+        }
         self.search_model.update(cx, |m, cx| m.install(search, cx));
         self.thumbs.update(cx, |t, cx| t.install(thumbs, cx));
     }
