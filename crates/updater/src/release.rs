@@ -51,7 +51,10 @@ pub fn parse_latest(json: &str, repo: &str) -> Option<Release> {
 
 /// The first hex token of a `.sha256` file (`<hash>  <name>` or just `<hash>`), lower-cased.
 pub fn parse_checksum(text: &str) -> Option<String> {
-    let token = text.split_whitespace().next()?;
+    let token = text
+        .trim_start_matches('\u{feff}')
+        .split_whitespace()
+        .next()?;
     (token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()))
         .then(|| token.to_ascii_lowercase())
 }
@@ -127,6 +130,12 @@ mod tests {
             parse_checksum(&format!("{hash}  Apollo.zip\n")),
             Some("a".repeat(64))
         );
+        // As the workflow writes it and GitHub serves it: bytes, maybe a BOM, maybe CRLF.
+        assert_eq!(
+            parse_checksum(&format!("\u{feff}{hash}  Apollo-0.1.2-win-x64.zip\r\n")),
+            Some("a".repeat(64))
+        );
+        assert_eq!(parse_checksum(&hash), Some("a".repeat(64)));
         assert_eq!(parse_checksum("short"), None);
         assert_eq!(parse_checksum(&"z".repeat(64)), None);
         assert_eq!(parse_checksum(""), None);
